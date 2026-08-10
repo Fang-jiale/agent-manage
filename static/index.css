@@ -984,3 +984,28 @@ body.compact .agent-card { padding: 8px 10px; }
 
 /* send 按钮 emerald 阴影统一（覆盖原 indigo 残留） */
 .send-btn { box-shadow: 0 2px 8px rgba(16,185,129,.25); }
+
+/* 设置面板开关 */
+.switch { display: inline-flex; align-items: center; cursor: pointer; position: relative; }
+.switch input { position: absolute; opacity: 0; pointer-events: none; }
+.switch-track {
+    display: inline-block;
+    width: 36px; height: 20px;
+    background: var(--bg-active);
+    border-radius: 999px;
+    position: relative;
+    transition: background .15s;
+}
+.switch-track::after {
+    content: '';
+    position: absolute;
+    top: 2px; left: 2px;
+    width: 16px; height: 16px;
+    background: white;
+    border-radius: 50%;
+    box-shadow: 0 1px 2px rgba(0,0,0,.2);
+    transition: transform .15s;
+}
+.switch input:checked + .switch-track { background: var(--accent); }
+.switch input:checked + .switch-track::after { transform: translateX(16px); }
+.switch input:focus-visible + .switch-track { outline: 2px solid var(--accent); outline-offset: 2px; }

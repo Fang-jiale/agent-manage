@@ -32,6 +32,7 @@
 - AgentClient 通过 `GET /capabilities` 发现能力（返回描述性标签，见 5.2 注册消息结构）
 - AgentClient 通过 `POST /tasks` 下发任务；请求体即 `task.create` 的 `params`
 - Agent 通过 `text/event-stream` 返回流式结果，每个 `data:` 行是一条 JSON-RPC 通知（如 `stream.chunk`）
+- AgentClient 在用户点停止 / task 超时时会 `POST /tasks/:id/cancel`；Agent 应早停当前任务并兜底发完 `confirm_cancelled`（若有挂起确认）+ `done:true` chunk（reason: `task_cancelled`）。未实现的旧 Agent 不影响取消——SSE 流会被 client 主动断开，仅终止态 chunk 丢失
 - 可选 `GET /health` 健康检查
 
 对于持久连接（如 WebSocket 或长连接 SSE），连接建立后需先进行 `lifecycle.initialize` 能力协商；单次 HTTP 调用场景可通过 `GET /capabilities` 完成静态发现。
@@ -410,7 +411,7 @@ Agent 在运行中能力发生变化时主动通知。等价于 MCP 的 `notific
 
 若 stdin 已关闭（子进程退出），跳过补发。HTTP 适配器则视本地 Agent 实现是否暴露 cancel 接口而定，建议同样补发。
 
-由于审批不设超时，"用户点停止"是待决任务**唯一**的退出路径——用户不点，子进程会一直等。可另保留一个较长任务超时（默认 5 分钟，可配 `-task-timeout`）作为兜底。
+由于审批不设超时，"用户点停止"是待决任务**唯一**的退出路径——用户不点，子进程会一直等。可另保留一个较长任务超时（默认 30 分钟，可配 `-task-timeout`）作为兜底。
 
 ### 6.4 任务完成
 

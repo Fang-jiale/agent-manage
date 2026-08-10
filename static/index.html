@@ -174,6 +174,13 @@
                 </select>
             </div>
             <div class="settings-row">
+                <div><label>任务完成通知</label><div class="settings-desc">后台或非活动标签下任务完成时弹系统通知</div></div>
+                <label class="switch">
+                    <input type="checkbox" id="notifyToggle">
+                    <span class="switch-track"></span>
+                </label>
+            </div>
+            <div class="settings-row">
                 <div><label>修改密码</label><div class="settings-desc">修改后其他设备的登录态将失效</div></div>
                 <div class="pwd-form">
                     <input type="password" id="oldPwdInput" placeholder="当前密码" autocomplete="current-password">
@@ -681,7 +688,8 @@
                 drawerOverlay: document.getElementById('drawerOverlay'),
                 agentDrawer: document.getElementById('agentDrawer'),
                 drawerClose: document.getElementById('drawerClose'),
-                drawerBody: document.getElementById('drawerBody')
+                drawerBody: document.getElementById('drawerBody'),
+                notifyToggle: document.getElementById('notifyToggle')
             };
 
             /* ---------- state ---------- */
@@ -689,7 +697,7 @@
             function loadState() {
                 const fallback = {
                     token: '', user: null, agents: {}, sessions: {}, currentAgentId: null, currentSessionId: null,
-                    settings: { themeMode: 'auto', sendWith: 'enter', density: 'comfortable' },
+                    settings: { themeMode: 'auto', sendWith: 'enter', density: 'comfortable', notifyOnDone: false },
                     sidebarCollapsed: false
                 };
                 try {
@@ -990,6 +998,7 @@
                 els.themeSelect.value = s.themeMode;
                 els.sendWithSelect.value = s.sendWith;
                 els.densitySelect.value = s.density;
+                els.notifyToggle.checked = !!s.notifyOnDone && Notification.permission === 'granted';
                 applyTheme(resolveTheme());
                 document.body.classList.toggle('compact', s.density === 'compact');
             }
@@ -1163,6 +1172,36 @@
                     setProgress(null);
                 }
                 updateInputState();
+            }
+
+            // 仅在页面隐藏或当前会话不在前台时弹通知，避免打扰正在盯屏的用户
+            function notifyTaskCompletion(task, params, durationMs) {
+                if (!state.settings.notifyOnDone) return;
+                if (!('Notification' in window) || Notification.permission !== 'granted') return;
+                const sessionVisible = task.agentId === state.currentAgentId
+                    && task.sessionId === state.currentSessionId
+                    && !document.hidden;
+                if (sessionVisible) return;
+                const agentName = state.agents[task.agentId]?.name || task.agentId;
+                const title = params.error ? `${agentName} · 任务出错` : `${agentName} · 任务完成`;
+                const secs = Math.max(1, Math.round(durationMs / 1000));
+                const body = params.error
+                    ? (typeof params.error === 'string' ? params.error : '任务异常结束')
+                    : `用时 ${secs}s`;
+                try {
+                    const n = new Notification(title, { body, tag: task.agentId + ':' + task.sessionId });
+                    n.onclick = () => {
+                        window.focus();
+                        if (state.currentAgentId !== task.agentId) {
+                            selectAgent(task.agentId);
+                            // 等 sessions 加载后再切到目标会话
+                            setTimeout(() => selectSession(task.sessionId), 200);
+                        } else {
+                            selectSession(task.sessionId);
+                        }
+                        n.close();
+                    };
+                } catch { /* 一些浏览器在 SW 模式下 Notification 不可用，忽略 */ }
             }
 
             /* ---------- rendering: agents & sessions ---------- */
@@ -2187,7 +2226,7 @@
                 }
                 task.done = true;
                 pendingTasks.delete(taskId);
-                updateInputState();
+                syncChatChrome();
             }
 
             function agentFromInfo(a, existing) {
@@ -2289,6 +2328,9 @@
                     for (const [reqId, tid] of pendingRequests) {
                         if (tid === taskId) pendingRequests.delete(reqId);
                     }
+                    notifyTaskCompletion(task, params, durationMs);
+                    // 修复：done 路径之前不刷输入态——typing 指示器卡住、sendBtn 不解禁
+                    syncChatChrome();
                 }
             }
 
@@ -2296,10 +2338,12 @@
             const TASK_STALE_MS = 60_000;
             setInterval(() => {
                 const now = Date.now();
+                let changed = false;
                 for (const [taskId, task] of pendingTasks) {
                     if (task.done || now - task.lastActivity <= TASK_STALE_MS) continue;
                     task.done = true;
                     pendingTasks.delete(taskId);
+                    changed = true;
                     const session = state.sessions[task.agentId]?.[task.sessionId];
                     if (session) {
                         updateAssistantMessage(session, task.messageId,
@@ -2307,6 +2351,7 @@
                             Date.now() - (task.startTime || task.lastActivity));
                     }
                 }
+                if (changed) syncChatChrome();
             }, 10_000);
 
             function normalizeChunk(params, task) {
@@ -2443,6 +2488,7 @@
             }
 
             function stopCurrentTask() {
+                let changed = false;
                 for (const [taskId, task] of pendingTasks) {
                     if (!task.done) {
                         send({
@@ -2457,9 +2503,11 @@
                                 Date.now() - (task.startTime || task.lastActivity));
                         }
                         task.done = true;
+                        pendingTasks.delete(taskId);
+                        changed = true;
                     }
                 }
-                updateInputState();
+                if (changed) syncChatChrome();
             }
 
             /* ---------- login & events ---------- */
@@ -2555,6 +2603,25 @@
                     state.settings.density = els.densitySelect.value;
                     applySettings(); saveState();
                 });
+                els.notifyToggle.addEventListener('change', async () => {
+                    if (els.notifyToggle.checked) {
+                        if (!('Notification' in window)) {
+                            showToast('当前浏览器不支持通知', 'warning');
+                            els.notifyToggle.checked = false;
+                            return;
+                        }
+                        if (Notification.permission !== 'granted') {
+                            const perm = await Notification.requestPermission();
+                            if (perm !== 'granted') {
+                                showToast('已取消：未授权通知', 'warning');
+                                els.notifyToggle.checked = false;
+                                return;
+                            }
+                        }
+                    }
+                    state.settings.notifyOnDone = els.notifyToggle.checked;
+                    saveState();
+                });
 
                 els.drawerClose.addEventListener('click', closeDrawer);
                 els.drawerOverlay.addEventListener('click', closeDrawer);
@@ -2593,7 +2660,7 @@
                     }
                 });
                 els.messageInput.addEventListener('input', () => {
-                    els.sendBtn.disabled = (!els.messageInput.value.trim() && composerFiles.length === 0) || !getCurrentSession();
+                    updateInputState();
                     els.messageInput.style.height = 'auto';
                     els.messageInput.style.height = Math.min(els.messageInput.scrollHeight, 200) + 'px';
                 });

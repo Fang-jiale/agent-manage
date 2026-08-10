@@ -80,6 +80,9 @@ function composeReply(content: string, attachments: Attachment[], history: proto
 }
 
 export function createLocalAgentServer() {
+  // task_id → 当前 SSE 响应；cancel 时用来打断流式输出
+  const inFlight = new Map<string, { cancelled: boolean; res: http.ServerResponse }>();
+
   return http.createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
 
@@ -91,6 +94,20 @@ export function createLocalAgentServer() {
           { type: "chat", name: "general", description: "通用对话能力" },
         ],
       }));
+      return;
+    }
+
+    // 取消任务：client.ts abort 后会 POST 这里，让在跑的 SSE 早停。
+    const cancelMatch = url.pathname.match(/^\/tasks\/([^/]+)\/cancel$/);
+    if (cancelMatch) {
+      if (req.method !== "POST") {
+        res.writeHead(405).end("method not allowed");
+        return;
+      }
+      const taskID = decodeURIComponent(cancelMatch[1]);
+      const entry = inFlight.get(taskID);
+      if (entry) entry.cancelled = true;
+      res.writeHead(204).end();
       return;
     }
 
@@ -114,28 +131,53 @@ export function createLocalAgentServer() {
         Connection: "keep-alive",
       });
 
-      const attachments = (agentReq.metadata?.attachments as Attachment[] | undefined) ?? [];
-      const history = (agentReq.metadata?.history as proto.ChatMessage[] | undefined) ?? agentReq.history ?? [];
-      const reply = composeReply(agentReq.content ?? "", attachments, history);
-      const STEP = 6;
-      const total = Math.ceil(reply.length / STEP);
+      const entry = { cancelled: false, res };
+      if (agentReq.task_id) inFlight.set(agentReq.task_id, entry);
 
-      for (let i = 0; i < total; i++) {
-        const piece = reply.slice(i * STEP, (i + 1) * STEP);
-        const chunk: proto.LocalAgentChunk = {
+      const writeChunk = (chunk: proto.LocalAgentChunk): void => {
+        if (res.writableEnded) return;
+        const msg = proto.newNotification("stream.chunk", chunk);
+        res.write(`data: ${JSON.stringify(msg)}\n\n`);
+      };
+
+      try {
+        const attachments = (agentReq.metadata?.attachments as Attachment[] | undefined) ?? [];
+        const history = (agentReq.metadata?.history as proto.ChatMessage[] | undefined) ?? agentReq.history ?? [];
+        const reply = composeReply(agentReq.content ?? "", attachments, history);
+        const STEP = 6;
+        const total = Math.ceil(reply.length / STEP);
+
+        for (let i = 0; i < total; i++) {
+          if (entry.cancelled) break;
+          const piece = reply.slice(i * STEP, (i + 1) * STEP);
+          const chunk: proto.LocalAgentChunk = {
+            type: proto.CHUNK_TYPE_TEXT,
+            task_id: agentReq.task_id,
+            session_id: agentReq.session_id,
+            context_id: agentReq.context_id,
+            content: proto.textContent(piece),
+            done: false,
+          };
+          chunk.percentage = ((i + 1) / total) * 100;
+          writeChunk(chunk);
+          await sleep(30);
+        }
+
+        // 终态 chunk：正常跑完 done:true；被取消发 done:true + reason=task_cancelled
+        const finalChunk: proto.LocalAgentChunk = {
           type: proto.CHUNK_TYPE_TEXT,
           task_id: agentReq.task_id,
           session_id: agentReq.session_id,
           context_id: agentReq.context_id,
-          content: proto.textContent(piece),
-          done: i === total - 1,
+          content: entry.cancelled ? proto.textContent("已取消") : proto.textContent(""),
+          done: true,
         };
-        chunk.percentage = ((i + 1) / total) * 100;
-        const msg = proto.newNotification("stream.chunk", chunk);
-        res.write(`data: ${JSON.stringify(msg)}\n\n`);
-        await sleep(30);
+        if (entry.cancelled) finalChunk.reason = proto.CONFIRM_CANCEL_REASON_TASK_CANCELLED;
+        writeChunk(finalChunk);
+      } finally {
+        if (agentReq.task_id) inFlight.delete(agentReq.task_id);
+        if (!res.writableEnded) res.end();
       }
-      res.end();
       return;
     }
 

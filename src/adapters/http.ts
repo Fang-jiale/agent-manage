@@ -23,12 +23,34 @@ export class HTTPAdapter implements LocalAgentAdapter {
   }
 
   // POSTs the request to /tasks and streams JSON-RPC stream.chunk SSE chunks back.
+  // 取消语义：AbortSignal abort 时显式 POST /tasks/:id/cancel，让 local-agent 早停
+  // 并兜底发 done:true + reason；不把 signal 直接传给 fetch——否则 abort 一来 SSE 流
+  // 立刻断，local-agent 终态 chunk 反而读不到（与 stdio 行为对齐：等 done 才关 queue）。
+  // 安全网：cancel POST 后 5s 仍无 done（local-agent 旧版/挂死）才硬 abort 流。
   async send(req: proto.LocalAgentRequest, signal: AbortSignal): Promise<AsyncQueue<proto.LocalAgentChunk>> {
+    const hardCtl = new AbortController();
+    const taskID = req.task_id;
+    const cancelled = { fired: false };
+    const onAbort = (): void => {
+      if (cancelled.fired || !taskID) return;
+      cancelled.fired = true;
+      fetch(`${this.baseURL}/tasks/${encodeURIComponent(taskID)}/cancel`, { method: "POST" })
+        .catch(() => { /* local-agent 不支持 cancel 端点（旧版），忽略 */ });
+      // 5s 安全网：cancel 已发，给 local-agent 时间发完终态 chunk；超时则硬断
+      const t = setTimeout(() => hardCtl.abort(), 5000);
+      t.unref();
+    };
+    if (signal.aborted) {
+      onAbort();
+    } else {
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+
     const resp = await fetch(`${this.baseURL}/tasks`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(req),
-      signal,
+      signal: hardCtl.signal,
     });
     if (resp.status !== 200 || !resp.body) {
       throw new Error(`local agent returned HTTP ${resp.status}`);

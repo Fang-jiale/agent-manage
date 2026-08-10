@@ -28,7 +28,7 @@ function loadClientConfig(): ClientConfig {
     { name: "token", type: "string" as const, default: envString("AGENT_MANAGE_TOKEN", "") },
     { name: "key", type: "string" as const, default: envString("AGENT_MANAGE_DEVICE_KEY", "") },
     { name: "log-level", type: "string" as const, default: envString("AGENT_MANAGE_LOG_LEVEL", "info") },
-    { name: "task-timeout", type: "duration" as const, default: String(envDurationMs("AGENT_MANAGE_TASK_TIMEOUT", 300_000)) },
+    { name: "task-timeout", type: "duration" as const, default: String(envDurationMs("AGENT_MANAGE_TASK_TIMEOUT", 1_800_000)) },
   ];
   const values = parseFlags(specs);
   // 二选一：长期运行的 agent 推荐设备密钥（-key），JWT 会过期
@@ -42,7 +42,7 @@ function loadClientConfig(): ClientConfig {
   }
   let taskTimeoutMs = Number(values["task-timeout"]);
   if (Number.isNaN(taskTimeoutMs)) {
-    taskTimeoutMs = parseDurationMs(values["task-timeout"]) ?? 300_000;
+    taskTimeoutMs = parseDurationMs(values["task-timeout"]) ?? 1_800_000;
   }
   return {
     gateway: values["gateway"],

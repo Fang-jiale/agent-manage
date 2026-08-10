@@ -355,7 +355,7 @@ data: {"jsonrpc":"2.0","method":"stream.chunk","params":{"task_id":"...","type":
 | `-log-level` | 日志级别 | `info` |
 | `-agent-timeout` | Agent 心跳超时 | `90s` |
 | `-user-timeout` | 用户心跳超时 | `120s` |
-| `-task-timeout` | 任务超时 | `5m` |
+| `-task-timeout` | 任务超时 | `30m` |
 | `-database-url` | MySQL 连接串 | `mysql://ywmatrix:ywmatrix_dev@localhost:3306/ywmatrix` |
 | `-jwt-secret` | JWT 签名密钥（**生产必填**） | 空（随机生成，重启后 token 全失效） |
 | `-jwt-ttl` | JWT 有效期 | `7d` |
@@ -381,7 +381,7 @@ data: {"jsonrpc":"2.0","method":"stream.chunk","params":{"task_id":"...","type":
 | `-token` | 用户 JWT（通过 `node src/login.ts` 获取），随网关 `-jwt-ttl` 过期 | 无（与 `-key` 二选一） |
 | `-key` | 设备密钥（`amk_` 前缀，管理后台「设备密钥」页创建），不过期、可吊销，长期运行的 Agent 推荐 | 无（与 `-token` 二选一） |
 | `-log-level` | 日志级别 | `info` |
-| `-task-timeout` | 任务超时 | `5m` |
+| `-task-timeout` | 任务超时 | `30m` |
 
 ### local-agent
 

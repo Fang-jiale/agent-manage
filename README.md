@@ -113,7 +113,7 @@ node src/gateway.ts
 - `-log-level`: 日志级别（debug/info/warn/error），默认 `info`
 - `-agent-timeout`: Agent 心跳超时，默认 `90s`（毫秒值亦可）
 - `-user-timeout`: 用户心跳超时，默认 `120s`
-- `-task-timeout`: 任务超时，默认 `5m`
+- `-task-timeout`: 任务超时，默认 `30m`（编码类长任务足够；旧默认 5m 偏短）
 - `-database-url`: MySQL 连接串，默认 `mysql://ywmatrix:ywmatrix_dev@localhost:3306/ywmatrix`
 - `-jwt-secret`: JWT 签名密钥（**生产必须设置**，缺省时每次启动随机生成，重启后所有 token 失效）
 - `-jwt-ttl`: JWT 有效期，默认 `7d`
@@ -139,7 +139,7 @@ node src/gateway.ts
 - `-token`: 用户 JWT（通过 `node src/login.ts` 获取）；会随 `-jwt-ttl` 过期
 - `-key`: 设备密钥（`amk_` 前缀，管理后台「设备密钥」页创建）；**长期运行的 Agent 推荐用密钥**，不过期、可吊销，与 `-token` 二选一
 - `-log-level`: 日志级别，默认 `info`
-- `-task-timeout`: 任务超时，默认 `5m`
+- `-task-timeout`: 任务超时，默认 `30m`
 
 ### local-agent
 
