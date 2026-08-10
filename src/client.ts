@@ -102,32 +102,6 @@ function translateLifecycleEvent(agentID: string, ev: LocalAgentEvent): proto.Me
         capabilities: params.capabilities,
       } satisfies proto.CapabilitiesUpdatedParams);
     }
-    case "stream.chunk": {
-      // shim 在 send() 已返回后发出的"事后"chunk（目前仅 confirm_cancelled）。
-      // 没有对应的 for-await 消费者，必须经 events 流旁路送到 gateway。
-      const chunk = (ev.params ?? {}) as proto.LocalAgentChunk;
-      const kind = chunk.done ? proto.PROGRESS_KIND_END : proto.PROGRESS_KIND_REPORT;
-      return proto.newNotification(proto.METHOD_PROGRESS, {
-        token: chunk.task_id ?? "",
-        value: {
-          kind,
-          type: chunk.type,
-          agent_id: agentID,
-          task_id: chunk.task_id,
-          session_id: chunk.session_id,
-          confirm_id: chunk.confirm_id,
-          prompt_id: chunk.prompt_id,
-          options: chunk.options,
-          block_id: chunk.block_id,
-          percentage: chunk.percentage,
-          done: chunk.done,
-          error: chunk.error,
-          reason: chunk.reason,
-          content: chunk.content,
-          name: chunk.name,
-        } satisfies proto.ProgressValue,
-      } satisfies proto.ProgressParams);
-    }
     default:
       return undefined;
   }
@@ -195,6 +169,12 @@ class TaskRegistry {
     return controller;
   }
 
+  // get 返回已注册 task 的 controller。handleRespond 用它判断 task 是否仍在
+  // 进行（handleChat 还没退出），决定是直接发 task.respond 还是报错。
+  get(taskID: string): AbortController | undefined {
+    return this.controllers.get(taskID)?.controller;
+  }
+
   cancel(taskID: string): void {
     const entry = this.controllers.get(taskID);
     if (entry) {
@@ -211,6 +191,10 @@ class TaskRegistry {
     }
   }
 
+  size(): number {
+    return this.controllers.size;
+  }
+
   cancelAll(): void {
     for (const [id] of this.controllers) this.cancel(id);
   }
@@ -222,6 +206,16 @@ function sendStatus(ws: WebSocket, agentID: string, status: string, taskID?: str
     status,
     task_id: taskID,
   } satisfies proto.StatusParams));
+}
+
+// updateBusyStatus 按 tasks.size 切换 agent 状态：还有 in-flight task 就 BUSY，
+// 否则 ONLINE。多个 task 并发时，先结束的那个不会误报 ONLINE。
+function updateBusyStatus(ws: WebSocket, agentID: string, tasks: TaskRegistry): void {
+  if (tasks.size() > 0) {
+    sendStatus(ws, agentID, proto.AGENT_STATUS_BUSY);
+  } else {
+    sendStatus(ws, agentID, proto.AGENT_STATUS_ONLINE);
+  }
 }
 
 async function handleChat(
@@ -262,6 +256,8 @@ async function handleChat(
       return;
     }
 
+    // 跨 task.respond 轮次持续消费同一 queue。confirm_required 不再提前关 queue，
+    // 后续 task.respond 触发的 chunk 流回这里继续转发给网关。
     for await (const chunk of chunks) {
       const kind = chunk.done ? proto.PROGRESS_KIND_END : proto.PROGRESS_KIND_REPORT;
       sendProgress(ws, agentID, chunk.task_id ?? params.task_id, chunk.session_id ?? params.session_id,
@@ -273,7 +269,7 @@ async function handleChat(
     }
   } finally {
     tasks.remove(params.task_id);
-    sendStatus(ws, agentID, proto.AGENT_STATUS_ONLINE);
+    updateBusyStatus(ws, agentID, tasks);
   }
 }
 
@@ -292,57 +288,53 @@ async function handleRespond(
     return;
   }
 
-  const controller = tasks.add(params.task_id);
+  // task.respond 复用 handleChat 注册的 controller；不再自己 add（避免覆盖原
+  // controller、避免 size 计数错乱）。task 不存在说明 handleChat 已退出（task
+  // 超时 / cancel / agent 重启），respond 已无意义。
+  const controller = tasks.get(params.task_id);
+  if (!controller) {
+    if (msg.id) {
+      safeSend(ws, proto.newErrorResponse(msg.id, proto.ERR_AGENT_NOT_FOUND,
+        `task ${params.task_id} not in flight`));
+    }
+    return;
+  }
+
+  const req: proto.LocalAgentRequest = {
+    task_id: params.task_id,
+    session_id: params.session_id,
+    type: "respond",
+    confirm_id: params.confirm_id,
+    prompt_id: params.prompt_id,
+    block_id: params.block_id,
+    action_id: params.action_id,
+    response: params.response,
+  };
+
+  // 把 task.respond 写到 shim stdin；不迭代返回的 queue——chunk 流由 handleChat
+  // 的 for-await 继续消费（queue 按 task_id 复用）。这里只关心把请求送出去 + 把
+  // 同步可得的 result 回给 gateway。
   try {
-    const req: proto.LocalAgentRequest = {
+    await adapter.send(req, controller.signal);
+  } catch (err) {
+    const errMsg = controller.signal.aborted && controller.signal.reason === "timeout"
+      ? "timeout"
+      : err instanceof Error ? err.message : String(err);
+    sendProgress(ws, agentID, params.task_id, params.session_id, undefined,
+      proto.PROGRESS_KIND_END, { type: proto.CHUNK_TYPE_TEXT, error: errMsg, done: true });
+    return;
+  }
+
+  // 把 task.respond 的 result 透传给 browser（rule ③：status:"accepted" + decision）
+  // decision 归一：旧 shim 可能传 boolean/string，按 RESPOND_DECISION_* 归一映射。
+  if (msg.id) {
+    safeSend(ws, proto.newResponse(msg.id, {
       task_id: params.task_id,
       session_id: params.session_id,
-      type: "respond",
       confirm_id: params.confirm_id,
-      prompt_id: params.prompt_id,
-      block_id: params.block_id,
-      action_id: params.action_id,
-      response: params.response,
-    };
-
-    let chunks: AsyncIterable<proto.LocalAgentChunk>;
-    try {
-      chunks = await adapter.send(req, controller.signal);
-    } catch (err) {
-      const errMsg = controller.signal.aborted && controller.signal.reason === "timeout"
-        ? "timeout"
-        : err instanceof Error ? err.message : String(err);
-      sendProgress(ws, agentID, params.task_id, params.session_id, undefined,
-        proto.PROGRESS_KIND_END, { type: proto.CHUNK_TYPE_TEXT, error: errMsg, done: true });
-      return;
-    }
-
-    for await (const chunk of chunks) {
-      const kind = chunk.done ? proto.PROGRESS_KIND_END : proto.PROGRESS_KIND_REPORT;
-      sendProgress(ws, agentID, chunk.task_id ?? params.task_id, chunk.session_id ?? params.session_id,
-        chunk.context_id, kind, chunk);
-    }
-    if (controller.signal.aborted && controller.signal.reason === "timeout") {
-      sendProgress(ws, agentID, params.task_id, params.session_id, undefined,
-        proto.PROGRESS_KIND_END, { type: proto.CHUNK_TYPE_TEXT, error: "timeout", done: true });
-    }
-    // 把 shim 的 task.respond 返回值透传给 browser（rule ③：status:"accepted" + decision）
-    // decision 归一：旧 shim 可能传 boolean/string，这里按 RESPOND_DECISION_* 归一映射。
-    const decision = normalizeDecision(params.response);
-    if (msg.id) {
-      safeSend(ws, proto.newResponse(msg.id, {
-        task_id: params.task_id,
-        session_id: params.session_id,
-        confirm_id: params.confirm_id,
-        prompt_id: params.prompt_id,
-        block_id: params.block_id,
-        action_id: params.action_id,
-        status: "accepted",
-        decision,
-      } satisfies proto.TaskRespondResult));
-    }
-  } finally {
-    tasks.remove(params.task_id);
+      status: "accepted",
+      decision: normalizeDecision(params.response),
+    } satisfies proto.TaskRespondResult));
   }
 }
 
@@ -468,10 +460,10 @@ async function main(): Promise<void> {
           break;
         case proto.METHOD_AGENT_CANCEL: {
           const params = proto.decodeParams<proto.AgentCancelParams>(msg);
+          // tasks.cancel 触发 controller.abort，adapter 内的 abort 回调会把
+          // task.cancel 转发到 shim。不再需要 adapter.cancelTask 显式调用——
+          // 新架构下 controller 在 done:true 之前一直存活，abort 必定触发。
           tasks.cancel(params.task_id);
-          // 显式转发到 adapter，确保 confirm_required 已关 queue / controller 已被
-          // registry 回收的场景下，task.cancel 仍能打到 shim。
-          adapter.cancelTask?.(params.task_id, params.session_id);
           if (msg.id) {
             safeSend(ws, proto.newResponse(msg.id, {
               task_id: params.task_id,

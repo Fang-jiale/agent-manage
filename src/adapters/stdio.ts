@@ -17,7 +17,14 @@ export class StdioAdapter implements LocalAgentAdapter {
   private lines: string[] = [];
   private lineWaiters: PendingLine[] = [];
   private closed = false;
-  private currentQueue: AsyncQueue<proto.LocalAgentChunk> | null = null;
+  // 每个 task_id 独立 queue。chunk 流与 send() 解耦：
+  // - 同一 task 的 task.create / task.respond 共用同一 queue
+  // - 多个 task 可并发（stdio 子进程若支持）
+  // - queue 只在 done:true 或 abort+cancel 后关闭，confirm_required 不再提前关
+  private queues = new Map<string, AsyncQueue<proto.LocalAgentChunk>>();
+  // 已转发过 task.cancel 的 task_id 集合。多次 send() 复用同一 controller.signal，
+  // abort 回调可能注册多份；这里去重避免给 shim 重复发取消通知。
+  private cancelledTasks = new Set<string>();
 
   private constructor(proc: ChildProcess) {
     this.proc = proc;
@@ -67,9 +74,9 @@ export class StdioAdapter implements LocalAgentAdapter {
       waiter.resolve(undefined);
     }
     this.eventsQueue.close();
-    const q = this.currentQueue;
-    this.currentQueue = null;
-    q?.close();
+    // 关掉所有 in-flight queue——消费者会收到 iterator end
+    for (const q of this.queues.values()) q.close();
+    this.queues.clear();
   }
 
   private readLine(timeoutMs: number): Promise<string | undefined> {
@@ -180,53 +187,51 @@ export class StdioAdapter implements LocalAgentAdapter {
   }
 
   private routeChunk(chunk: proto.LocalAgentChunk): void {
-    const q = this.currentQueue;
-    if (!q) {
-      // send() 已返回（典型：confirm_required 关 queue 后用户点停止，
-      // shim 兜底发 confirm_cancelled）。这类"事后"chunk 必须走 events 流
-      // 转发到 gateway，否则前端永远收不到撤销通知。
-      if (chunk.type === proto.CHUNK_TYPE_CONFIRM_CANCELLED) {
-        this.eventsQueue.push({ method: "stream.chunk", params: chunk });
-      }
-      return;
-    }
+    const taskID = chunk.task_id;
+    if (!taskID) return; // shim 必须在 chunk 里带 task_id，否则无法路由
+    const q = this.queues.get(taskID);
+    if (!q) return; // 未知 task（已结束 / 漏发 create）——丢弃
     q.push(chunk);
-    if (
-      chunk.done ||
-      chunk.type === proto.CHUNK_TYPE_CONFIRM_REQUIRED ||
-      chunk.type === proto.CHUNK_TYPE_PROMPT_REQUIRED ||
-      chunk.type === proto.CHUNK_TYPE_BLOCK_REQUIRED
-    ) {
-      this.currentQueue = null;
+    if (chunk.done) {
+      // 仅 done:true 关 queue；confirm_required / prompt_required / block_required
+      // 不再提前关——同一 task 后续 task.respond 的 chunk 流回同一 queue。
+      this.queues.delete(taskID);
+      this.cancelledTasks.delete(taskID);
       q.close();
     }
   }
 
-  // Send writes a JSON-RPC task request to the agent's stdin and reads chunks
-  // from stdout. Stdio agents are assumed to handle one request at a time.
+  // send 写一条 task.create / task.respond 请求到 shim stdin，返回该 task 的
+  // chunk 流。多次 send() 复用同一 task_id 时返回同一 queue（仅首个调用方应
+  // 迭代；后续调用方仅做"写请求"动作，迭代由首个调用方继续）。
+  //
+  // 何时关闭 queue：见 routeChunk（done:true）与 onAbort（abort 不立即关，
+  // 等 shim 兜底发完 confirm_cancelled + done）。
   async send(req: proto.LocalAgentRequest, signal: AbortSignal): Promise<AsyncIterable<proto.LocalAgentChunk>> {
-    if (this.currentQueue) throw new Error("another request is in progress");
     if (this.closed) throw new Error("adapter is closed");
+    if (!req.task_id) throw new Error("send: missing task_id");
 
     const method = req.type === "respond" ? proto.METHOD_TASK_RESPOND : proto.METHOD_TASK_CREATE;
-    this.writeMessage(proto.newRequest(req.task_id ?? "", method, req));
+    this.writeMessage(proto.newRequest(req.task_id, method, req));
 
-    const queue = new AsyncQueue<proto.LocalAgentChunk>();
-    this.currentQueue = queue;
+    let q = this.queues.get(req.task_id);
+    if (!q) {
+      q = new AsyncQueue<proto.LocalAgentChunk>();
+      this.queues.set(req.task_id, q);
+    }
 
+    const taskID = req.task_id;
     const onAbort = (): void => {
       // 关键：必须显式通知子进程取消，否则 shim 和被控进程继续跑、烧 token。
       // 仅中断本地 AbortController 是假停止。HTTP 适配器不通过此路径。
-      // 注意：confirm_required 已经把 currentQueue 设为 null，所以这里要无条件转发
-      // task.cancel——只要还知道 task_id，shim 就该收到。
-      if (this.currentQueue === queue) {
-        this.currentQueue = null;
-        queue.close();
-      }
-      if (!this.closed && req.task_id) {
+      // 这里不主动关 queue——shim 收到 task.cancel 后会兜底发 confirm_cancelled
+      // + done:true，让前端有机会收到撤销通知；done 一到 queue 自然关闭。
+      if (this.cancelledTasks.has(taskID)) return;
+      this.cancelledTasks.add(taskID);
+      if (!this.closed) {
         try {
           this.writeMessage(proto.newNotification(proto.METHOD_TASK_CANCEL, {
-            task_id: req.task_id,
+            task_id: taskID,
             session_id: req.session_id,
           }));
         } catch {
@@ -240,23 +245,11 @@ export class StdioAdapter implements LocalAgentAdapter {
       signal.addEventListener("abort", onAbort, { once: true });
     }
 
-    return queue;
+    return q;
   }
 
   getCapabilities(): proto.Capability[] {
     return this.capabilities;
-  }
-
-  cancelTask(taskID: string, sessionID?: string): void {
-    if (this.closed) return;
-    try {
-      this.writeMessage(proto.newNotification(proto.METHOD_TASK_CANCEL, {
-        task_id: taskID,
-        session_id: sessionID,
-      }));
-    } catch {
-      // stdin 已关闭等场景，忽略
-    }
   }
 
   events(): AsyncIterable<LocalAgentEvent> {

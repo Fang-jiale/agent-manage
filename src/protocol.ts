@@ -312,12 +312,13 @@ export interface RespondDecision {
 }
 
 // task.respond 的返回值，shim 原样返回，gateway 透传。confirm_id 不存在/已回复/已撤销 → -32000。
+// decision 可选——旧 shim 可能传 boolean/string/无法识别的值，normalizeDecision 兜底返回 undefined。
 export interface TaskRespondResult {
   task_id: string;
   session_id?: string;
   confirm_id?: string;
   status: "accepted";
-  decision: typeof RESPOND_DECISION_ALLOW | typeof RESPOND_DECISION_DENY | typeof RESPOND_DECISION_CANCEL;
+  decision?: typeof RESPOND_DECISION_ALLOW | typeof RESPOND_DECISION_DENY | typeof RESPOND_DECISION_CANCEL;
 }
 
 export interface TaskCompleteResult {

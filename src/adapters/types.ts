@@ -8,15 +8,18 @@ export interface LocalAgentEvent {
 
 // LocalAgentAdapter abstracts how AgentClient talks to a local agent.
 export interface LocalAgentAdapter {
-  // Send forwards a user message or response to the local agent and returns a
-  // stream of chunks.
+  // send writes a task request (task.create / task.respond) to the local agent
+  // and returns the chunk stream for that task.
+  //
+  // 同一 task_id 的多次 send()（典型：先 task.create 后 task.respond）返回同一
+  // 个 chunk 流——下游消费者（client.ts handleChat）跨轮次共享，task.respond 的
+  // 后续 chunk 自动归到原消费者。多次 send() 通常仅首次迭代，后续调用方只关心
+  // "把请求写出去"。
+  //
+  // 取消语义：传入的 AbortSignal abort 时，adapter 必须向 local agent 补发
+  // task.cancel（stdio 子进程必须收到否则是假停止）；chunk 流不立即关闭，等 agent
+  // 兜底发完 confirm_cancelled + done:true 再自然结束。
   send(req: LocalAgentRequest, signal: AbortSignal): Promise<AsyncIterable<LocalAgentChunk>>;
-
-  // cancelTask 显式向 agent 转发 task.cancel，独立于 send() 的 AbortSignal。
-  // 必要性：confirm_required 关 queue 后 send() 已返回，controller 可能被 registry
-  // 回收，abort 路径不再触发；用户此时点停止必须能直接打到 agent，让 shim 兜底发
-  // confirm_cancelled。HTTP 适配器无子进程，可在 noop / abort fetch 间择一。
-  cancelTask?(taskID: string, sessionID?: string): void;
 
   // Capabilities returns the capabilities advertised by the local agent.
   getCapabilities(): Capability[];
