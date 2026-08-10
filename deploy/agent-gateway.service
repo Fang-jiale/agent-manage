@@ -1,0 +1,25 @@
+[Unit]
+Description=YwMatrix Gateway
+After=network.target mysql.service redis.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node /opt/agent-manage/src/gateway.ts -addr 127.0.0.1:8080
+Restart=always
+RestartSec=5
+# 网关在 SIGTERM 后进入 drain：healthz 立即 503，断 WS，约 1.5s 后退出
+TimeoutStopSec=15
+User=agent
+Group=agent
+WorkingDirectory=/opt/agent-manage
+Environment=AGENT_MANAGE_DATABASE_URL=mysql://ywmatrix:CHANGE_ME@127.0.0.1:3306/ywmatrix
+# JWT secret：默认从 /opt/agent-manage/data/jwt-secret 自动生成并持久化（推荐）；
+# 如要强制指定或与其它实例共享，再取消下一行注释（至少 32 字节随机串）：
+# Environment=AGENT_MANAGE_JWT_SECRET=
+Environment=AGENT_MANAGE_ADMIN_PASSWORD=CHANGE_ME
+# 多实例时启用：
+# Environment=AGENT_MANAGE_REDIS_URL=redis://127.0.0.1:6379
+# Environment=AGENT_MANAGE_INSTANCE_ID=gw-1
+
+[Install]
+WantedBy=multi-user.target

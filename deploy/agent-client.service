@@ -1,0 +1,15 @@
+[Unit]
+Description=YwMatrix Agent Client
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node /opt/agent-manage/src/client.ts -adapter http -gateway wss://gateway.internal/ws/agent -agent-id CHANGE_ME -local-agent http://localhost:9001 -token CHANGE_ME
+Restart=always
+RestartSec=5
+User=agent
+Group=agent
+WorkingDirectory=/opt/agent-manage
+
+[Install]
+WantedBy=multi-user.target

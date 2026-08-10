@@ -1,0 +1,19 @@
+# YwMatrix 网关 Caddy 反代示例（自动 HTTPS：公网域名自动签发 Let's Encrypt；
+# 内网可用 tls internal 让 Caddy 自签内网 CA）
+#
+# Caddy 对 WebSocket 开箱即用，无需额外 Upgrade 配置。
+
+ywmatrix.internal.example.com {
+    # 内网无公网域名时改用：tls internal
+    tls /etc/caddy/ywmatrix.crt /etc/caddy/ywmatrix.key
+
+    request_body {
+        max_size 32MB
+    }
+
+    reverse_proxy 127.0.0.1:8080
+    # 多实例：
+    # reverse_proxy 127.0.0.1:8080 127.0.0.1:8081 {
+    #     lb_policy round_robin
+    # }
+}

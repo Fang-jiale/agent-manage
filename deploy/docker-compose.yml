@@ -1,0 +1,69 @@
+# YwMatrix 一键起栈：MySQL + Redis + 网关（MinIO 可选，--profile s3 启用）
+# 用法：
+#   docker compose up -d                    # 最小栈（附件走网关容器本地盘卷）
+#   docker compose --profile s3 up -d       # 附件走 MinIO 对象存储
+# 首次启动后登录 http://localhost:8080 ，账号 admin / 密码见 AGENT_MANAGE_ADMIN_PASSWORD
+
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-ywmatrix_root_dev}
+      MYSQL_DATABASE: ywmatrix
+      MYSQL_USER: ywmatrix
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-ywmatrix_dev}
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD:-ywmatrix_root_dev}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  gateway:
+    build: ..
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      AGENT_MANAGE_DATABASE_URL: mysql://ywmatrix:${MYSQL_PASSWORD:-ywmatrix_dev}@mysql:3306/ywmatrix
+      AGENT_MANAGE_REDIS_URL: redis://redis:6379
+      AGENT_MANAGE_JWT_SECRET: ${AGENT_MANAGE_JWT_SECRET:?请在 .env 或环境变量中设置 AGENT_MANAGE_JWT_SECRET}
+      AGENT_MANAGE_ADMIN_PASSWORD: ${AGENT_MANAGE_ADMIN_PASSWORD:-admin123}
+      # MinIO profile 启用时改为对象存储：
+      AGENT_MANAGE_S3_ENDPOINT: ${AGENT_MANAGE_S3_ENDPOINT:-}
+      AGENT_MANAGE_S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      AGENT_MANAGE_S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+    volumes:
+      - attach-data:/app/data
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    profiles: ["s3"]
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+
+volumes:
+  mysql-data:
+  attach-data:
+  minio-data:

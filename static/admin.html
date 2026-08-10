@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>管理后台 · YwMatrix</title>
+    <link rel="icon" href="/static/logo.jpg" type="image/jpeg">
+    <link rel="stylesheet" href="/static/shared.css">
+    <link rel="stylesheet" href="/static/admin.css">
+</head>
+<body>
+    <div id="app">
+        <header class="topbar">
+            <a class="logo" href="/" title="返回对话">
+                <img class="logo-svg" src="/static/logo.jpg" alt="">
+                <span class="logo-word">Yw<span>Matrix</span></span>
+            </a>
+            <span class="topbar-divider"></span>
+            <span class="topbar-title">管理后台</span>
+            <span class="spacer"></span>
+            <span class="conn-dot" id="connectionDot"></span>
+            <span class="conn-text" id="connectionStatus">未连接</span>
+            <a class="icon-btn" href="/" title="返回对话">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M6 3L2.5 8 6 13M2.5 8h11"/></svg>
+            </a>
+        </header>
+        <div class="admin-body">
+            <aside class="admin-nav">
+                <div class="admin-nav-title">管理后台</div>
+                <button class="admin-nav-item" data-tab="overview">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 13.5v-4M6.5 13.5V7M10.5 13.5V9.5M14.5 13.5V4.5"/></svg>
+                    概览</button>
+                <button class="admin-nav-item" data-tab="users">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="5.5" r="2.5"/><path d="M3 13.5c.6-2.6 2.6-4 5-4s4.4 1.4 5 4"/></svg>
+                    用户管理</button>
+                <button class="admin-nav-item" data-tab="agents">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M5.5 6.5L8 8.5l-2.5 2M9 11h2.5"/></svg>
+                    Agent 管理</button>
+                <button class="admin-nav-item" data-tab="keys">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="5.5" cy="8" r="2.5"/><path d="M8 8h6M12 8v2.5M14 8v1.8"/></svg>
+                    设备密钥</button>
+            </aside>
+            <div class="admin-content">
+                <div class="admin-page" id="adminPageOverview">
+                    <h2>概览</h2>
+                    <div class="admin-page-desc">系统运行状态一览，每 30 秒自动刷新</div>
+                    <div class="stat-cards" id="overviewCards"></div>
+                </div>
+                <div class="admin-page" id="adminPageUsers">
+                    <h2>用户管理</h2>
+                    <div class="admin-page-desc">创建账号、调整角色、禁用或重置密码</div>
+                    <div class="admin-toolbar">
+                        <input type="text" id="adminUserSearch" placeholder="搜索用户名…">
+                        <span class="spacer"></span>
+                        <input type="text" id="adminNewUserName" placeholder="用户名" style="width:130px" autocomplete="off">
+                        <input type="password" id="adminNewUserPwd" placeholder="初始密码" style="width:130px" autocomplete="new-password">
+                        <select id="adminNewUserRole" style="width:110px">
+                            <option value="user">普通用户</option>
+                            <option value="admin">管理员</option>
+                        </select>
+                        <button class="btn btn-primary" id="adminCreateUserBtn">创建用户</button>
+                    </div>
+                    <div class="admin-table-wrap">
+                        <table class="admin-table">
+                            <thead><tr><th>用户名</th><th>角色</th><th>状态</th><th>最近登录</th><th>创建时间</th><th style="text-align:right">操作</th></tr></thead>
+                            <tbody id="adminUserRows"></tbody>
+                        </table>
+                        <div class="admin-empty" id="adminUserEmpty" style="display:none">没有匹配的用户</div>
+                    </div>
+                    <div class="pager">
+                        <span id="adminUserPagerInfo"></span>
+                        <button id="adminUserPrev">上一页</button>
+                        <button id="adminUserNext">下一页</button>
+                    </div>
+                </div>
+                <div class="admin-page" id="adminPageAgents">
+                    <h2>Agent 管理</h2>
+                    <div class="admin-page-desc">全量 Agent 注册表（含离线历史），实时状态优先</div>
+                    <div class="admin-toolbar">
+                        <select id="adminAgentOwner" style="width:150px"><option value="">全部用户</option></select>
+                        <select id="adminAgentStatus" style="width:110px">
+                            <option value="">全部状态</option>
+                            <option value="online">在线</option>
+                            <option value="busy">忙碌</option>
+                            <option value="offline">离线</option>
+                        </select>
+                        <input type="text" id="adminAgentSearch" placeholder="搜索名称 / ID…">
+                    </div>
+                    <div class="admin-table-wrap">
+                        <table class="admin-table">
+                            <thead><tr><th>Agent</th><th>所有者</th><th>状态</th><th>平台</th><th>最近在线</th><th style="text-align:right">操作</th></tr></thead>
+                            <tbody id="adminAgentRows"></tbody>
+                        </table>
+                        <div class="admin-empty" id="adminAgentEmpty" style="display:none">没有匹配的 Agent</div>
+                    </div>
+                    <div class="pager">
+                        <span id="adminAgentPagerInfo"></span>
+                        <button id="adminAgentPrev">上一页</button>
+                        <button id="adminAgentNext">下一页</button>
+                    </div>
+                </div>
+                <div class="admin-page" id="adminPageKeys">
+                    <h2>设备密钥</h2>
+                    <div class="admin-page-desc">供 AgentClient 长期接入（client -key 参数），明文仅在创建时展示一次</div>
+                    <div class="admin-toolbar">
+                        <select id="adminKeyOwner" style="width:150px"><option value="">我自己</option></select>
+                        <span class="spacer"></span>
+                        <input type="text" id="adminNewKeyName" placeholder="密钥备注名（如 办公室 iMac）" style="width:200px" autocomplete="off">
+                        <button class="btn btn-primary" id="adminCreateKeyBtn">创建密钥</button>
+                    </div>
+                    <div class="admin-table-wrap">
+                        <table class="admin-table">
+                            <thead><tr><th>名称</th><th>创建时间</th><th>最近使用</th><th>状态</th><th style="text-align:right">操作</th></tr></thead>
+                            <tbody id="adminKeyRows"></tbody>
+                        </table>
+                        <div class="admin-empty" id="adminKeyEmpty" style="display:none">暂无设备密钥</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="toast-container" id="toastContainer"></div>
+
+    <div class="modal-overlay" id="modalOverlay">
+        <div class="modal">
+            <h3 id="modalTitle">确认</h3>
+            <p id="modalText"></p>
+            <div class="modal-actions">
+                <button class="btn btn-ghost" id="modalCancel">取消</button>
+                <button class="btn btn-danger-ghost" id="modalOk">确定</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="keyCreatedOverlay">
+        <div class="modal">
+            <h3>密钥已创建</h3>
+            <p>请立即保存，明文只展示这一次：</p>
+            <div class="key-plaintext" id="keyCreatedValue"></div>
+            <div class="modal-actions">
+                <button class="btn btn-ghost" id="keyCopyBtn">复制</button>
+                <button class="btn btn-primary" id="keyCreatedOk">我已保存</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="reassignOverlay">
+        <div class="modal">
+            <h3>转移 Agent 归属</h3>
+            <p id="reassignText"></p>
+            <select id="reassignOwner"></select>
+            <div class="modal-actions">
+                <button class="btn btn-ghost" id="reassignCancel">取消</button>
+                <button class="btn btn-primary" id="reassignOk">转移</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        (function () {
+            'use strict';
+
+            /* ---------- 认证与主题（与聊天页共用 localStorage） ---------- */
+
+            const STORAGE_KEY = 'agent_manage_v1';
+            let stored = {};
+            try { stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); } catch (e) { /* 忽略 */ }
+            const token = stored.token || '';
+            const me = stored.user || null;
+            if (!token || !me || me.role !== 'admin') {
+                location.replace('/');
+                return;
+            }
+
+            const themeMode = stored.settings?.themeMode || 'auto';
+            const prefersDark = window.matchMedia('(prefers-color-scheme: dark)');
+            function applyTheme() {
+                const dark = themeMode === 'dark' || (themeMode === 'auto' && prefersDark.matches);
+                document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+            }
+            applyTheme();
+            prefersDark.addEventListener('change', applyTheme);
+
+            /* ---------- 基础工具 ---------- */
+
+            const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/admin';
+
+            function escapeHtml(text) {
+                const div = document.createElement('div');
+                div.textContent = text == null ? '' : String(text);
+                return div.innerHTML;
+            }
+            function escapeAttr(text) { return escapeHtml(text).replace(/"/g, '&quot;'); }
+
+            function formatTime(ts) {
+                const d = new Date(ts);
+                const today = new Date();
+                const hm = d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0');
+                if (d.toDateString() === today.toDateString()) return hm;
+                return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + hm;
+            }
+            function relativeTime(ts) {
+                const diff = Date.now() - ts;
+                if (diff < 60_000) return '刚刚';
+                if (diff < 3600_000) return Math.floor(diff / 60000) + ' 分钟前';
+                if (diff < 86400_000) return Math.floor(diff / 3600000) + ' 小时前';
+                return formatTime(ts);
+            }
+            function generateId() {
+                return Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
+            }
+
+            const els = {};
+            ['connectionDot', 'connectionStatus', 'toastContainer', 'modalOverlay', 'modalTitle', 'modalText',
+             'modalOk', 'modalCancel', 'overviewCards', 'adminUserSearch', 'adminNewUserName', 'adminNewUserPwd',
+             'adminNewUserRole', 'adminCreateUserBtn', 'adminUserRows', 'adminUserEmpty', 'adminUserPagerInfo',
+             'adminUserPrev', 'adminUserNext', 'adminAgentOwner', 'adminAgentStatus', 'adminAgentSearch',
+             'adminAgentRows', 'adminAgentEmpty', 'adminAgentPagerInfo', 'adminAgentPrev', 'adminAgentNext',
+             'adminKeyOwner', 'adminNewKeyName', 'adminCreateKeyBtn', 'adminKeyRows', 'adminKeyEmpty',
+             'keyCreatedOverlay', 'keyCreatedValue', 'keyCopyBtn', 'keyCreatedOk',
+             'reassignOverlay', 'reassignText', 'reassignOwner', 'reassignCancel', 'reassignOk',
+             'adminPageOverview', 'adminPageUsers', 'adminPageAgents', 'adminPageKeys'
+            ].forEach(id => { els[id] = document.getElementById(id); });
+
+            function setConnectionStatus(status, text) {
+                els.connectionDot.className = 'conn-dot ' + status;
+                els.connectionStatus.textContent = text;
+            }
+            function showToast(message, type = 'info', duration = 3000) {
+                const toast = document.createElement('div');
+                toast.className = 'toast ' + type;
+                toast.textContent = message;
+                els.toastContainer.appendChild(toast);
+                setTimeout(() => {
+                    toast.style.opacity = '0';
+                    setTimeout(() => toast.remove(), 300);
+                }, duration);
+            }
+
+            let modalResolve = null;
+            function confirmModal(title, text, okLabel) {
+                els.modalTitle.textContent = title;
+                els.modalText.textContent = text;
+                els.modalOk.textContent = okLabel || '确定';
+                els.modalOverlay.classList.add('open');
+                return new Promise(resolve => { modalResolve = resolve; });
+            }
+            function closeModal(result) {
+                els.modalOverlay.classList.remove('open');
+                if (modalResolve) { modalResolve(result); modalResolve = null; }
+            }
+
+            /* ---------- WebSocket 与 RPC ---------- */
+
+            let ws = null;
+            let reconnectTimer = null;
+            let reconnectDelay = 1000;
+            let wsFailCount = 0;
+            let wsEverOpened = false;
+
+            function connect() {
+                if (ws) return;
+                setConnectionStatus('connecting', '连接中…');
+                wsEverOpened = false;
+                ws = new WebSocket(WS_URL + '?token=' + encodeURIComponent(token));
+                ws.onopen = () => {
+                    wsEverOpened = true;
+                    wsFailCount = 0;
+                    reconnectDelay = 1000;
+                    setConnectionStatus('connected', '已连接');
+                    switchTab(currentTab);
+                };
+                ws.onmessage = (event) => {
+                    try { handleMessage(JSON.parse(event.data)); }
+                    catch (e) { console.error('parse error', e); }
+                };
+                ws.onclose = () => {
+                    ws = null;
+                    setConnectionStatus('disconnected', '已断开');
+                    if (!wsEverOpened) {
+                        wsFailCount++;
+                        if (wsFailCount >= 3) {
+                            showToast('连接失败或登录已过期，请重新登录', 'warning');
+                            localStorage.removeItem(STORAGE_KEY);
+                            location.replace('/');
+                            return;
+                        }
+                    }
+                    if (reconnectTimer) return;
+                    setConnectionStatus('connecting', '重连中…');
+                    reconnectTimer = setTimeout(() => {
+                        reconnectTimer = null;
+                        connect();
+                        reconnectDelay = Math.min(reconnectDelay * 2, 30000);
+                    }, reconnectDelay);
+                };
+                ws.onerror = () => setConnectionStatus('disconnected', '连接失败');
+            }
+
+            let rpcSeq = 0;
+            const pendingRpc = new Map();
+            function rpcCall(method, params) {
+                return new Promise((resolve, reject) => {
+                    if (!ws || ws.readyState !== WebSocket.OPEN) {
+                        reject(new Error('连接未就绪'));
+                        return;
+                    }
+                    const id = 'rpc-' + (++rpcSeq) + '-' + generateId();
+                    pendingRpc.set(id, { resolve, reject });
+                    ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }));
+                    setTimeout(() => {
+                        if (pendingRpc.delete(id)) reject(new Error(method + ' 超时'));
+                    }, 10000);
+                });
+            }
+            function wsReady() { return ws && ws.readyState === WebSocket.OPEN; }
+
+            function handleMessage(msg) {
+                if (msg.method === 'admin.agentList' || msg.method === 'admin.agent.event') {
+                    scheduleReload();
+                } else if (!msg.method && msg.id && (msg.error || msg.result !== undefined)) {
+                    const rpc = pendingRpc.get(msg.id);
+                    if (!rpc) return;
+                    pendingRpc.delete(msg.id);
+                    if (msg.error) rpc.reject(new Error(msg.error.message || '请求失败'));
+                    else rpc.resolve(msg.result);
+                }
+            }
+
+            // agent 上下线推送到达时，agents/overview 页轻量刷新（防抖）
+            let reloadTimer = null;
+            function scheduleReload() {
+                if (currentTab !== 'agents' && currentTab !== 'overview') return;
+                if (reloadTimer) return;
+                reloadTimer = setTimeout(() => {
+                    reloadTimer = null;
+                    if (currentTab === 'agents') loadAgents();
+                    else loadOverview();
+                }, 800);
+            }
+
+            /* ---------- 页面切换 ---------- */
+
+            let currentTab = 'overview';
+            let overviewTimer = null;
+
+            function switchTab(tab) {
+                currentTab = tab;
+                document.querySelectorAll('.admin-nav-item').forEach(b =>
+                    b.classList.toggle('active', b.dataset.tab === tab));
+                document.querySelectorAll('.admin-page').forEach(p => p.classList.remove('active'));
+                const pages = { overview: els.adminPageOverview, users: els.adminPageUsers, agents: els.adminPageAgents, keys: els.adminPageKeys };
+                if (pages[tab]) pages[tab].classList.add('active');
+                if (overviewTimer) { clearInterval(overviewTimer); overviewTimer = null; }
+                if (!wsReady()) return;
+                if (tab === 'overview') {
+                    loadOverview();
+                    overviewTimer = setInterval(() => {
+                        if (currentTab === 'overview') loadOverview();
+                    }, 30_000);
+                } else if (tab === 'users') {
+                    ensureOwnerOptions(); loadUsers();
+                } else if (tab === 'agents') {
+                    ensureOwnerOptions(); loadAgents();
+                } else if (tab === 'keys') {
+                    ensureOwnerOptions(); loadKeys();
+                }
+            }
+
+            /* ---------- 概览 ---------- */
+
+            async function loadOverview() {
+                if (!wsReady()) return;
+                try {
+                    const r = await rpcCall('admin.overview', {});
+                    const cards = [
+                        ['用户总数', r.users_total, ''],
+                        ['Agent 总数', r.agents_total, '在线 ' + r.agents_online],
+                        ['页面连接', r.users_connected, ''],
+                        ['进行中任务', r.tasks_active, ''],
+                    ];
+                    els.overviewCards.innerHTML = cards.map(([label, value, sub]) =>
+                        '<div class="stat-card"><div class="stat-label">' + label + '</div>' +
+                        '<div class="stat-value">' + value +
+                        (sub ? ' <span class="stat-sub">' + escapeHtml(sub) + '</span>' : '') +
+                        '</div></div>').join('');
+                } catch (e) { /* 忽略瞬时错误，下轮刷新重试 */ }
+            }
+
+            /* ---------- 用户下拉 / 名字映射 ---------- */
+
+            let usersCache = [];
+            async function ensureOwnerOptions() {
+                if (!wsReady()) return;
+                try {
+                    const r = await rpcCall('user.list', {});
+                    usersCache = r.users || [];
+                } catch { return; }
+                const opts = usersCache.map(u =>
+                    '<option value="' + u.id + '">' + escapeHtml(u.name) + '</option>').join('');
+                const av = els.adminAgentOwner.value, kv = els.adminKeyOwner.value;
+                els.adminAgentOwner.innerHTML = '<option value="">全部用户</option>' + opts;
+                els.adminKeyOwner.innerHTML = '<option value="">我自己</option>' + opts;
+                els.adminAgentOwner.value = av;
+                els.adminKeyOwner.value = kv;
+            }
+            function userNameOf(id) {
+                const u = usersCache.find(x => x.id === id);
+                if (u) return u.name;
+                return id ? id.slice(0, 8) + '…' : '—';
+            }
+
+            /* ---------- 用户管理 ---------- */
+
+            const usersState = { query: '', page: 0, limit: 20, total: 0 };
+
+            async function loadUsers() {
+                if (!wsReady()) return;
+                try {
+                    const r = await rpcCall('user.list', {
+                        query: usersState.query || undefined,
+                        limit: usersState.limit,
+                        offset: usersState.page * usersState.limit
+                    });
+                    usersState.total = r.total || 0;
+                    renderUsers(r.users || []);
+                } catch (e) {
+                    showToast('加载用户失败：' + (e.message || e), 'error');
+                }
+            }
+
+            function renderUsers(users) {
+                els.adminUserEmpty.style.display = users.length ? 'none' : '';
+                els.adminUserRows.innerHTML = users.map(u => {
+                    const isSelf = u.id === me.id;
+                    return '<tr>' +
+                        '<td><div class="cell-main">' + escapeHtml(u.name) + (isSelf ? '（我）' : '') + '</div>' +
+                        '<div class="cell-sub">' + escapeHtml(u.id) + '</div></td>' +
+                        '<td>' + (u.role === 'admin' ? '<span class="chip accent">管理员</span>' : '<span class="chip">用户</span>') + '</td>' +
+                        '<td>' + (u.disabled ? '<span class="chip red">已禁用</span>' : '<span class="chip green">正常</span>') + '</td>' +
+                        '<td>' + (u.last_login_at ? relativeTime(u.last_login_at) : '从未登录') + '</td>' +
+                        '<td>' + formatTime(u.created_at) + '</td>' +
+                        '<td><div class="row-actions">' +
+                        (isSelf ? '' :
+                            '<button data-act="role" data-id="' + u.id + '" data-role="' + u.role + '">' +
+                            (u.role === 'admin' ? '降为用户' : '设为管理员') + '</button>' +
+                            '<button data-act="reset" data-id="' + u.id + '">重置密码</button>' +
+                            '<button data-act="toggle" data-id="' + u.id + '" data-disabled="' + (u.disabled ? '1' : '0') + '" class="' + (u.disabled ? '' : 'danger') + '">' +
+                            (u.disabled ? '启用' : '禁用') + '</button>') +
+                        '</div></td></tr>';
+                }).join('');
+                els.adminUserRows.querySelectorAll('button').forEach(btn => {
+                    btn.onclick = async () => {
+                        const id = btn.dataset.id;
+                        try {
+                            if (btn.dataset.act === 'role') {
+                                const toAdmin = btn.dataset.role !== 'admin';
+                                const ok = await confirmModal('调整角色',
+                                    toAdmin ? '将该用户提升为管理员？其现有连接会被踢线刷新权限。' : '将该管理员降为普通用户？其现有连接会被踢线刷新权限。',
+                                    toAdmin ? '设为管理员' : '降为用户');
+                                if (!ok) return;
+                                await rpcCall('user.set_role', { id, role: toAdmin ? 'admin' : 'user' });
+                                showToast('角色已调整', 'success');
+                            } else if (btn.dataset.act === 'toggle') {
+                                const disabling = btn.dataset.disabled !== '1';
+                                await rpcCall('user.disable', { id, disabled: disabling });
+                                showToast(disabling ? '已禁用' : '已启用', 'success');
+                            } else {
+                                const pwd = prompt('为该用户设置新密码（至少 6 位）：');
+                                if (!pwd) return;
+                                if (pwd.length < 6) { showToast('密码至少 6 位', 'warning'); return; }
+                                await rpcCall('user.reset_password', { id, password: pwd });
+                                showToast('密码已重置', 'success');
+                            }
+                            loadUsers();
+                        } catch (e) {
+                            showToast('操作失败：' + (e.message || e), 'error');
+                        }
+                    };
+                });
+                const pages = Math.max(1, Math.ceil(usersState.total / usersState.limit));
+                els.adminUserPagerInfo.textContent = '共 ' + usersState.total + ' 人 · 第 ' + (usersState.page + 1) + '/' + pages + ' 页';
+                els.adminUserPrev.disabled = usersState.page <= 0;
+                els.adminUserNext.disabled = usersState.page >= pages - 1;
+            }
+
+            /* ---------- Agent 管理 ---------- */
+
+            const agentsState = { owner: '', status: '', query: '', page: 0, limit: 20, total: 0 };
+
+            async function loadAgents() {
+                if (!wsReady()) return;
+                try {
+                    const r = await rpcCall('agent.list', {
+                        owner_id: agentsState.owner || undefined,
+                        status: agentsState.status || undefined,
+                        query: agentsState.query || undefined,
+                        limit: agentsState.limit,
+                        offset: agentsState.page * agentsState.limit
+                    });
+                    agentsState.total = r.total || 0;
+                    renderAgents(r.agents || []);
+                } catch (e) {
+                    showToast('加载 Agent 失败：' + (e.message || e), 'error');
+                }
+            }
+
+            function agentStatusChip(a) {
+                if (!a.online) return '<span class="chip">离线</span>';
+                if (a.status === 'busy') return '<span class="chip amber">忙碌</span>';
+                return '<span class="chip green">在线</span>';
+            }
+
+            function renderAgents(agents) {
+                els.adminAgentEmpty.style.display = agents.length ? 'none' : '';
+                els.adminAgentRows.innerHTML = agents.map(a =>
+                    '<tr>' +
+                    '<td><div class="cell-main">' + escapeHtml(a.name || a.id) + '</div>' +
+                    '<div class="cell-sub">' + escapeHtml(a.id) + '</div></td>' +
+                    '<td>' + escapeHtml(userNameOf(a.owner_id)) + '</td>' +
+                    '<td>' + agentStatusChip(a) + '</td>' +
+                    '<td>' + (a.platform && a.platform.os ? escapeHtml(a.platform.os + '/' + (a.platform.arch || '?')) : '—') + '</td>' +
+                    '<td>' + relativeTime(a.last_seen) + '</td>' +
+                    '<td><div class="row-actions">' +
+                    '<button data-act="reassign" data-id="' + escapeAttr(a.id) + '">转移归属</button>' +
+                    (a.online ? '<button data-act="disconnect" data-id="' + escapeAttr(a.id) + '" class="danger">断开连接</button>' : '') +
+                    '</div></td></tr>').join('');
+                els.adminAgentRows.querySelectorAll('button').forEach(btn => {
+                    btn.onclick = async () => {
+                        const id = btn.dataset.id;
+                        if (btn.dataset.act === 'disconnect') {
+                            const ok = await confirmModal('断开连接', '强制断开 Agent ' + id + ' 的当前连接？（客户端通常会自动重连）', '断开');
+                            if (!ok) return;
+                            try {
+                                await rpcCall('agent.disconnect', { agent_id: id });
+                                showToast('已断开', 'success');
+                                loadAgents();
+                            } catch (e) {
+                                showToast('断开失败：' + (e.message || e), 'error');
+                            }
+                        } else {
+                            openReassign(id);
+                        }
+                    };
+                });
+                const pages = Math.max(1, Math.ceil(agentsState.total / agentsState.limit));
+                els.adminAgentPagerInfo.textContent = '共 ' + agentsState.total + ' 台 · 第 ' + (agentsState.page + 1) + '/' + pages + ' 页';
+                els.adminAgentPrev.disabled = agentsState.page <= 0;
+                els.adminAgentNext.disabled = agentsState.page >= pages - 1;
+            }
+
+            let reassignAgentID = null;
+            function openReassign(agentID) {
+                if (usersCache.length === 0) { showToast('用户列表未加载，请稍候重试', 'warning'); return; }
+                reassignAgentID = agentID;
+                els.reassignText.textContent = '将 ' + agentID + ' 的所有权转移给：';
+                els.reassignOwner.innerHTML = usersCache.map(u =>
+                    '<option value="' + u.id + '">' + escapeHtml(u.name) + '</option>').join('');
+                els.reassignOverlay.classList.add('open');
+            }
+
+            /* ---------- 设备密钥 ---------- */
+
+            let keyOwnerID = ''; // '' = 我自己
+
+            function keyStatusChip(k) {
+                return k.disabled ? '<span class="chip red">已吊销</span>' : '<span class="chip green">有效</span>';
+            }
+
+            async function loadKeys() {
+                if (!wsReady()) return;
+                try {
+                    const r = await rpcCall('device_key.list', keyOwnerID ? { owner_id: keyOwnerID } : {});
+                    renderKeys(r.keys || []);
+                } catch (e) {
+                    showToast('加载密钥失败：' + (e.message || e), 'error');
+                }
+            }
+
+            function renderKeys(keys) {
+                els.adminKeyEmpty.style.display = keys.length ? 'none' : '';
+                els.adminKeyRows.innerHTML = keys.map(k =>
+                    '<tr>' +
+                    '<td><div class="cell-main">' + escapeHtml(k.name) + '</div>' +
+                    '<div class="cell-sub">' + escapeHtml(k.id) + '</div></td>' +
+                    '<td>' + formatTime(k.created_at) + '</td>' +
+                    '<td>' + (k.last_used_at ? relativeTime(k.last_used_at) : '从未使用') + '</td>' +
+                    '<td>' + keyStatusChip(k) + '</td>' +
+                    '<td><div class="row-actions">' +
+                    (k.disabled ? '' : '<button data-id="' + k.id + '" data-name="' + escapeAttr(k.name) + '" class="danger">吊销</button>') +
+                    '</div></td></tr>').join('');
+                els.adminKeyRows.querySelectorAll('button').forEach(btn => {
+                    btn.onclick = async () => {
+                        const ok = await confirmModal('吊销密钥',
+                            '吊销后使用该密钥的 Agent 将立即断线且无法重连：' + (btn.dataset.name || btn.dataset.id), '吊销');
+                        if (!ok) return;
+                        try {
+                            await rpcCall('device_key.revoke', { id: btn.dataset.id });
+                            showToast('已吊销', 'success');
+                            loadKeys();
+                        } catch (e) {
+                            showToast('吊销失败：' + (e.message || e), 'error');
+                        }
+                    };
+                });
+            }
+
+            /* ---------- 事件 ---------- */
+
+            document.querySelectorAll('.admin-nav-item').forEach(btn => {
+                btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+            });
+
+            let userSearchTimer = null;
+            els.adminUserSearch.addEventListener('input', () => {
+                clearTimeout(userSearchTimer);
+                userSearchTimer = setTimeout(() => {
+                    usersState.query = els.adminUserSearch.value.trim();
+                    usersState.page = 0;
+                    loadUsers();
+                }, 300);
+            });
+            els.adminUserPrev.addEventListener('click', () => { usersState.page--; loadUsers(); });
+            els.adminUserNext.addEventListener('click', () => { usersState.page++; loadUsers(); });
+            els.adminCreateUserBtn.addEventListener('click', async () => {
+                const name = els.adminNewUserName.value.trim(), pwd = els.adminNewUserPwd.value;
+                if (!name || !pwd) { showToast('请填写用户名和初始密码', 'warning'); return; }
+                if (pwd.length < 6) { showToast('密码至少 6 位', 'warning'); return; }
+                try {
+                    await rpcCall('user.create', { name, password: pwd, role: els.adminNewUserRole.value });
+                    els.adminNewUserName.value = els.adminNewUserPwd.value = '';
+                    showToast('用户已创建', 'success');
+                    ensureOwnerOptions();
+                    loadUsers();
+                } catch (e) {
+                    showToast('创建失败：' + (e.message || e), 'error');
+                }
+            });
+
+            let agentSearchTimer = null;
+            els.adminAgentSearch.addEventListener('input', () => {
+                clearTimeout(agentSearchTimer);
+                agentSearchTimer = setTimeout(() => {
+                    agentsState.query = els.adminAgentSearch.value.trim();
+                    agentsState.page = 0;
+                    loadAgents();
+                }, 300);
+            });
+            els.adminAgentOwner.addEventListener('change', () => {
+                agentsState.owner = els.adminAgentOwner.value;
+                agentsState.page = 0;
+                loadAgents();
+            });
+            els.adminAgentStatus.addEventListener('change', () => {
+                agentsState.status = els.adminAgentStatus.value;
+                agentsState.page = 0;
+                loadAgents();
+            });
+            els.adminAgentPrev.addEventListener('click', () => { agentsState.page--; loadAgents(); });
+            els.adminAgentNext.addEventListener('click', () => { agentsState.page++; loadAgents(); });
+
+            els.adminKeyOwner.addEventListener('change', () => {
+                keyOwnerID = els.adminKeyOwner.value;
+                loadKeys();
+            });
+            els.adminCreateKeyBtn.addEventListener('click', async () => {
+                const name = els.adminNewKeyName.value.trim();
+                if (!name) { showToast('请填写密钥备注名', 'warning'); return; }
+                try {
+                    const params = keyOwnerID ? { name, owner_id: keyOwnerID } : { name };
+                    const r = await rpcCall('device_key.create', params);
+                    els.adminNewKeyName.value = '';
+                    els.keyCreatedValue.textContent = r.key;
+                    els.keyCreatedOverlay.classList.add('open');
+                    loadKeys();
+                } catch (e) {
+                    showToast('创建失败：' + (e.message || e), 'error');
+                }
+            });
+            els.keyCreatedOk.addEventListener('click', () => els.keyCreatedOverlay.classList.remove('open'));
+            els.keyCopyBtn.addEventListener('click', async () => {
+                try {
+                    await navigator.clipboard.writeText(els.keyCreatedValue.textContent);
+                    showToast('已复制', 'success');
+                } catch { showToast('复制失败，请手动选择复制', 'warning'); }
+            });
+
+            els.reassignCancel.addEventListener('click', () => els.reassignOverlay.classList.remove('open'));
+            els.reassignOk.addEventListener('click', async () => {
+                if (!reassignAgentID) return;
+                try {
+                    await rpcCall('agent.reassign', { agent_id: reassignAgentID, owner_id: els.reassignOwner.value });
+                    showToast('归属已转移', 'success');
+                    els.reassignOverlay.classList.remove('open');
+                    loadAgents();
+                } catch (e) {
+                    showToast('转移失败：' + (e.message || e), 'error');
+                }
+            });
+
+            els.modalOk.addEventListener('click', () => closeModal(true));
+            els.modalCancel.addEventListener('click', () => closeModal(false));
+            els.modalOverlay.addEventListener('click', (e) => {
+                if (e.target === els.modalOverlay) closeModal(false);
+            });
+            window.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') {
+                    els.keyCreatedOverlay.classList.remove('open');
+                    els.reassignOverlay.classList.remove('open');
+                    if (els.modalOverlay.classList.contains('open')) closeModal(false);
+                }
+            });
+
+            switchTab('overview');
+            connect();
+        })();
+    </script>
+</body>
+</html>

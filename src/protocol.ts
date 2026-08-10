@@ -1,0 +1,574 @@
+// JSON-RPC 2.0 based communication protocol used between the user page,
+// gateway, agent client, and local agents.
+
+export const VERSION = "2.0";
+
+// Standard JSON-RPC 2.0 error codes.
+export const ERR_PARSE_ERROR = -32700;
+export const ERR_INVALID_REQUEST = -32600;
+export const ERR_METHOD_NOT_FOUND = -32601;
+export const ERR_INVALID_PARAMS = -32602;
+export const ERR_INTERNAL_ERROR = -32603;
+
+// Application specific error codes.
+export const ERR_AGENT_NOT_FOUND = -32000;
+export const ERR_AGENT_TIMEOUT = -32001;
+export const ERR_TASK_CANCELLED = -32002;
+export const ERR_LOCAL_AGENT_ERROR = -32003;
+export const ERR_UNAUTHORIZED = -32004;
+export const ERR_RATE_LIMITED = -32005;
+
+// Method names.
+export const METHOD_LIFECYCLE_INITIALIZE = "lifecycle.initialize";
+export const METHOD_LIFECYCLE_INITIALIZED = "lifecycle.initialized";
+export const METHOD_LIFECYCLE_REGISTER = "lifecycle.register";
+export const METHOD_LIFECYCLE_PING = "lifecycle.ping";
+export const METHOD_LIFECYCLE_STATUS = "lifecycle.status";
+export const METHOD_LIFECYCLE_CAPABILITIES_UPDATED = "lifecycle.capabilities_updated";
+
+export const METHOD_REGISTER = "system.register";
+export const METHOD_HEARTBEAT = "system.heartbeat";
+export const METHOD_STATUS = "system.status";
+export const METHOD_CAPABILITIES_UPDATED = "system.capabilities_updated";
+
+export const METHOD_AGENT_CHAT = "agent.chat";
+export const METHOD_AGENT_CANCEL = "agent.cancel";
+export const METHOD_AGENT_RESPOND = "agent.respond";
+
+export const METHOD_ADMIN_AGENT_LIST = "admin.agentList";
+export const METHOD_ADMIN_AGENT_EVENT = "admin.agent.event";
+export const METHOD_ADMIN_PROGRESS = "admin.task.progress";
+
+export const METHOD_PROGRESS = "$/progress";
+
+export const METHOD_TASK_CREATE = "task.create";
+export const METHOD_TASK_CANCEL = "task.cancel";
+export const METHOD_TASK_RESPOND = "task.respond";
+
+export const METHOD_SESSION_LIST = "session.list";
+export const METHOD_SESSION_CREATE = "session.create";
+export const METHOD_SESSION_RENAME = "session.rename";
+export const METHOD_SESSION_DELETE = "session.delete";
+export const METHOD_MESSAGE_LIST = "message.list";
+
+export const METHOD_USER_LIST = "user.list";
+export const METHOD_USER_CREATE = "user.create";
+export const METHOD_USER_DISABLE = "user.disable";
+export const METHOD_USER_RESET_PASSWORD = "user.reset_password";
+export const METHOD_USER_CHANGE_PASSWORD = "user.change_password";
+export const METHOD_USER_SET_ROLE = "user.set_role";
+
+// 管理后台（均要求 admin 角色）
+export const METHOD_AGENT_LIST = "agent.list";
+export const METHOD_AGENT_DISCONNECT = "agent.disconnect";
+export const METHOD_AGENT_REASSIGN = "agent.reassign";
+export const METHOD_ADMIN_OVERVIEW = "admin.overview";
+
+// 设备密钥（普通用户管理自己的，admin 可管理全员的）
+export const METHOD_DEVICE_KEY_CREATE = "device_key.create";
+export const METHOD_DEVICE_KEY_LIST = "device_key.list";
+export const METHOD_DEVICE_KEY_REVOKE = "device_key.revoke";
+
+// Content item types.
+export const CONTENT_TYPE_TEXT = "text";
+export const CONTENT_TYPE_IMAGE = "image";
+export const CONTENT_TYPE_RESOURCE = "resource";
+
+// Stream chunk types emitted by local agents.
+export const CHUNK_TYPE_TEXT = "text";
+export const CHUNK_TYPE_THINKING = "thinking";
+export const CHUNK_TYPE_ACTION = "action";
+export const CHUNK_TYPE_RESULT = "result";
+export const CHUNK_TYPE_CONFIRM_REQUIRED = "confirm_required";
+export const CHUNK_TYPE_PROMPT_REQUIRED = "prompt_required";
+export const CHUNK_TYPE_BLOCK_REQUIRED = "block_required";
+export const CHUNK_TYPE_ARTIFACT = "artifact";
+
+// Progress kinds, matching LSP partial result semantics.
+export const PROGRESS_KIND_BEGIN = "begin";
+export const PROGRESS_KIND_REPORT = "report";
+export const PROGRESS_KIND_END = "end";
+
+// Agent status values.
+export const AGENT_STATUS_ONLINE = "online";
+export const AGENT_STATUS_OFFLINE = "offline";
+export const AGENT_STATUS_BUSY = "busy";
+export const AGENT_STATUS_IDLE = "idle";
+
+export interface ErrorObject {
+  code: number;
+  message: string;
+  data?: unknown;
+}
+
+export interface Message {
+  jsonrpc: string;
+  id?: string;
+  method?: string;
+  params?: unknown;
+  result?: unknown;
+  error?: ErrorObject;
+}
+
+export function newRequest(id: string, method: string, params: unknown): Message {
+  return { jsonrpc: VERSION, id, method, params };
+}
+
+export function newNotification(method: string, params: unknown): Message {
+  return { jsonrpc: VERSION, method, params };
+}
+
+export function newResponse(id: string, result: unknown): Message {
+  return { jsonrpc: VERSION, id, result };
+}
+
+export function newErrorResponse(id: string, code: number, message: string, data?: unknown): Message {
+  const error: ErrorObject = { code, message };
+  if (data !== undefined && data !== null) error.data = data;
+  return { jsonrpc: VERSION, id, error };
+}
+
+export function decodeParams<T>(msg: Message): T {
+  return (msg.params ?? {}) as T;
+}
+
+export function isNotification(msg: Message): boolean {
+  return msg.id === undefined || msg.id === "";
+}
+
+export interface Capability {
+  type: string;
+  name: string;
+  description?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface PlatformInfo {
+  os: string;
+  arch: string;
+  hostname?: string;
+}
+
+export interface Resource {
+  uri: string;
+  mimeType?: string;
+  text?: string;
+  blob?: string;
+}
+
+export interface ContentItem {
+  type: string;
+  text?: string;
+  data?: string;
+  mimeType?: string;
+  resource?: Resource;
+}
+
+export function textContent(text: string): ContentItem[] {
+  return [{ type: CONTENT_TYPE_TEXT, text }];
+}
+
+export interface ClientServerInfo {
+  name: string;
+  version: string;
+}
+
+export interface InitializeParams {
+  protocolVersion: string;
+  capabilities?: Record<string, unknown>;
+  clientInfo: ClientServerInfo;
+}
+
+export interface InitializeResult {
+  protocolVersion: string;
+  capabilities?: Record<string, unknown>;
+  serverInfo: ClientServerInfo;
+}
+
+export interface RegisterParams {
+  agent_id: string;
+  name?: string;
+  version?: string;
+  description?: string;
+  capabilities: Capability[];
+  platform?: PlatformInfo;
+}
+
+export interface RegisterResult {
+  status: string;
+  server_time: string;
+}
+
+export interface PingParams {
+  timestamp: string;
+}
+
+export interface PingResult {
+  timestamp: string;
+}
+
+export interface LifecycleStatusParams {
+  status: string;
+  task_id?: string;
+  message?: string;
+}
+
+export interface LifecycleCapabilitiesUpdatedParams {
+  capabilities: Capability[];
+}
+
+export interface HeartbeatParams {
+  agent_id?: string;
+  timestamp: string;
+}
+
+export interface StatusParams {
+  agent_id: string;
+  status: string;
+  task_id?: string;
+  session_id?: string;
+  message?: string;
+}
+
+export interface CapabilitiesUpdatedParams {
+  agent_id: string;
+  capabilities: Capability[];
+}
+
+export interface AgentInfo {
+  id: string;
+  owner_id?: string;
+  name?: string;
+  status: string;
+  capabilities: Capability[];
+  platform?: PlatformInfo;
+  last_heartbeat?: string;
+}
+
+export interface AgentListParams {
+  agents: AgentInfo[];
+}
+
+export interface AgentEventParams {
+  event: string;
+  agent_id: string;
+  timestamp: string;
+}
+
+export interface TaskCreateParams {
+  agent_id: string;
+  task_id: string;
+  session_id?: string;
+  context_id?: string;
+  type: string;
+  content: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface TaskAcceptResult {
+  status: string;
+  task_id: string;
+}
+
+export interface TaskCancelParams {
+  agent_id: string;
+  task_id: string;
+}
+
+export interface TaskCancelResult {
+  task_id: string;
+  status: string;
+}
+
+export interface TaskRespondParams {
+  agent_id: string;
+  task_id: string;
+  session_id?: string;
+  confirm_id?: string;
+  prompt_id?: string;
+  block_id?: string;
+  action_id?: string;
+  response?: unknown;
+}
+
+export interface TaskCompleteResult {
+  task_id: string;
+  status: string;
+  summary?: string;
+}
+
+export interface AgentChatParams {
+  task_id: string;
+  session_id?: string;
+  context_id?: string;
+  type: string;
+  content: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface AgentCancelParams {
+  task_id: string;
+}
+
+export interface AgentRespondParams {
+  task_id: string;
+  session_id?: string;
+  confirm_id?: string;
+  prompt_id?: string;
+  block_id?: string;
+  action_id?: string;
+  response?: unknown;
+}
+
+export interface ProgressValue {
+  kind: string;
+  type?: string;
+  agent_id: string;
+  task_id: string;
+  session_id?: string;
+  context_id?: string;
+  content?: ContentItem[];
+  name?: string;
+  arguments?: Record<string, unknown>;
+  confirm_id?: string;
+  prompt_id?: string;
+  options?: string[];
+  block_id?: string;
+  blocks?: unknown;
+  percentage?: number;
+  done?: boolean;
+  error?: string;
+}
+
+export interface ProgressParams {
+  token: string;
+  value?: ProgressValue;
+}
+
+export interface AdminProgressParams {
+  task_id: string;
+  type?: string;
+  agent_id: string;
+  session_id?: string;
+  context_id?: string;
+  content?: ContentItem[];
+  name?: string;
+  arguments?: Record<string, unknown>;
+  confirm_id?: string;
+  prompt_id?: string;
+  options?: string[];
+  block_id?: string;
+  blocks?: unknown;
+  percentage?: number;
+  done?: boolean;
+  error?: string;
+}
+
+export interface ChatMessage {
+  role: string;
+  content: string;
+}
+
+export interface SessionInfo {
+  id: string;
+  agent_id: string;
+  title: string;
+  created_at: number;
+  updated_at: number;
+  message_count?: number;
+}
+
+export interface SessionListParams {
+  agent_id?: string;
+}
+
+export interface SessionListResult {
+  sessions: SessionInfo[];
+}
+
+export interface SessionCreateParams {
+  id?: string;
+  agent_id: string;
+  title?: string;
+}
+
+export interface SessionRenameParams {
+  id: string;
+  title: string;
+}
+
+export interface SessionDeleteParams {
+  id: string;
+}
+
+export interface MessageListParams {
+  session_id: string;
+  limit?: number;
+  before?: number;
+}
+
+export interface StoredMessage {
+  id: string;
+  session_id: string;
+  agent_id: string;
+  role: string;
+  content: unknown; // 反序列化后的消息体（{text, attachments?} 或 {chunks}）
+  task_id?: string | null;
+  created_at: number;
+}
+
+export interface MessageListResult {
+  messages: StoredMessage[];
+  total: number;
+}
+
+export interface UserInfo {
+  id: string;
+  name: string;
+  role: string;
+  disabled: boolean;
+  created_at: number;
+  last_login_at: number | null;
+}
+
+export interface UserListParams {
+  query?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface UserListResult {
+  users: UserInfo[];
+  total: number;
+}
+
+export interface UserSetRoleParams {
+  id: string;
+  role: string; // "admin" | "user"
+}
+
+export interface AdminAgentInfo extends AgentInfo {
+  first_seen: number;
+  last_seen: number;
+  online: boolean;
+}
+
+export interface AdminAgentListParams {
+  owner_id?: string;
+  status?: string; // online | busy | offline
+  query?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface AdminAgentListResult {
+  agents: AdminAgentInfo[];
+  total: number;
+}
+
+export interface AgentDisconnectParams {
+  agent_id: string;
+}
+
+export interface AgentReassignParams {
+  agent_id: string;
+  owner_id: string;
+}
+
+export interface OverviewResult {
+  users_total: number;
+  agents_total: number;
+  agents_online: number;
+  users_connected: number;
+  tasks_active: number;
+}
+
+export interface DeviceKeyCreateParams {
+  name: string;
+  owner_id?: string; // 仅 admin 可代他人创建
+}
+
+export interface DeviceKeyCreateResult {
+  id: string;
+  key: string; // 明文仅此一次返回
+}
+
+export interface DeviceKeyInfo {
+  id: string;
+  owner_id: string;
+  name: string;
+  created_at: number;
+  last_used_at: number | null;
+  disabled: boolean;
+}
+
+export interface DeviceKeyListParams {
+  owner_id?: string; // 仅 admin 可查看他人
+}
+
+export interface DeviceKeyListResult {
+  keys: DeviceKeyInfo[];
+}
+
+export interface DeviceKeyRevokeParams {
+  id: string;
+}
+
+export interface UserCreateParams {
+  name: string;
+  password: string;
+  role?: string; // "admin" | "user"，默认 user
+}
+
+export interface UserDisableParams {
+  id: string;
+  disabled: boolean;
+}
+
+export interface UserResetPasswordParams {
+  id: string;
+  password: string;
+}
+
+export interface UserChangePasswordParams {
+  old_password: string;
+  new_password: string;
+}
+
+export interface LocalAgentRequest {
+  task_id?: string;
+  session_id?: string;
+  context_id?: string;
+  type: string;
+  content?: string;
+  history?: ChatMessage[];
+  reference_task_ids?: string[];
+  confirm_id?: string;
+  prompt_id?: string;
+  block_id?: string;
+  action_id?: string;
+  response?: unknown;
+  metadata?: Record<string, unknown>;
+}
+
+export interface LocalAgentChunk {
+  type: string;
+  task_id?: string;
+  session_id?: string;
+  context_id?: string;
+  content?: ContentItem[];
+  name?: string;
+  arguments?: Record<string, unknown>;
+  confirm_id?: string;
+  prompt_id?: string;
+  options?: string[];
+  block_id?: string;
+  blocks?: unknown;
+  percentage?: number;
+  done?: boolean;
+  error?: string;
+}
+
+export function rfc3339Now(): string {
+  return new Date().toISOString();
+}

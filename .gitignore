@@ -1,0 +1,36 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+build/
+
+# runtime data
+data/
+tmp/
+
+# logs
+*.log
+logs/
+
+# os / editor
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# env / secrets
+.env
+.env.local
+*.secret
+jwt-secret
+
+# temporary workdirs
+_ywm-*
+am-offline.mjs
+/tmp/ywcoder-workdir/
+
+# third-party packages
+dcywzc-ywcoder-*.tgz
+*.tgz

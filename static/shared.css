@@ -1,0 +1,168 @@
+/* YwMatrix 页面共享样式：index.html 与 admin.html 通过 <link> 引入，页面内 <style> 只放各自特有规则 */
+:root {
+    --bg: #f8fafc;
+    --bg-sidebar: #eef2f7;
+    --bg-hover: #e2e8f0;
+    --bg-active: #cbd5e1;
+    --bg-bubble-user: #ecfdf5;
+    --bg-code: #f1f5f9;
+    --text: #0f172a;
+    --text-secondary: #475569;
+    --text-tertiary: #94a3b8;
+    --border: #e2e8f0;
+    --border-strong: #cbd5e1;
+    --accent: #10b981;
+    --accent-hover: #059669;
+    --accent-soft: #d1fae5;
+    --accent-gradient: linear-gradient(135deg, #10b981 0%, #14b8a6 100%);
+    --accent-gradient-hover: linear-gradient(135deg, #059669 0%, #0d9488 100%);
+    --danger: #ef4444;
+    --success: #10b981;
+    --warning: #f59e0b;
+    --shadow-sm: 0 1px 2px rgba(15,23,42,.04), 0 1px 3px rgba(15,23,42,.06);
+    --shadow-md: 0 2px 6px rgba(15,23,42,.05), 0 8px 20px rgba(15,23,42,.08);
+    --shadow-lg: 0 4px 12px rgba(15,23,42,.06), 0 20px 44px rgba(15,23,42,.14);
+    --radius: 12px;
+    --radius-sm: 8px;
+    --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "HarmonyOS Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+[data-theme="dark"] {
+    --bg: #0f172a;
+    --bg-sidebar: #1e293b;
+    --bg-hover: #334155;
+    --bg-active: #475569;
+    --bg-bubble-user: rgba(6,78,59,.35);
+    --bg-code: #1e293b;
+    --text: #e2e8f0;
+    --text-secondary: #94a3b8;
+    --text-tertiary: #64748b;
+    --border: #334155;
+    --border-strong: #475569;
+    --accent: #34d399;
+    --accent-hover: #6ee7b7;
+    --accent-soft: #064e3b;
+    --shadow-sm: 0 1px 2px rgba(0,0,0,.3);
+    --shadow-md: 0 4px 12px rgba(0,0,0,.4);
+    --shadow-lg: 0 12px 32px rgba(0,0,0,.5);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+    font-family: var(--font);
+    font-size: 14.5px;
+    line-height: 1.65;
+    color: var(--text);
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+}
+button { font-family: inherit; cursor: pointer; border: none; background: none; color: inherit; }
+input, textarea, select { font-family: inherit; color: inherit; }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-tertiary); }
+::-webkit-scrollbar-track { background: transparent; }
+
+.logo { display: flex; align-items: center; gap: 9px; text-decoration: none; color: inherit; }
+.logo-svg { width: 26px; height: 26px; flex-shrink: 0; border-radius: 7px; box-shadow: var(--shadow-sm); }
+.logo-word { font-size: 15px; font-weight: 750; letter-spacing: .2px; }
+.logo-word span { font-weight: 500; color: var(--text-secondary); }
+
+.conn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-tertiary); }
+.conn-dot.connected { background: var(--success); }
+.conn-dot.connecting { background: var(--warning); animation: pulse 1.2s infinite; }
+@keyframes pulse { 50% { opacity: .35; } }
+
+.btn {
+    padding: 7px 16px; border-radius: var(--radius-sm);
+    font-size: 13.5px; font-weight: 550;
+    transition: background .15s, opacity .15s, transform .1s, box-shadow .15s;
+}
+.btn:active { transform: scale(.97); }
+.btn-primary { background: var(--accent-gradient); color: #fff; box-shadow: 0 2px 8px rgba(16,185,129,.3); }
+.btn-primary:hover { background: var(--accent-gradient-hover); box-shadow: 0 4px 12px rgba(16,185,129,.38); }
+.btn-ghost { background: var(--bg-hover); color: var(--text-secondary); }
+.btn-ghost:hover { color: var(--text); }
+.btn-danger-ghost { background: var(--bg-hover); color: var(--danger); }
+.btn:disabled { opacity: .45; cursor: not-allowed; transform: none; box-shadow: none; }
+
+.icon-btn {
+    width: 30px; height: 30px; border-radius: var(--radius-sm);
+    display: inline-flex; align-items: center; justify-content: center;
+    color: var(--text-secondary); transition: background .15s, color .15s, transform .1s;
+    text-decoration: none;
+}
+.icon-btn:hover { background: var(--bg-hover); color: var(--text); }
+.icon-btn:active { transform: scale(.94); }
+.icon-btn svg { width: 16px; height: 16px; }
+
+.chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 11.5px; font-weight: 600; padding: 2px 9px; border-radius: 99px;
+    background: var(--bg-hover); color: var(--text-secondary); white-space: nowrap;
+}
+.chip.green { background: color-mix(in srgb, var(--success) 14%, transparent); color: var(--success); }
+.chip.amber { background: color-mix(in srgb, var(--warning) 14%, transparent); color: var(--warning); }
+.chip.red { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
+.chip.accent { background: var(--accent-soft); color: var(--accent); }
+
+.modal-overlay {
+    position: fixed; inset: 0; z-index: 300;
+    background: rgba(10,10,15,.45);
+    backdrop-filter: blur(3px);
+    -webkit-backdrop-filter: blur(3px);
+    display: none; align-items: center; justify-content: center;
+}
+.modal-overlay.open { display: flex; }
+.modal {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 14px;
+    padding: 22px 24px; width: 400px; max-width: 92vw;
+    box-shadow: var(--shadow-lg);
+}
+.modal h3 { font-size: 15px; font-weight: 650; margin-bottom: 8px; }
+.modal p { font-size: 13.5px; color: var(--text-secondary); }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+
+.key-plaintext {
+    font-family: var(--mono); font-size: 13px; word-break: break-all;
+    background: var(--bg-code); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 10px 12px; margin: 10px 0;
+    user-select: all;
+}
+
+.toast-container {
+    position: fixed; top: 16px; right: 16px; z-index: 400;
+    display: flex; flex-direction: column; gap: 8px;
+}
+.toast {
+    padding: 10px 16px; border-radius: 10px; font-size: 13.5px;
+    background: var(--bg); border: 1px solid var(--border);
+    box-shadow: var(--shadow-md); transition: opacity .3s, transform .3s;
+    max-width: 340px;
+}
+.toast.success { border-left: 3px solid var(--success); }
+.toast.warning { border-left: 3px solid var(--warning); }
+.toast.error { border-left: 3px solid var(--danger); }
+
+/* ---------- transitions & motion ---------- */
+.modal-overlay.open .modal { animation: pop-in .18s cubic-bezier(.2, .9, .3, 1.15); }
+@keyframes pop-in { from { opacity: 0; transform: scale(.94) translateY(6px); } }
+
+.toast { animation: toast-in .25s cubic-bezier(.2, .9, .3, 1); }
+@keyframes toast-in { from { opacity: 0; transform: translateX(24px); } }
+
+/* 主题切换时的平滑过渡（JS 在切换瞬间加 .theme-anim，400ms 后移除） */
+html.theme-anim, html.theme-anim *, html.theme-anim *::before, html.theme-anim *::after {
+    transition: background-color .3s ease, border-color .3s ease,
+        box-shadow .3s ease, color .2s ease !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: .01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: .01ms !important;
+    }
+}
