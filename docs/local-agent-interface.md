@@ -326,7 +326,11 @@ Agent 在运行中能力发生变化时主动通知。等价于 MCP 的 `notific
 
 ### 6.2 用户回复
 
-当 Agent 输出 `confirm_required`、`prompt_required` 或 `block_required` 后，AgentClient 将用户回复转发给 Agent。`response` 可以是字符串（确认/选择），也可以是 block 表单结果对象。
+当 Agent 输出 `confirm_required`、`prompt_required` 或 `block_required` 后，AgentClient 将用户回复转发给 Agent。
+
+#### 6.2.1 confirm / prompt 的 response 格式
+
+对 `confirm_required`，`response` 必须是决策对象：
 
 ```json
 // AgentClient → Agent
@@ -338,10 +342,49 @@ Agent 在运行中能力发生变化时主动通知。等价于 MCP 的 `notific
     "task_id": "task-001",
     "session_id": "session-001",
     "confirm_id": "c-001",
-    "response": "确认"
+    "response": {
+      "decision": "allow",
+      "message": "已核对，放行"
+    }
   }
 }
 ```
+
+`decision` 枚举：
+
+| 值 | 含义 |
+|---|---|
+| `allow` | 同意执行该工具/操作 |
+| `deny` | 拒绝；Agent 收到后应让被控子进程走"被拒"分支而不是失败 |
+| `cancel` | 用户主动取消整个确认（区别于 §6.3 停止任务） |
+
+`message` 可选，用于填拒绝理由等。Agent 必须接受不带 `message` 的对象。
+
+旧版兼容：仍可能收到 `boolean`（`true`↔`allow`、`false`↔`deny`）或自由字符串，Agent 自行归一为 `allow/deny/cancel`。
+
+对 `prompt_required`，`response` 仍是字符串或字符串数组（用户选择）；对 `block_required`，是表单结果对象。
+
+#### 6.2.2 task.respond 返回值
+
+原 `id` 回传，返回归一后的裁决，便于 AgentClient/前端核对"用户点的被理解成了什么"：
+
+```json
+// Agent → AgentClient
+{
+  "jsonrpc": "2.0",
+  "id": "req-002",
+  "result": {
+    "task_id": "task-001",
+    "session_id": "session-001",
+    "confirm_id": "c-001",
+    "status": "accepted",
+    "decision": "allow"
+  }
+}
+```
+
+- 以通知形式发（不带 `id`）时，Agent 照常执行但不回 `result`。
+- `confirm_id` 不存在 / 已回复 / 已撤销 → 错误码 `-32000`，AgentClient 不应将其视为前端错误。
 
 ### 6.3 取消任务
 
@@ -349,13 +392,25 @@ Agent 在运行中能力发生变化时主动通知。等价于 MCP 的 `notific
 // AgentClient → Agent
 {
   "jsonrpc": "2.0",
-  "id": "req-003",
   "method": "task.cancel",
   "params": {
-    "task_id": "task-001"
+    "task_id": "task-001",
+    "session_id": "session-001"
   }
 }
 ```
+
+通知类（不带 `id`），Agent 不回 result。`task_id` 必填，`session_id` 可选但建议带上。
+
+**stdio 适配器必须显式转发**：AgentClient 收到网关的 `agent.cancel` 后只中断本地 AbortController 是不够的——子进程仍在跑、继续烧 token，"停止"是假的。stdio 适配器在 AbortSignal 触发时必须额外通过 stdin 写一条 `task.cancel` 通知给子进程。子进程收到后必须：
+
+1. 中断被控工具（如 ywcoder）的当前操作；
+2. 补发 `confirm_cancelled`（reason=`task_cancelled`）清掉所有待决确认框；
+3. 结束本轮。
+
+若 stdin 已关闭（子进程退出），跳过补发。HTTP 适配器则视本地 Agent 实现是否暴露 cancel 接口而定，建议同样补发。
+
+由于审批不设超时，"用户点停止"是待决任务**唯一**的退出路径——用户不点，子进程会一直等。可另保留一个较长任务超时（默认 5 分钟，可配 `-task-timeout`）作为兜底。
 
 ### 6.4 任务完成
 
@@ -565,6 +620,42 @@ Agent 决定执行敏感操作前，请求用户确认。
 ```
 
 `level` 枚举：`info`、`warning`、`dangerous`。
+
+**多确认框并存**：Agent 一轮里可能并发请求多个工具的权限，会同时推多条 `confirm_required`，各自 `confirm_id` 独立、可任意顺序回复。AgentClient/前端必须支持 N 个待确认项并存，按 `confirm_id` 路由响应；不维护"当前 confirm"全局态。
+
+#### 8.1.1 确认框撤销（confirm_cancelled）
+
+场景：用户还没点，但 Agent 已放弃该权限请求。Agent 必须补发一条 `confirm_cancelled` 通知，否则前端框会一直挂着。
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": null,
+  "method": "stream.chunk",
+  "params": {
+    "task_id": "task-001",
+    "session_id": "session-001",
+    "type": "confirm_cancelled",
+    "confirm_id": "c-001",
+    "reason": "task_cancelled"
+  }
+}
+```
+
+`reason` 枚举：
+
+| 值 | 含义 |
+|---|---|
+| `task_cancelled` | 用户点了停止（参见 §6.3） |
+| `interrupted` | 同轮其它操作触发中止 |
+| `agent_exited` | 被控子进程异常退出，shim 兜底补发 |
+
+约定：
+
+- 通知类消息（`id:null`），AgentClient 不回。
+- 前端幂等：收到就关框，重复忽略。
+- 用户点击与撤销交叉时，那次 `task.respond` 会返回 `-32000`，属正常不是错误。
+- 前端收到 `task.completed` / `event.error` 时，必须兜底清掉该 task 下所有未回复的框。
 
 ### 8.2 输入/选择请求
 

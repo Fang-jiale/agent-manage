@@ -1045,6 +1045,7 @@ export function handleAgentMessage(hub: Hub, agent: AgentConn, raw: string): voi
         percentage: value.percentage,
         done: value.done,
         error: value.error,
+        reason: value.reason,
       };
       const notif = proto.newNotification(proto.METHOD_ADMIN_PROGRESS, progress);
       hub.forwardToUsers(agent.ownerID, notif);
@@ -1109,6 +1110,9 @@ async function handleTaskForward(
   hub: Hub, user: UserConn, msg: proto.Message, method: string,
   params: object, agentID?: string,
 ): Promise<void> {
+  // 登记 pendingRequest，让 client.ts 的响应能通过 forwardToPendingUser 路由回 browser。
+  // task.cancel 通常不期待有意义的响应，但 task.respond 必须把 result 透传回去（rule ③）。
+  if (msg.id) hub.trackPendingRequest(msg.id, user);
   const req = proto.newRequest(msg.id ?? "", method, params);
   const target = agentID ?? (params as { agent_id?: string }).agent_id ?? "";
   if (target !== "") {

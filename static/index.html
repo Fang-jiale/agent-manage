@@ -1141,8 +1141,28 @@
             }
 
             function hasActiveTask() {
-                for (const t of pendingTasks.values()) if (!t.done) return true;
-                return false;
+                return !!activeTaskForCurrent();
+            }
+
+            function activeTaskForCurrent() {
+                for (const t of pendingTasks.values()) {
+                    if (!t.done && t.agentId === state.currentAgentId && t.sessionId === state.currentSessionId) {
+                        return t;
+                    }
+                }
+                return null;
+            }
+
+            function syncChatChrome() {
+                const task = activeTaskForCurrent();
+                if (task) {
+                    showTyping();
+                    setProgress(typeof task.lastPercentage === 'number' ? task.lastPercentage : 0);
+                } else {
+                    hideTyping();
+                    setProgress(null);
+                }
+                updateInputState();
             }
 
             /* ---------- rendering: agents & sessions ---------- */
@@ -1619,7 +1639,11 @@
                 });
                 el.querySelectorAll('.interaction-card:not(.answered)').forEach(card => {
                     card.querySelectorAll('[data-respond]').forEach(btn => {
-                        btn.onclick = () => respondToInteraction(card, btn.dataset.respond);
+                        btn.onclick = () => {
+                            let v = btn.dataset.respond;
+                            try { v = JSON.parse(v); } catch { /* keep as string */ }
+                            respondToInteraction(card, v);
+                        };
                     });
                     const form = card.querySelector('.ic-input');
                     if (form) {
@@ -1639,7 +1663,11 @@
                 card.classList.add('answered');
                 const answer = document.createElement('div');
                 answer.className = 'ic-answer';
-                answer.textContent = '已回复：' + (response === true ? '确认' : response === false ? '拒绝' : String(response));
+                answer.textContent = '已回复：' + (
+                    response && typeof response === 'object' && response.decision
+                        ? ({ allow: '确认', deny: '拒绝', cancel: '取消' }[response.decision] || response.decision)
+                        : (response === true ? '确认' : response === false ? '拒绝' : String(response))
+                );
                 card.appendChild(answer);
                 message.answered = true;
                 saveState();
@@ -1689,7 +1717,8 @@
                         return chunkBox('result', 'Result', escapeHtml(chunk.text || ''), keepOpen(chunk.text), ICONS.checkCircle);
                     case 'confirm_required':
                         return interactionCard('需要确认', chunk, msg, [
-                            ['确认', true, 'btn-primary'], ['拒绝', false, 'btn-ghost']
+                            ['确认', { decision: 'allow' }, 'btn-primary'],
+                            ['拒绝', { decision: 'deny' }, 'btn-ghost']
                         ]);
                     case 'prompt_required':
                         return interactionCard('需要输入', chunk, msg, null);
@@ -1940,6 +1969,19 @@
                     renderSessions();
                 }
                 if (done) {
+                    // 兜底：任务结束时 shim 可能没补发 confirm_cancelled，把残留未回复框标记为已撤销
+                    if (session.id === state.currentSessionId) {
+                        const cards = els.messages.querySelectorAll(
+                            '.interaction-card[data-message-id="' + msgId + '"]:not(.answered)'
+                        );
+                        cards.forEach(card => {
+                            card.classList.add('answered', 'cancelled');
+                            const note = document.createElement('div');
+                            note.className = 'ic-answer ic-cancel';
+                            note.textContent = '已撤销：任务结束';
+                            card.appendChild(note);
+                        });
+                    }
                     if (session.agentId === state.currentAgentId && session.id === state.currentSessionId) {
                         hideTyping();
                         setProgress(null);
@@ -1974,6 +2016,7 @@
                 renderChat();
                 if (window.innerWidth <= 768) els.sidebar.classList.remove('open');
                 syncSessions(agentId);
+                syncChatChrome();
             }
 
             function selectSession(sessionId) {
@@ -1982,6 +2025,7 @@
                 renderSessions();
                 renderChat();
                 toggleChatSearch(false);
+                syncChatChrome();
                 const session = getCurrentSession();
                 if (session && !loadedSessions.has(sessionId) && wsConnected) {
                     loadMessages(session).then(renderChat).catch(e => console.warn('loadMessages', e));
@@ -2205,7 +2249,25 @@
                 if (!session) return;
                 task.lastActivity = Date.now();
 
+                // 确认框撤销：单独走，不渲染为新 chunk
+                if (params.type === 'confirm_cancelled') {
+                    if (task.agentId === state.currentAgentId && task.sessionId === state.currentSessionId) {
+                        const card = els.messages.querySelector(
+                            '.interaction-card[data-message-id="' + task.messageId + '"][data-confirm-id="' + (params.confirm_id || '') + '"]'
+                        );
+                        if (card && !card.classList.contains('answered')) {
+                            card.classList.add('answered', 'cancelled');
+                            const note = document.createElement('div');
+                            note.className = 'ic-answer ic-cancel';
+                            note.textContent = '已撤销：' + (params.reason || 'task_cancelled');
+                            card.appendChild(note);
+                        }
+                    }
+                    return;
+                }
+
                 if (typeof params.percentage === 'number' && !params.done) {
+                    task.lastPercentage = params.percentage;
                     if (task.agentId === state.currentAgentId && task.sessionId === state.currentSessionId) {
                         setProgress(params.percentage);
                     }
@@ -2386,7 +2448,7 @@
                         send({
                             jsonrpc: '2.0',
                             method: 'task.cancel',
-                            params: { agent_id: task.agentId, task_id: taskId },
+                            params: { agent_id: task.agentId, task_id: taskId, session_id: task.sessionId },
                             id: generateId()
                         });
                         const session = state.sessions[task.agentId]?.[task.sessionId];

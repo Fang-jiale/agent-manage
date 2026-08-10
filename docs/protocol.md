@@ -445,28 +445,20 @@ AgentClient 定期发送：
     "task_id": "task-001",
     "session_id": "session-001",
     "confirm_id": "c-001",
-    "response": "确认"
+    "response": {
+      "decision": "allow",
+      "message": "已核对，放行"
+    }
   }
 }
 ```
 
-网关转发给 AgentClient：
+`response` 字段格式、`decision` 枚举、返回 result、多确认框并存、确认框撤销（`confirm_cancelled`）等约定，详见 [本地 Agent 接口标准 §6.2 / §8](local-agent-interface.md)。网关对此仅做透传，不解释语义。
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": "req-003",
-  "method": "agent.respond",
-  "params": {
-    "task_id": "task-001",
-    "session_id": "session-001",
-    "confirm_id": "c-001",
-    "response": "确认"
-  }
-}
-```
+前端层补充约定：
 
-AgentClient 通过适配器把回复交给本地 Agent，本地 Agent 继续执行。
+- 收到 `confirm_cancelled` 即关框，幂等，重复忽略；用户点击与撤销交叉时那次 `task.respond` 会返回 `-32000`，属正常不是错误。
+- 收到 `task.completed` / `event.error` 时，兜底清掉该 task 下所有未回复的框。
 
 ## 8. 任务取消
 
@@ -478,10 +470,14 @@ AgentClient 通过适配器把回复交给本地 Agent，本地 Agent 继续执�
   "id": "req-002",
   "method": "task.cancel",
   "params": {
-    "task_id": "task-001"
+    "agent_id": "demo-mac",
+    "task_id": "task-001",
+    "session_id": "session-001"
   }
 }
 ```
+
+`task_id` 必填，`session_id` 推荐带上。AgentClient 收到 `agent.cancel` 后向本地 Agent 补发取消的约定（stdio 子进程必须收到 `task.cancel` 否则是假停止）详见 [本地 Agent 接口标准 §6.3 / §10.3](local-agent-interface.md)。
 
 ### 8.2 网关转发取消（Gateway → AgentClient）
 
@@ -491,10 +487,18 @@ AgentClient 通过适配器把回复交给本地 Agent，本地 Agent 继续执�
   "id": "req-002",
   "method": "agent.cancel",
   "params": {
-    "task_id": "task-001"
+    "task_id": "task-001",
+    "session_id": "session-001"
   }
 }
 ```
+
+AgentClient 收到后必须做两件事：
+
+1. 中断本地 AbortController（释放 SSE/异步队列）
+2. **向本地 Agent 补发 `task.cancel`**（stdio 通过 stdin 写 JSON-RPC 通知，HTTP 取决于 LocalAgent 是否暴露 cancel 接口）
+
+仅做 ① 不做 ② 是"假停止"——LocalAgent 和被控子进程仍继续运行、消耗资源。完整约定详见 [本地 Agent 接口标准 §6.3](local-agent-interface.md)。
 
 ### 8.3 取消完成
 
@@ -590,6 +594,9 @@ chunk `type` 说明：
 | `confirm_required` | 需要用户确认 |
 | `prompt_required` | 需要用户输入/选择 |
 | `block_required` | 需要用户填写表单/复杂交互 |
+| `confirm_cancelled` | 待决确认被系统撤销（用户没点但 Agent 已放弃），通知类 `id:null`，前端关框 |
+
+各 chunk 的字段细节、`task.respond` 的 response 对象格式与返回值、多确认框并存规则、stdio 取消转发等完整约定，见 [本地 Agent 接口标准](local-agent-interface.md)。
 
 ### 10.2 HTTP 适配器
 
@@ -649,6 +656,8 @@ AgentClient 向 stdin 写入：
 ```
 
 当本地 Agent 返回 `confirm_required` 或 `prompt_required` 时，本次请求读取暂停，等待用户通过 `task.respond` 回复后继续。
+
+**取消必须显式转发**：AgentClient 收到 `agent.cancel` 后只中断本地 AbortController 是不够的（shim 与子进程仍在跑、继续烧 token）。stdio 适配器在 AbortSignal 触发时必须额外通过 stdin 写一条 `task.cancel` 通知给本地 Agent。详见 [本地 Agent 接口标准 §6.3](local-agent-interface.md)。
 
 ## 11. 消息时序图
 

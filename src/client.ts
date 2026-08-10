@@ -102,6 +102,32 @@ function translateLifecycleEvent(agentID: string, ev: LocalAgentEvent): proto.Me
         capabilities: params.capabilities,
       } satisfies proto.CapabilitiesUpdatedParams);
     }
+    case "stream.chunk": {
+      // shim 在 send() 已返回后发出的"事后"chunk（目前仅 confirm_cancelled）。
+      // 没有对应的 for-await 消费者，必须经 events 流旁路送到 gateway。
+      const chunk = (ev.params ?? {}) as proto.LocalAgentChunk;
+      const kind = chunk.done ? proto.PROGRESS_KIND_END : proto.PROGRESS_KIND_REPORT;
+      return proto.newNotification(proto.METHOD_PROGRESS, {
+        token: chunk.task_id ?? "",
+        value: {
+          kind,
+          type: chunk.type,
+          agent_id: agentID,
+          task_id: chunk.task_id,
+          session_id: chunk.session_id,
+          confirm_id: chunk.confirm_id,
+          prompt_id: chunk.prompt_id,
+          options: chunk.options,
+          block_id: chunk.block_id,
+          percentage: chunk.percentage,
+          done: chunk.done,
+          error: chunk.error,
+          reason: chunk.reason,
+          content: chunk.content,
+          name: chunk.name,
+        } satisfies proto.ProgressValue,
+      } satisfies proto.ProgressParams);
+    }
     default:
       return undefined;
   }
@@ -137,6 +163,7 @@ function sendProgress(
       percentage: chunk.percentage,
       done: chunk.done,
       error: chunk.error,
+      reason: chunk.reason,
     } satisfies proto.ProgressValue,
   } satisfies proto.ProgressParams);
   safeSend(ws, msg);
@@ -299,9 +326,37 @@ async function handleRespond(
       sendProgress(ws, agentID, params.task_id, params.session_id, undefined,
         proto.PROGRESS_KIND_END, { type: proto.CHUNK_TYPE_TEXT, error: "timeout", done: true });
     }
+    // 把 shim 的 task.respond 返回值透传给 browser（rule ③：status:"accepted" + decision）
+    // decision 归一：旧 shim 可能传 boolean/string，这里按 RESPOND_DECISION_* 归一映射。
+    const decision = normalizeDecision(params.response);
+    if (msg.id) {
+      safeSend(ws, proto.newResponse(msg.id, {
+        task_id: params.task_id,
+        session_id: params.session_id,
+        confirm_id: params.confirm_id,
+        prompt_id: params.prompt_id,
+        block_id: params.block_id,
+        action_id: params.action_id,
+        status: "accepted",
+        decision,
+      } satisfies proto.TaskRespondResult));
+    }
   } finally {
     tasks.remove(params.task_id);
   }
+}
+
+function normalizeDecision(response: unknown): "allow" | "deny" | "cancel" | undefined {
+  if (response && typeof response === "object") {
+    const d = (response as { decision?: unknown }).decision;
+    if (d === proto.RESPOND_DECISION_ALLOW || d === proto.RESPOND_DECISION_DENY || d === proto.RESPOND_DECISION_CANCEL) return d;
+  }
+  if (response === true) return proto.RESPOND_DECISION_ALLOW;
+  if (response === false) return proto.RESPOND_DECISION_DENY;
+  if (response === proto.RESPOND_DECISION_ALLOW || response === proto.RESPOND_DECISION_DENY || response === proto.RESPOND_DECISION_CANCEL) {
+    return response as "allow" | "deny" | "cancel";
+  }
+  return undefined;
 }
 
 function sendRegister(ws: WebSocket, agentID: string, caps: proto.Capability[]): void {
@@ -414,6 +469,9 @@ async function main(): Promise<void> {
         case proto.METHOD_AGENT_CANCEL: {
           const params = proto.decodeParams<proto.AgentCancelParams>(msg);
           tasks.cancel(params.task_id);
+          // 显式转发到 adapter，确保 confirm_required 已关 queue / controller 已被
+          // registry 回收的场景下，task.cancel 仍能打到 shim。
+          adapter.cancelTask?.(params.task_id, params.session_id);
           if (msg.id) {
             safeSend(ws, proto.newResponse(msg.id, {
               task_id: params.task_id,

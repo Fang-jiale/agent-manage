@@ -83,6 +83,18 @@ export const CHUNK_TYPE_CONFIRM_REQUIRED = "confirm_required";
 export const CHUNK_TYPE_PROMPT_REQUIRED = "prompt_required";
 export const CHUNK_TYPE_BLOCK_REQUIRED = "block_required";
 export const CHUNK_TYPE_ARTIFACT = "artifact";
+// Notification-only (id:null): shim 补发，告诉前端撤销某个待决确认框。
+// 触发场景：用户点停止（task_cancelled）、同轮其它操作触发中断（interrupted）、
+// ywcoder 子进程异常退出（agent_exited，shim 兜底）。前端收到即关框，幂等。
+export const CHUNK_TYPE_CONFIRM_CANCELLED = "confirm_cancelled";
+export const CONFIRM_CANCEL_REASON_TASK_CANCELLED = "task_cancelled";
+export const CONFIRM_CANCEL_REASON_INTERRUPTED = "interrupted";
+export const CONFIRM_CANCEL_REASON_AGENT_EXITED = "agent_exited";
+
+// task.respond 的归一裁决值，前端按钮和 shim 返回都用这三个。
+export const RESPOND_DECISION_ALLOW = "allow";
+export const RESPOND_DECISION_DENY = "deny";
+export const RESPOND_DECISION_CANCEL = "cancel";
 
 // Progress kinds, matching LSP partial result semantics.
 export const PROGRESS_KIND_BEGIN = "begin";
@@ -273,6 +285,7 @@ export interface TaskAcceptResult {
 export interface TaskCancelParams {
   agent_id: string;
   task_id: string;
+  session_id?: string;
 }
 
 export interface TaskCancelResult {
@@ -288,7 +301,23 @@ export interface TaskRespondParams {
   prompt_id?: string;
   block_id?: string;
   action_id?: string;
-  response?: unknown;
+  // 决策对象；旧实现可能仍传 boolean/string，shim 自行兼容归一为 allow/deny/cancel。
+  response?: RespondDecision | boolean | string | unknown;
+}
+
+// 用户审批结果的归一格式。message 可选，用于填拒绝理由等。
+export interface RespondDecision {
+  decision: typeof RESPOND_DECISION_ALLOW | typeof RESPOND_DECISION_DENY | typeof RESPOND_DECISION_CANCEL;
+  message?: string;
+}
+
+// task.respond 的返回值，shim 原样返回，gateway 透传。confirm_id 不存在/已回复/已撤销 → -32000。
+export interface TaskRespondResult {
+  task_id: string;
+  session_id?: string;
+  confirm_id?: string;
+  status: "accepted";
+  decision: typeof RESPOND_DECISION_ALLOW | typeof RESPOND_DECISION_DENY | typeof RESPOND_DECISION_CANCEL;
 }
 
 export interface TaskCompleteResult {
@@ -308,6 +337,7 @@ export interface AgentChatParams {
 
 export interface AgentCancelParams {
   task_id: string;
+  session_id?: string;
 }
 
 export interface AgentRespondParams {
@@ -338,6 +368,7 @@ export interface ProgressValue {
   percentage?: number;
   done?: boolean;
   error?: string;
+  reason?: string;
 }
 
 export interface ProgressParams {
@@ -362,6 +393,7 @@ export interface AdminProgressParams {
   percentage?: number;
   done?: boolean;
   error?: string;
+  reason?: string;
 }
 
 export interface ChatMessage {
@@ -567,6 +599,7 @@ export interface LocalAgentChunk {
   percentage?: number;
   done?: boolean;
   error?: string;
+  reason?: string;
 }
 
 export function rfc3339Now(): string {

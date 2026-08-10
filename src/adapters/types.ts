@@ -12,6 +12,12 @@ export interface LocalAgentAdapter {
   // stream of chunks.
   send(req: LocalAgentRequest, signal: AbortSignal): Promise<AsyncIterable<LocalAgentChunk>>;
 
+  // cancelTask 显式向 agent 转发 task.cancel，独立于 send() 的 AbortSignal。
+  // 必要性：confirm_required 关 queue 后 send() 已返回，controller 可能被 registry
+  // 回收，abort 路径不再触发；用户此时点停止必须能直接打到 agent，让 shim 兜底发
+  // confirm_cancelled。HTTP 适配器无子进程，可在 noop / abort fetch 间择一。
+  cancelTask?(taskID: string, sessionID?: string): void;
+
   // Capabilities returns the capabilities advertised by the local agent.
   getCapabilities(): Capability[];
 

@@ -181,7 +181,15 @@ export class StdioAdapter implements LocalAgentAdapter {
 
   private routeChunk(chunk: proto.LocalAgentChunk): void {
     const q = this.currentQueue;
-    if (!q) return;
+    if (!q) {
+      // send() 已返回（典型：confirm_required 关 queue 后用户点停止，
+      // shim 兜底发 confirm_cancelled）。这类"事后"chunk 必须走 events 流
+      // 转发到 gateway，否则前端永远收不到撤销通知。
+      if (chunk.type === proto.CHUNK_TYPE_CONFIRM_CANCELLED) {
+        this.eventsQueue.push({ method: "stream.chunk", params: chunk });
+      }
+      return;
+    }
     q.push(chunk);
     if (
       chunk.done ||
@@ -207,9 +215,23 @@ export class StdioAdapter implements LocalAgentAdapter {
     this.currentQueue = queue;
 
     const onAbort = (): void => {
+      // 关键：必须显式通知子进程取消，否则 shim 和被控进程继续跑、烧 token。
+      // 仅中断本地 AbortController 是假停止。HTTP 适配器不通过此路径。
+      // 注意：confirm_required 已经把 currentQueue 设为 null，所以这里要无条件转发
+      // task.cancel——只要还知道 task_id，shim 就该收到。
       if (this.currentQueue === queue) {
         this.currentQueue = null;
         queue.close();
+      }
+      if (!this.closed && req.task_id) {
+        try {
+          this.writeMessage(proto.newNotification(proto.METHOD_TASK_CANCEL, {
+            task_id: req.task_id,
+            session_id: req.session_id,
+          }));
+        } catch {
+          // stdin 已关闭等场景，忽略
+        }
       }
     };
     if (signal.aborted) {
@@ -223,6 +245,18 @@ export class StdioAdapter implements LocalAgentAdapter {
 
   getCapabilities(): proto.Capability[] {
     return this.capabilities;
+  }
+
+  cancelTask(taskID: string, sessionID?: string): void {
+    if (this.closed) return;
+    try {
+      this.writeMessage(proto.newNotification(proto.METHOD_TASK_CANCEL, {
+        task_id: taskID,
+        session_id: sessionID,
+      }));
+    } catch {
+      // stdin 已关闭等场景，忽略
+    }
   }
 
   events(): AsyncIterable<LocalAgentEvent> {
