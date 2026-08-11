@@ -1725,7 +1725,11 @@
                 }
             }
 
-            function renderChat() {
+            const MAX_VISIBLE_MSGS = 200;
+            let chatVisibleLimit = MAX_VISIBLE_MSGS;
+            function resetChatVisibleLimit() { chatVisibleLimit = MAX_VISIBLE_MSGS; }
+
+            function renderChat(preserveScroll = false) {
                 const session = getCurrentSession();
                 renderChatHeader();
                 if (!session) {
@@ -1741,40 +1745,73 @@
                     renderSessions();
                 }
                 els.emptyState.style.display = 'none';
+
+                // 扩展窗口时保留视觉位置：记下旧 scrollHeight 和 scrollTop，
+                // 渲染完成后把多出来的高度加回去，用户视角不变
+                let prevScrollH = 0, prevScrollTop = 0;
+                if (preserveScroll) {
+                    prevScrollH = els.messages.scrollHeight;
+                    prevScrollTop = els.messages.scrollTop;
+                }
+
                 els.messages.innerHTML = '';
                 if (session.messages.length === 0) {
                     els.messages.appendChild(renderSuggestions(session));
                 } else {
-                    const remaining = (session.messageCount ?? session.messages.length) - session.messages.length;
+                    const total = session.messages.length;
+                    const visibleCount = Math.min(chatVisibleLimit, total);
+                    const startIdx = total - visibleCount;
+                    const hiddenLocal = startIdx; // 本地已加载但被截断的数量
+
+                    // 服务端还有更早的消息
+                    const remaining = (session.messageCount ?? total) - total;
                     if (remaining > 0) {
                         const btn = document.createElement('button');
                         btn.className = 'load-earlier';
-                        btn.textContent = '加载更早的消息（还有 ' + remaining + ' 条）';
+                        btn.textContent = '加载更早的消息（服务端还有 ' + remaining + ' 条）';
                         btn.addEventListener('click', async () => {
                             btn.disabled = true;
                             btn.textContent = '加载中…';
                             try {
                                 await loadMessages(session, session.messages[0]?.createdAt);
-                                renderChat();
+                                renderChat(true);
                             } catch (e) {
                                 showToast('加载失败：' + e.message, 'error');
                                 btn.disabled = false;
-                                btn.textContent = '加载更早的消息（还有 ' + remaining + ' 条）';
+                                btn.textContent = '加载更早的消息（服务端还有 ' + remaining + ' 条）';
                             }
                         });
                         els.messages.appendChild(btn);
                     }
+                    // 本地截断：显示扩展按钮
+                    if (hiddenLocal > 0) {
+                        const btn = document.createElement('button');
+                        btn.className = 'load-earlier local-expand';
+                        btn.textContent = '↑ 显示更早 ' + Math.min(MAX_VISIBLE_MSGS, hiddenLocal) +
+                            ' 条（已隐藏 ' + hiddenLocal + ' 条，共 ' + total + ' 条）';
+                        btn.addEventListener('click', () => {
+                            chatVisibleLimit += MAX_VISIBLE_MSGS;
+                            renderChat(true);
+                        });
+                        els.messages.appendChild(btn);
+                    }
                     let lastDay = '';
-                    session.messages.forEach(msg => {
+                    for (let i = startIdx; i < total; i++) {
+                        const msg = session.messages[i];
                         const day = new Date(msg.createdAt).toDateString();
                         if (day !== lastDay) {
                             els.messages.appendChild(makeDivider(msg.createdAt));
                             lastDay = day;
                         }
                         els.messages.appendChild(renderMessage(msg));
-                    });
+                    }
                 }
-                scrollToBottom(true);
+                if (preserveScroll) {
+                    const newScrollH = els.messages.scrollHeight;
+                    els.messages.scrollTop = newScrollH - prevScrollH + prevScrollTop;
+                } else {
+                    scrollToBottom(true);
+                }
                 updateInputState();
             }
 
@@ -2603,6 +2640,7 @@
 
             function selectAgent(agentId) {
                 state.currentAgentId = agentId;
+                resetChatVisibleLimit();
                 const sessions = getSessionsForAgent(agentId);
                 const ids = Object.keys(sessions);
                 state.currentSessionId = ids.length
@@ -2619,6 +2657,7 @@
 
             function selectSession(sessionId) {
                 state.currentSessionId = sessionId;
+                resetChatVisibleLimit();
                 saveState();
                 renderSessions();
                 renderChat();
@@ -2626,7 +2665,7 @@
                 syncChatChrome();
                 const session = getCurrentSession();
                 if (session && !loadedSessions.has(sessionId) && wsConnected) {
-                    loadMessages(session).then(renderChat).catch(e => console.warn('loadMessages', e));
+                    loadMessages(session).then(() => renderChat()).catch(e => console.warn('loadMessages', e));
                 }
             }
 

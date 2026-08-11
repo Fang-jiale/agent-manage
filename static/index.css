@@ -810,9 +810,16 @@ body.compact .agent-card { padding: 8px 10px; }
     padding: 6px 16px; border-radius: 999px;
     border: 1px solid var(--border-strong);
     color: var(--text-secondary); font-size: 12.5px;
-    transition: color .15s, border-color .15s;
+    transition: color .15s, border-color .15s, background .15s;
 }
 .load-earlier:hover { color: var(--accent); border-color: var(--accent); }
+.load-earlier + .load-earlier { margin-top: -14px; }
+.load-earlier.local-expand {
+    border-style: dashed; color: var(--text-tertiary);
+}
+.load-earlier.local-expand:hover {
+    background: var(--accent-soft);
+}
 
 /* settings modal */
 .settings-modal { width: 400px; }

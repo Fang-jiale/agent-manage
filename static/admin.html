@@ -50,7 +50,7 @@
                     <h2>用户管理</h2>
                     <div class="admin-page-desc">创建账号、调整角色、禁用或重置密码</div>
                     <div class="admin-toolbar">
-                        <input type="text" id="adminUserSearch" placeholder="搜索用户名…">
+                        <input type="text" id="adminUserSearch" placeholder="搜索用户名…" autocomplete="off">
                         <span class="spacer"></span>
                         <input type="text" id="adminNewUserName" placeholder="用户名" style="width:130px" autocomplete="off">
                         <input type="password" id="adminNewUserPwd" placeholder="初始密码" style="width:130px" autocomplete="new-password">
@@ -84,7 +84,7 @@
                             <option value="busy">忙碌</option>
                             <option value="offline">离线</option>
                         </select>
-                        <input type="text" id="adminAgentSearch" placeholder="搜索名称 / ID…">
+                        <input type="text" id="adminAgentSearch" placeholder="搜索名称 / ID…" autocomplete="off">
                     </div>
                     <div class="admin-table-wrap">
                         <table class="admin-table">
@@ -105,7 +105,7 @@
                     <div class="admin-toolbar">
                         <select id="adminKeyOwner" style="width:150px"><option value="">我自己</option></select>
                         <span class="spacer"></span>
-                        <input type="text" id="adminNewKeyName" placeholder="密钥备注名（如 办公室 iMac）" style="width:200px" autocomplete="off">
+                        <input type="text" id="adminNewKeyName" placeholder="密钥备注名（如 办公室 iMac）" style="width:200px" autocomplete="off" readonly onfocus="this.removeAttribute('readonly')">
                         <button class="btn btn-primary" id="adminCreateKeyBtn">创建密钥</button>
                     </div>
                     <div class="admin-table-wrap">
@@ -209,6 +209,25 @@
             }
             function generateId() {
                 return Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
+            }
+
+            const ICONS = {
+                users: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="5.5" r="2.5"/><path d="M1.8 13.5c.5-2.6 2.4-4 4.2-4s3.7 1.4 4.2 4"/><circle cx="11.5" cy="5" r="1.8"/><path d="M11 9.6c1.6.2 3 1.5 3.4 3.9"/></svg>',
+                agent: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M5.5 6.5L8 8.5l-2.5 2M9 11h2.5"/></svg>',
+                conn: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 9.5C3 6.5 5.5 4 8.5 4M3 12c0-1 .8-1.8 1.8-1.8M8.5 7c-1.4 0-2.5 1.1-2.5 2.5"/><circle cx="11" cy="11" r="2.2"/></svg>',
+                task: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 8h3l1.5-5 3 10 1.5-5h3.5"/></svg>',
+                key: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="5.5" cy="8" r="2.5"/><path d="M8 8h6M12 8v2.5M14 8v1.8"/></svg>',
+                apple: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M11.5 8.4c0-1.4 1.1-2.1 1.2-2.1-.7-1-1.7-1.1-2-1.1-.9-.1-1.7.5-2.1.5-.4 0-1-.5-1.7-.5-.9 0-1.7.5-2.1 1.3-.9 1.5-.2 3.8.7 5 .4.6 1 1.3 1.7 1.3.7 0 .9-.4 1.7-.4s1 .4 1.7.4 1.1-.6 1.6-1.2c.4-.6.7-1.2.7-1.2s-1.3-.5-1.3-2zM9.6 4.4c.3-.4.5-1 .4-1.6-.5 0-1.1.3-1.4.7-.3.3-.6.9-.5 1.5.5 0 1.1-.3 1.5-.6z"/></svg>',
+                windows: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M2 4l5.5-1v5H2zM8.5 2.8L14 1.8V7.5H8.5zM2 9h5.5v5L2 12.8zM8.5 9H14v5.2l-5.5-.9z"/></svg>',
+                linux: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 2c-1.5 0-2.5 1.5-2.5 3 0 .8.2 1.4-.3 2.2-.7 1.1-2 1.6-2.4 3.3-.2.7-.7 1.2-.7 2 0 .8.5 1.2 1.2 1.4.5.2.8.5 1.2.7.3.2.6.2.9.2.4 0 .7-.2 1-.4.4-.3.7-.5 1.6-.5s1.2.2 1.6.5c.3.2.6.4 1 .4.3 0 .6 0 .9-.2.4-.2.7-.5 1.2-.7.7-.2 1.2-.6 1.2-1.4 0-.8-.5-1.3-.7-2-.4-1.7-1.7-2.2-2.4-3.3-.5-.8-.3-1.4-.3-2.2 0-1.5-1-3-2.5-3z"/></svg>',
+                terminal: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M5.5 6.5L8 8.5l-2.5 2M9 11h2.5"/></svg>',
+            };
+            function platformIcon(os) {
+                const s = (os || '').toLowerCase();
+                if (s.includes('win')) return ICONS.windows;
+                if (s.includes('darwin') || s.includes('mac')) return ICONS.apple;
+                if (s.includes('linux') || s.includes('kylin') || s.includes('ubuntu') || s.includes('centos')) return ICONS.linux;
+                return ICONS.terminal;
             }
 
             const els = {};
@@ -375,16 +394,21 @@
                 try {
                     const r = await rpcCall('admin.overview', {});
                     const cards = [
-                        ['用户总数', r.users_total, ''],
-                        ['Agent 总数', r.agents_total, '在线 ' + r.agents_online],
-                        ['页面连接', r.users_connected, ''],
-                        ['进行中任务', r.tasks_active, ''],
+                        { icon: ICONS.users,  label: '用户总数',   value: r.users_total,     sub: '' },
+                        { icon: ICONS.agent,  label: 'Agent 总数', value: r.agents_total,    sub: '在线 ' + r.agents_online },
+                        { icon: ICONS.conn,   label: '页面连接',   value: r.users_connected, sub: '' },
+                        { icon: ICONS.task,   label: '进行中任务', value: r.tasks_active,    sub: '' },
                     ];
-                    els.overviewCards.innerHTML = cards.map(([label, value, sub]) =>
-                        '<div class="stat-card"><div class="stat-label">' + label + '</div>' +
-                        '<div class="stat-value">' + value +
-                        (sub ? ' <span class="stat-sub">' + escapeHtml(sub) + '</span>' : '') +
-                        '</div></div>').join('');
+                    els.overviewCards.innerHTML = cards.map(c =>
+                        '<div class="stat-card">' +
+                            '<div class="stat-icon">' + c.icon + '</div>' +
+                            '<div class="stat-body">' +
+                                '<div class="stat-label">' + c.label + '</div>' +
+                                '<div class="stat-value">' + c.value +
+                                (c.sub ? ' <span class="stat-sub">' + escapeHtml(c.sub) + '</span>' : '') +
+                                '</div>' +
+                            '</div>' +
+                        '</div>').join('');
                 } catch (e) { /* 忽略瞬时错误，下轮刷新重试 */ }
             }
 
@@ -520,7 +544,9 @@
                     '<div class="cell-sub">' + escapeHtml(a.id) + '</div></td>' +
                     '<td>' + escapeHtml(userNameOf(a.owner_id)) + '</td>' +
                     '<td>' + agentStatusChip(a) + '</td>' +
-                    '<td>' + (a.platform && a.platform.os ? escapeHtml(a.platform.os + '/' + (a.platform.arch || '?')) : '—') + '</td>' +
+                    '<td>' + (a.platform && a.platform.os
+                        ? '<span class="platform-cell"><span class="platform-ico">' + platformIcon(a.platform.os) + '</span>' + escapeHtml(a.platform.os + '/' + (a.platform.arch || '?')) + '</span>'
+                        : '—') + '</td>' +
                     '<td>' + relativeTime(a.last_seen) + '</td>' +
                     '<td><div class="row-actions">' +
                     '<button data-act="reassign" data-id="' + escapeAttr(a.id) + '">转移归属</button>' +
