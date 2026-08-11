@@ -398,8 +398,118 @@ body.compact .session-preview { display: none; }
 }
 .interaction-card .ic-input:focus { border-color: var(--accent); }
 .interaction-card.answered { opacity: .65; }
-.interaction-card.answered .ic-actions, .interaction-card.answered .ic-input { display: none; }
+.interaction-card.answered .ic-actions,
+.interaction-card.answered .ic-input,
+.interaction-card.answered .ic-options,
+.interaction-card.answered .ic-input-row,
+.interaction-card.answered .ic-submit { display: none; }
 .ic-answer { font-size: 12.5px; color: var(--success); font-weight: 600; }
+
+.interaction-card .ic-options {
+    display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px;
+}
+.interaction-card .ic-option {
+    padding: 5px 11px; font-size: 12.5px;
+    background: var(--bg-hover); color: var(--text-secondary);
+    border: 1px solid var(--border-strong); border-radius: 6px;
+    transition: all .15s;
+}
+.interaction-card .ic-option:hover {
+    background: var(--accent-soft); color: var(--text);
+    border-color: var(--accent);
+}
+.interaction-card .ic-option.selected {
+    background: var(--accent); color: #fff;
+    border-color: var(--accent);
+}
+.interaction-card .ic-input-row {
+    display: flex; gap: 6px; margin-top: 8px; align-items: stretch;
+}
+.interaction-card .ic-input-row .ic-input { flex: 1; }
+.interaction-card .ic-submit { font-size: 12.5px; padding: 5px 14px; }
+.interaction-card .ic-submit:disabled { opacity: .5; cursor: not-allowed; }
+.interaction-card.prompt-card .ic-submit:not(:disabled) {
+    margin-top: 8px;
+}
+
+/* block_required 卡片 */
+.interaction-card.block-card .ic-block-section {
+    font-size: 13.5px; color: var(--text); margin-bottom: 8px;
+    line-height: 1.6;
+}
+.interaction-card.block-card .ic-block-section p:last-child { margin-bottom: 0; }
+.interaction-card.block-card .ic-block-input {
+    margin-bottom: 10px;
+}
+.interaction-card.block-card .ic-block-label {
+    display: block; font-size: 12px; color: var(--text-secondary);
+    margin-bottom: 4px; font-weight: 500;
+}
+.interaction-card.block-card .ic-block-select,
+.interaction-card.block-card .ic-block-text {
+    width: 100%; padding: 6px 10px; font-size: 13px;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border-strong); border-radius: 6px;
+}
+.interaction-card.block-card .ic-block-select:focus,
+.interaction-card.block-card .ic-block-text:focus {
+    outline: none; border-color: var(--accent);
+}
+.interaction-card.block-card .ic-block-unsupported {
+    font-size: 12px; color: var(--text-tertiary);
+    padding: 4px 8px; border: 1px dashed var(--border-strong); border-radius: 4px;
+}
+.interaction-card.block-card .ic-block-submit {
+    margin-top: 8px;
+}
+.interaction-card.block-card.answered .ic-block-input,
+.interaction-card.block-card.answered .ic-block-select,
+.interaction-card.block-card.answered .ic-block-text,
+.interaction-card.block-card.answered .ic-block-submit,
+.interaction-card.block-card.answered .ic-actions,
+.interaction-card.block-card.answered .ic-block-action {
+    pointer-events: none; opacity: .6;
+}
+
+/* typed content (image / resource in result chunks) */
+.ci-img {
+    max-width: 100%; max-height: 320px; border-radius: 8px;
+    cursor: zoom-in; display: block; margin: 6px 0;
+    border: 1px solid var(--border);
+}
+.ri-text { font-size: 13.5px; line-height: 1.6; color: var(--text); }
+.ri-text p:last-child { margin-bottom: 0; }
+.ri-image-wrap { margin: 6px 0; }
+
+.chunk-resource {
+    margin: 6px 0; padding: 10px 12px; border-radius: 8px;
+    background: var(--bg-code); border: 1px solid var(--border);
+}
+.chunk-resource .cr-head {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12.5px; color: var(--text-secondary);
+    margin-bottom: 6px;
+}
+.chunk-resource .cr-head svg { width: 14px; height: 14px; flex-shrink: 0; }
+.chunk-resource .cr-mime {
+    font-family: var(--mono); font-size: 11px;
+    padding: 1px 6px; border-radius: 4px;
+    background: var(--bg-hover); color: var(--text-tertiary);
+}
+.chunk-resource .cr-text {
+    margin: 0; padding: 8px 10px; max-height: 280px; overflow: auto;
+    background: var(--bg); border-radius: 6px;
+    font-family: var(--mono); font-size: 12px;
+    color: var(--text); white-space: pre-wrap; word-break: break-word;
+}
+.chunk-resource .cr-uri {
+    font-family: var(--mono); font-size: 12px;
+    color: var(--accent); word-break: break-all;
+}
+.chunk-resource .cr-empty {
+    font-size: 12px; color: var(--text-tertiary);
+    padding: 4px 0;
+}
 
 /* typing indicator */
 .typing { display: none; gap: 14px; margin-bottom: 26px; }

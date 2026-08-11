@@ -1917,6 +1917,11 @@
                         }
                     };
                 });
+                // result chunk 内的 typed content 图片（base64 或 url）→ lightbox
+                el.querySelectorAll('.ci-img').forEach(img => {
+                    if (img.onclick) return;
+                    img.onclick = () => openLightbox(img.src);
+                });
                 el.querySelectorAll('.msg-file-chip.clickable').forEach(chip => {
                     const open = () => {
                         const msgId = chip.getAttribute('data-msg-id');
@@ -1950,6 +1955,7 @@
                     };
                 });
                 el.querySelectorAll('.interaction-card:not(.answered)').forEach(card => {
+                    // confirm_required：按钮直接带 data-respond
                     card.querySelectorAll('[data-respond]').forEach(btn => {
                         btn.onclick = () => {
                             let v = btn.dataset.respond;
@@ -1957,12 +1963,79 @@
                             respondToInteraction(card, v);
                         };
                     });
+                    // prompt_required 单选 option：点一下就提交
+                    if (!card.dataset.multi) {
+                        card.querySelectorAll('.ic-option').forEach(btn => {
+                            btn.onclick = () => {
+                                const idx = parseInt(btn.dataset.optIdx, 10);
+                                const msg = findMessageById(card.dataset.messageId);
+                                const chunk = msg?.chunks?.find(c => c.promptId === card.dataset.promptId);
+                                const opts = chunk?.options || [];
+                                const v = opts[idx] ?? btn.textContent;
+                                respondToInteraction(card, String(v));
+                            };
+                        });
+                    } else {
+                        // multi：toggle 选中状态，提交时收集 selected
+                        const selected = new Set();
+                        card.querySelectorAll('.ic-option').forEach(btn => {
+                            btn.onclick = () => {
+                                const idx = btn.dataset.optIdx;
+                                if (selected.has(idx)) { selected.delete(idx); btn.classList.remove('selected'); }
+                                else { selected.add(idx); btn.classList.add('selected'); }
+                                const submit = card.querySelector('.ic-submit');
+                                if (submit) {
+                                    submit.disabled = selected.size === 0;
+                                    submit.textContent = selected.size > 0
+                                        ? '提交（已选 ' + selected.size + '）' : '请先选择';
+                                }
+                            };
+                        });
+                        const submit = card.querySelector('.ic-submit');
+                        if (submit) {
+                            submit.onclick = () => {
+                                if (selected.size === 0) return;
+                                const msg = findMessageById(card.dataset.messageId);
+                                const chunk = msg?.chunks?.find(c => c.promptId === card.dataset.promptId);
+                                const opts = chunk?.options || [];
+                                const values = [...selected].map(i => opts[parseInt(i, 10)] ?? '');
+                                respondToInteraction(card, values);
+                            };
+                        }
+                    }
+                    // 输入框 + 提交按钮（prompt_required 自由输入）
                     const form = card.querySelector('.ic-input');
+                    const submitBtn = card.querySelector('.ic-input-row .ic-submit') ||
+                        (!card.querySelector('.ic-options') ? card.querySelector('.ic-submit') : null);
+                    const submitFree = () => {
+                        if (!form || !form.value.trim()) return;
+                        respondToInteraction(card, form.value);
+                    };
                     if (form) {
                         form.addEventListener('keydown', (e) => {
-                            if (e.key === 'Enter') respondToInteraction(card, form.value);
+                            if (e.key === 'Enter' && (card.dataset.allowFree || !card.querySelector('.ic-options'))) {
+                                e.preventDefault();
+                                submitFree();
+                            }
                         });
                     }
+                    if (submitBtn && form) submitBtn.onclick = submitFree;
+                });
+                // block_required：actions 按钮和 submit 按钮
+                card.querySelectorAll('.ic-block-action, .ic-block-submit').forEach(btn => {
+                    btn.onclick = () => {
+                        respondToBlock(card, btn.dataset.blockAction || 'submit');
+                    };
+                });
+                // block input 回车触发首个 action
+                card.querySelectorAll('.ic-block-text').forEach(input => {
+                    input.addEventListener('keydown', (e) => {
+                        if (e.key === 'Enter') {
+                            e.preventDefault();
+                            const firstAction = card.querySelector('.ic-block-action, .ic-block-submit');
+                            if (firstAction) firstAction.click();
+                        }
+                    });
                 });
             }
 
@@ -2025,17 +2098,36 @@
                         return chunkBox('thinking', 'Thinking', escapeHtml(chunk.text || ''), keepOpen(chunk.text), ICONS.think);
                     case 'action':
                         return chunkBox('action', 'Action · ' + escapeHtml(chunk.name || ''), escapeHtml(chunk.text || ''), keepOpen(chunk.text), ICONS.play);
-                    case 'result':
-                        return chunkBox('result', 'Result', escapeHtml(chunk.text || ''), keepOpen(chunk.text), ICONS.checkCircle);
+                    case 'result': {
+                        const items = chunk.items || [];
+                        const richItems = items.filter(it => it.type !== 'text');
+                        const label = chunk.name ? 'Result · ' + escapeHtml(chunk.name) : 'Result';
+                        if (richItems.length > 0) {
+                            const body = items.map(renderResultItem).join('');
+                            return chunkBox('result', label, body, true, ICONS.checkCircle);
+                        }
+                        return chunkBox('result', label, escapeHtml(chunk.text || ''), keepOpen(chunk.text), ICONS.checkCircle);
+                    }
+                    case 'image':
+                        // 顶层 image chunk 罕见但兼容：包成单元素 result 处理
+                        return renderResultItem({
+                            type: 'image',
+                            data: chunk.data, mimeType: chunk.mime, url: chunk.url
+                        });
+                    case 'resource':
+                        return renderResultItem({
+                            type: 'resource',
+                            resource: { uri: chunk.uri || chunk.url, mimeType: chunk.mime, text: chunk.text }
+                        });
                     case 'confirm_required':
                         return interactionCard('需要确认', chunk, msg, [
                             ['确认', { decision: 'allow' }, 'btn-primary'],
                             ['拒绝', { decision: 'deny' }, 'btn-ghost']
                         ]);
                     case 'prompt_required':
-                        return interactionCard('需要输入', chunk, msg, null);
+                        return renderPromptCard(chunk, msg);
                     case 'block_required':
-                        return chunkBox('block', 'Blocked', escapeHtml(chunk.text || ''), keepOpen(chunk.text), ICONS.shield);
+                        return renderBlockCard(chunk, msg);
                     case 'error':
                         return '<div class="chunk error-box open"><div class="chunk-head">' + ICONS.warn + '<span>Error</span></div>' +
                             '<div class="chunk-body"><div class="chunk-inner"><div class="chunk-pad">' + escapeHtml(chunk.text || '') + '</div></div></div></div>';
@@ -2043,6 +2135,39 @@
                         if (chunk.text) return renderMarkdown(chunk.text);
                         return '';
                 }
+            }
+
+            // result chunk 的 typed content 子项：text/image/resource 三类。
+            // image 有 data(base64) 或 url；resource 可能携带 inline text 或仅 uri。
+            function renderResultItem(item) {
+                if (item.type === 'text') {
+                    return '<div class="ri-text">' + renderMarkdown(item.text || '') + '</div>';
+                }
+                if (item.type === 'image') {
+                    const src = item.data
+                        ? 'data:' + (item.mimeType || 'image/png') + ';base64,' + item.data
+                        : (item.url || '');
+                    return src ? '<div class="ri-image-wrap"><img class="ci-img" src="' + escapeAttr(src) + '" alt=""></div>' : '';
+                }
+                if (item.type === 'resource') {
+                    const r = item.resource || {};
+                    const name = (r.uri || '').split('/').pop() || '资源';
+                    let body = '';
+                    if (r.mimeType && r.mimeType.startsWith('image/') && r.text) {
+                        body = '<img class="ci-img" src="data:' + r.mimeType + ';base64,' + escapeAttr(r.text) + '" alt="">';
+                    } else if (r.text) {
+                        body = '<pre class="cr-text">' + escapeHtml(r.text) + '</pre>';
+                    } else if (r.uri) {
+                        body = '<div class="cr-uri">' + escapeHtml(r.uri) + '</div>';
+                    } else {
+                        body = '<div class="cr-empty">空资源</div>';
+                    }
+                    return '<div class="chunk-resource"><div class="cr-head">' + ICONS.file +
+                        '<span>' + escapeHtml(name) + '</span>' +
+                        (r.mimeType ? '<span class="cr-mime">' + escapeHtml(r.mimeType) + '</span>' : '') +
+                        '</div>' + body + '</div>';
+                }
+                return '';
             }
 
             function chunkBox(kind, label, bodyHtml, open, icon) {
@@ -2070,6 +2195,151 @@
                 }
                 if (answered) html += '<div class="ic-answer">已回复</div>';
                 return html + '</div>';
+            }
+
+            // prompt_required：options 存在时给可选按钮（点击即提交）；
+            // allowFreeText 或无 options 时给输入框 + 提交按钮。
+            function renderPromptCard(chunk, msg) {
+                const answered = msg && msg.answered;
+                const hasOptions = chunk.options && chunk.options.length > 0;
+                const allowFree = !!chunk.allowFreeText;
+                const showInput = allowFree || !hasOptions;
+                let html = '<div class="interaction-card prompt-card' + (answered ? ' answered' : '') + '"' +
+                    ' data-message-id="' + (msg?.id || '') + '"' +
+                    ' data-agent-id="' + escapeAttr(msg?.agentId || '') + '"' +
+                    ' data-task-id="' + escapeAttr(msg?.taskId || '') + '"' +
+                    ' data-prompt-id="' + escapeAttr(chunk.promptId || '') + '"' +
+                    ' data-allow-free="' + (allowFree ? '1' : '') + '"' +
+                    ' data-multi="' + (chunk.multi ? '1' : '') + '">';
+                html += '<div class="ic-label">需要输入' + (chunk.multi ? '（可多选）' : '') + '</div>';
+                html += '<div class="ic-text">' + renderMarkdown(chunk.text || '') + '</div>';
+                if (hasOptions) {
+                    html += '<div class="ic-options">';
+                    chunk.options.forEach((opt, i) => {
+                        html += '<button class="ic-option btn btn-ghost" data-opt-idx="' + i + '">' +
+                            escapeHtml(String(opt)) + '</button>';
+                    });
+                    html += '</div>';
+                    if (chunk.multi) {
+                        html += '<button class="btn btn-primary ic-submit" disabled>请先选择</button>';
+                    }
+                }
+                if (showInput) {
+                    html += '<div class="ic-input-row">';
+                    html += '<input class="ic-input" placeholder="' +
+                        (hasOptions ? '或输入自定义内容…' : '输入内容后回车提交') + '">';
+                    if (!hasOptions || allowFree) {
+                        html += '<button class="btn btn-primary ic-submit">提交</button>';
+                    }
+                    html += '</div>';
+                }
+                if (answered) html += '<div class="ic-answer">已回复</div>';
+                return html + '</div>';
+            }
+
+            // block_required：精简版 Block Kit。支持的 block 类型：
+            // - section: mrkdwn 文本段
+            // - input: static_select / plain_text_input
+            // - actions: button 列表（点击即提交，携带 action_id + 各 input 的值）
+            // 没有 actions 时末尾补一个「提交」按钮，action_id = "submit"。
+            function renderBlockCard(chunk, msg) {
+                const answered = msg && msg.answered;
+                let html = '<div class="interaction-card block-card' + (answered ? ' answered' : '') + '"' +
+                    ' data-message-id="' + (msg?.id || '') + '"' +
+                    ' data-agent-id="' + escapeAttr(msg?.agentId || '') + '"' +
+                    ' data-task-id="' + escapeAttr(msg?.taskId || '') + '"' +
+                    ' data-block-id="' + escapeAttr(chunk.blockId || '') + '">';
+                html += '<div class="ic-label">需要填写</div>';
+                const hasActions = chunk.blocks.some(b => b.type === 'actions');
+                for (const b of chunk.blocks) {
+                    if (b.type === 'section') {
+                        const text = b.text?.text || '';
+                        if (text) html += '<div class="ic-block-section">' + renderMarkdown(text) + '</div>';
+                    } else if (b.type === 'input') {
+                        const bid = b.block_id || '';
+                        const label = b.label?.text || '';
+                        const el = b.element || {};
+                        const aid = el.action_id || '';
+                        html += '<div class="ic-block-input" data-bid="' + escapeAttr(bid) + '" data-aid="' + escapeAttr(aid) + '">';
+                        if (label) html += '<label class="ic-block-label">' + escapeHtml(label) + '</label>';
+                        if (el.type === 'static_select') {
+                            const opts = el.options || [];
+                            html += '<select class="ic-block-select">';
+                            if (el.placeholder) html += '<option value="">' + escapeHtml(el.placeholder.text || '请选择') + '</option>';
+                            opts.forEach(o => {
+                                html += '<option value="' + escapeAttr(String(o.value)) + '">' +
+                                    escapeHtml(o.text?.text || String(o.value)) + '</option>';
+                            });
+                            html += '</select>';
+                        } else if (el.type === 'plain_text_input') {
+                            html += '<input class="ic-block-text" type="text"' +
+                                ' placeholder="' + escapeAttr(el.placeholder?.text || '') + '"' +
+                                (el.initial_value ? ' value="' + escapeAttr(el.initial_value) + '"' : '') + '>';
+                        } else {
+                            html += '<div class="ic-block-unsupported">不支持的字段类型：' + escapeHtml(el.type || 'unknown') + '</div>';
+                        }
+                        html += '</div>';
+                    } else if (b.type === 'actions') {
+                        const elements = b.elements || [];
+                        html += '<div class="ic-actions">';
+                        elements.forEach(e => {
+                            if (e.type === 'button') {
+                                const cls = e.style === 'danger' ? 'btn-danger-ghost'
+                                    : (e.style === 'primary' ? 'btn-primary' : 'btn-ghost');
+                                html += '<button class="btn ' + cls + ' ic-block-action"' +
+                                    ' data-block-action="' + escapeAttr(e.action_id || '') + '"' +
+                                    (e.value ? ' data-block-value="' + escapeAttr(String(e.value)) + '"' : '') + '>' +
+                                    escapeHtml(e.text?.text || '') + '</button>';
+                            }
+                        });
+                        html += '</div>';
+                    }
+                }
+                if (!hasActions) {
+                    html += '<button class="btn btn-primary ic-block-submit" data-block-action="submit">提交</button>';
+                }
+                if (answered) html += '<div class="ic-answer">已回复</div>';
+                return html + '</div>';
+            }
+
+            // 收集 block 表单中所有 input 的值，组装成 { block_id: { action_id: value } }
+            function collectBlockValues(card) {
+                const out = {};
+                card.querySelectorAll('.ic-block-input').forEach(div => {
+                    const bid = div.dataset.bid;
+                    const aid = div.dataset.aid;
+                    const sel = div.querySelector('.ic-block-select');
+                    const txt = div.querySelector('.ic-block-text');
+                    const v = sel ? sel.value : (txt ? txt.value : '');
+                    if (!out[bid]) out[bid] = {};
+                    out[bid][aid] = v;
+                });
+                return out;
+            }
+
+            function respondToBlock(card, actionId, valueOverride) {
+                if (card.classList.contains('answered')) return;
+                const response = valueOverride || collectBlockValues(card);
+                card.classList.add('answered');
+                card.classList.add('block-' + (actionId || 'submit'));
+                const answer = document.createElement('div');
+                answer.className = 'ic-answer';
+                answer.textContent = '已提交：' + (actionId || 'submit');
+                card.appendChild(answer);
+                const message = findMessageById(card.dataset.messageId);
+                if (message) { message.answered = true; saveState(); }
+                send({
+                    jsonrpc: '2.0',
+                    method: 'task.respond',
+                    params: {
+                        agent_id: card.dataset.agentId,
+                        task_id: card.dataset.taskId,
+                        block_id: card.dataset.blockId || undefined,
+                        action_id: actionId || undefined,
+                        response
+                    },
+                    id: generateId()
+                });
             }
 
             const HL_KEYWORDS = {
@@ -2646,12 +2916,50 @@
             function normalizeChunk(params, task) {
                 if (params.error) return { type: 'error', text: params.error };
                 const type = params.type || 'text';
-                if (type === 'confirm_required' || type === 'prompt_required') {
+                if (type === 'confirm_required') {
                     return {
                         type,
                         text: contentText(params),
                         confirmId: params.confirm_id || '',
-                        promptId: params.prompt_id || ''
+                    };
+                }
+                if (type === 'prompt_required') {
+                    return {
+                        type,
+                        text: contentText(params),
+                        promptId: params.prompt_id || '',
+                        options: Array.isArray(params.options) ? params.options : [],
+                        allowFreeText: !!params.allow_free_text,
+                        multi: !!params.multi,
+                    };
+                }
+                if (type === 'block_required') {
+                    return {
+                        type,
+                        text: contentText(params),
+                        blockId: params.block_id || '',
+                        blocks: Array.isArray(params.blocks) ? params.blocks : [],
+                    };
+                }
+                if (type === 'result') {
+                    const items = Array.isArray(params.content) ? params.content : [];
+                    return {
+                        type,
+                        name: params.name || '',
+                        items,
+                        text: items.filter(it => it.type === 'text').map(it => it.text || '').join(''),
+                    };
+                }
+                if (type === 'image' || type === 'resource') {
+                    return {
+                        type,
+                        text: contentText(params),
+                        url: params.url || '',
+                        uri: params.uri || params.resource?.uri || '',
+                        mime: params.mime || params.mimeType || params.resource?.mimeType || '',
+                        name: params.name || '',
+                        size: params.size,
+                        data: params.data || params.resource?.text || '',
                     };
                 }
                 if (Array.isArray(params.content) && params.content.length > 0) {
