@@ -325,6 +325,12 @@ Agent 在运行中能力发生变化时主动通知。等价于 MCP 的 `notific
 }
 ```
 
+> **`session_id` 产生约定（当前实现）**：由 **AgentClient（网关）** 在 `session.create` 时用 `crypto.randomUUID()` 生成合法 UUID，写入持久化存储；后续 `task.create` 始终携带该值，Agent 透传给被控子进程（如 ywcoder `--resume <uuid>`）即可。
+>
+> 关键要求：到达子进程的 `session_id` 必须是合法 UUID，否则续接能力丢失（被控端退化为「一次性会话」）。当前链路下浏览器永远携带网关生成的 UUID，此约束已满足。
+>
+> Agent 不应自行生成并回填 `session_id`——AgentClient 不消费 ack 里的该字段，Agent 自行回填只会造成「真相分裂」（AgentClient 与被控子进程各持一套 id）。
+
 ### 6.2 用户回复
 
 当 Agent 输出 `confirm_required`、`prompt_required` 或 `block_required` 后，AgentClient 将用户回复转发给 Agent。
@@ -357,7 +363,9 @@ Agent 在运行中能力发生变化时主动通知。等价于 MCP 的 `notific
 |---|---|
 | `allow` | 同意执行该工具/操作 |
 | `deny` | 拒绝；Agent 收到后应让被控子进程走"被拒"分支而不是失败 |
-| `cancel` | 用户主动取消整个确认（区别于 §6.3 停止任务） |
+| `cancel` | 中止整个任务，效果等同 §6.3 `task.cancel`，只是入口在确认框上 |
+
+> **前端约定**：弹窗的「×」/「关闭」按钮应映射为 `deny`（只拦这一步、对话继续），只有明确的「终止任务」按钮才发 `cancel`。否则用户随手关一个确认框就会让长任务前功尽弃。
 
 `message` 可选，用于填拒绝理由等。Agent 必须接受不带 `message` 的对象。
 
@@ -614,13 +622,14 @@ Agent 决定执行敏感操作前，请求用户确认。
     "content": [
       { "type": "text", "text": "即将执行：rm -rf /tmp/old-builds" }
     ],
-    "level": "dangerous",
-    "timeout": 60
+    "level": "dangerous"
   }
 }
 ```
 
 `level` 枚举：`info`、`warning`、`dangerous`。
+
+> `timeout` 字段在 schema 中可选，但 **shim 不发送**，缺省表示无限等待审批；**前端不得自行设置默认超时或倒计时自动关闭确认框**。用户从手机点进来需要十几分钟是正常情况。
 
 **多确认框并存**：Agent 一轮里可能并发请求多个工具的权限，会同时推多条 `confirm_required`，各自 `confirm_id` 独立、可任意顺序回复。AgentClient/前端必须支持 N 个待确认项并存，按 `confirm_id` 路由响应；不维护"当前 confirm"全局态。
 
@@ -843,7 +852,7 @@ Agent 主动通知非任务相关事件。
 ## 12. 会话与上下文
 
 - `context_id`：参考 A2A，逻辑上把多个相关 Task / Message 归为一组。同一 `context_id` 下 Agent 可维护长期上下文，用户可基于历史 Task 做追问或 refinement。
-- `session_id`：标识一次连续对话，同一 session 内 Agent 可维护上下文。
+- `session_id`：标识一次连续对话，同一 session 内 Agent 可维护上下文。**由 AgentClient（网关）在 `session.create` 时用 `crypto.randomUUID()` 生成**，`task.create` 始终携带，Agent 透传给被控子进程（详见 §6.1）。到达子进程的值必须为合法 UUID。
 - `task_id`：标识一次具体任务，一个 session 可包含多个 task。
 - `history`：携带历史消息/回合，Agent 可选择性使用。
 - `reference_task_ids`：引用之前的 Task，用于基于旧产物做 refinement（参考 A2A `referenceTaskIds`）。
