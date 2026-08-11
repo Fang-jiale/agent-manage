@@ -1061,6 +1061,41 @@
                         '</div>').join('') + '</div>';
                 }
 
+                // 统计：当前 agent 下会话数、累计消息数
+                const sessions = Object.values(state.sessions[agentId] || {});
+                const sessionCount = sessions.length;
+                const totalMessages = sessions.reduce((n, s) => n + (s.messages?.length || 0), 0);
+                const statsHtml =
+                    '<div class="drawer-section"><div class="drawer-section-title">使用情况</div>' +
+                    '<div class="drawer-stats">' +
+                        '<div class="drawer-stat"><div class="ds-num">' + sessionCount + '</div><div class="ds-label">会话</div></div>' +
+                        '<div class="drawer-stat"><div class="ds-num">' + totalMessages + '</div><div class="ds-label">消息</div></div>' +
+                    '</div></div>';
+
+                // 最近任务：取该 agent 下所有会话最新一条 assistant 消息，按时间降序取前 5
+                const recent = sessions
+                    .flatMap(s => (s.messages || []).map(m => ({ session: s, msg: m })))
+                    .filter(x => x.msg.role === 'assistant')
+                    .sort((a, b) => (b.msg.createdAt || 0) - (a.msg.createdAt || 0))
+                    .slice(0, 5);
+                let recentHtml = '';
+                if (recent.length > 0) {
+                    recentHtml = '<div class="drawer-section"><div class="drawer-section-title">最近任务</div>' +
+                        recent.map(x => {
+                            const m = x.msg;
+                            const preview = stripMarkdown(m.chunks?.length
+                                ? (m.chunks.map(c => c.text || '').join('') || m.errorText || '')
+                                : (m.errorText || ''));
+                            const statusDot = m.errorText ? 'err' : (m.done ? 'done' : 'run');
+                            return '<div class="drawer-recent" data-session-id="' + escapeAttr(x.session.id) + '">' +
+                                '<span class="dr-dot ' + statusDot + '"></span>' +
+                                '<div class="dr-main">' +
+                                    '<div class="dr-preview">' + escapeHtml(preview || '(空)') + '</div>' +
+                                    '<div class="dr-meta">' + escapeHtml(x.session.title || '会话') + ' · ' + relativeTime(m.createdAt || 0) + '</div>' +
+                                '</div></div>';
+                        }).join('') + '</div>';
+                }
+
                 els.drawerBody.innerHTML =
                     '<div class="drawer-hero">' +
                         '<span class="agent-avatar" style="background:' + avatarColor(a.name || agentId) + '">' +
@@ -1071,7 +1106,22 @@
                     '<div class="drawer-section"><div class="drawer-section-title">信息</div>' +
                     kv.map(([k, v]) => '<div class="drawer-kv"><span class="k">' + k + '</span><span class="v">' + v + '</span></div>').join('') +
                     '</div>' +
-                    capsHtml;
+                    statsHtml +
+                    capsHtml +
+                    recentHtml;
+                // 点击最近任务跳转到对应会话
+                els.drawerBody.querySelectorAll('.drawer-recent').forEach(el => {
+                    el.onclick = () => {
+                        const sid = el.getAttribute('data-session-id');
+                        closeDrawer();
+                        if (state.currentAgentId === agentId) {
+                            selectSession(sid);
+                        } else {
+                            selectAgent(agentId);
+                            setTimeout(() => selectSession(sid), 100);
+                        }
+                    };
+                });
                 els.agentDrawer.classList.add('open');
                 els.drawerOverlay.classList.add('open');
             }
@@ -1278,6 +1328,41 @@
                     setProgress(null);
                 }
                 updateInputState();
+                persistPendingTasks();
+            }
+
+            // 任务刷新恢复：pendingTasks 持久化到 localStorage，刷新后把还在跑
+            // 的 task 标 error「页面刷新，任务输出已断开」——不假装能续上，
+            // 因为 chunk 推送是按 ws 连接的，新连接收不到旧 task 的 chunk；
+            // 服务端 flushTaskBuffer 写 db 的最终状态可由 loadMessages 拉到。
+            function persistPendingTasks() {
+                try {
+                    const arr = [];
+                    for (const [_, t] of pendingTasks) {
+                        if (t.done) continue;
+                        arr.push({
+                            taskId: t.taskId, messageId: t.messageId,
+                            agentId: t.agentId, sessionId: t.sessionId
+                        });
+                    }
+                    localStorage.setItem('ywm-pending-tasks', JSON.stringify(arr));
+                } catch {}
+            }
+
+            function recoverPendingTasks() {
+                let saved = [];
+                try { saved = JSON.parse(localStorage.getItem('ywm-pending-tasks') || '[]'); } catch {}
+                localStorage.removeItem('ywm-pending-tasks');
+                if (!saved.length) return;
+                for (const t of saved) {
+                    const session = state.sessions[t.agentId]?.[t.sessionId];
+                    if (!session) continue;
+                    const msg = session.messages.find(m => m.id === t.messageId);
+                    if (msg && !msg.done) {
+                        msg.done = true;
+                        msg.errorText = msg.errorText || '页面刷新，任务输出已断开';
+                    }
+                }
             }
 
             // 断线兜底：把所有在跑的 task / 等 RPC / 等 ack 的请求全部判失败。
@@ -1801,6 +1886,19 @@
                 return null;
             }
 
+            // 给最近任务列表用：把 markdown/chunk 文本压成一行纯文本预览。
+            function stripMarkdown(text) {
+                if (!text) return '';
+                return text
+                    .replace(/```[\s\S]*?```/g, ' ')   // 代码块
+                    .replace(/`[^`]*`/g, ' ')           // 行内代码
+                    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ') // 图片
+                    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1') // 链接保留文字
+                    .replace(/[#*_~>|\-]/g, ' ')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+            }
+
             function bindMessageEvents(el) {
                 el.querySelectorAll('.msg-image').forEach(img => {
                     img.onclick = () => {
@@ -2284,6 +2382,7 @@
 
             let wsEverOpened = false;
             let wsFailCount = 0;
+            let wsWasOnline = false;
 
             function connect() {
                 if (ws) return;
@@ -2297,12 +2396,15 @@
                 ws = new WebSocket(WS_URL + '?token=' + encodeURIComponent(state.token));
 
                 ws.onopen = () => {
+                    const wasOffline = !!wsWasOnline;
                     wsConnected = true;
                     wsEverOpened = true;
+                    wsWasOnline = true;
                     wsFailCount = 0;
                     setConnectionStatus('connected', '已连接');
                     reconnectDelay = RECONNECT_MIN;
                     updateInputState();
+                    if (wasOffline) showToast('已重新连接', 'success');
                     if (state.currentAgentId) {
                         syncSessions(state.currentAgentId);
                         // 重连后重新拉当前 session 的消息：断线期间可能漏 chunk，
@@ -2649,7 +2751,7 @@
                 });
                 showTyping();
                 setProgress(0);
-                updateInputState();
+                syncChatChrome();
 
                 const requestId = generateId();
                 pendingRequests.set(requestId, taskId);
@@ -2990,9 +3092,18 @@
             }
 
             function init() {
+                // 先用 localStorage 里持久化的 pendingTasks 精确恢复（标 errorText），
+                // 再把剩下的未完成 assistant 消息兜底标 done——localStorage 没命中
+                // 的情况（清缓存、换设备）UI 上至少不会无限 typing。
+                recoverPendingTasks();
                 Object.values(state.sessions).forEach(byAgent =>
                     Object.values(byAgent).forEach(s =>
-                        s.messages.forEach(m => { if (m.role === 'assistant' && !m.done) m.done = true; })));
+                        s.messages.forEach(m => {
+                            if (m.role === 'assistant' && !m.done) {
+                                m.done = true;
+                                if (!m.errorText) m.errorText = '任务未完成（页面中断）';
+                            }
+                        })));
                 applySettings();
                 applySidebarCollapsed();
                 // 旧版 user:xxx token 已失效，强制重新登录
