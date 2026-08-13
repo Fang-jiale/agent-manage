@@ -47,6 +47,7 @@ function testConfig(): GatewayConfig {
     s3PublicURL: "",
     oidcIssuer: "", oidcClientID: "", oidcClientSecret: "", oidcRedirectURL: "",
     oidcEmployeeClaim: "employee_id",
+    trustProxy: false,
   };
 }
 

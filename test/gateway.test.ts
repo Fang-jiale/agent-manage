@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
 import WebSocket from "ws";
 import * as proto from "../src/protocol.ts";
-import { createGatewayServer, type GatewayConfig } from "../src/gateway.ts";
+import { createGatewayServer, Hub, type GatewayConfig } from "../src/gateway.ts";
 import { createLocalAttachmentStore } from "../src/storage.ts";
 import { setLogLevel } from "../src/util.ts";
 import { signJwt } from "../src/auth.ts";
@@ -46,6 +46,7 @@ function testConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
     s3PublicURL: "",
     oidcIssuer: "", oidcClientID: "", oidcClientSecret: "", oidcRedirectURL: "",
     oidcEmployeeClaim: "employee_id",
+    trustProxy: false,
     ...overrides,
   };
 }
@@ -422,5 +423,51 @@ test("invalid token rejected with 401", async () => {
     );
   } finally {
     await srv.close();
+  }
+});
+
+test("pending request times out and user gets an error", async () => {
+  const hub = new Hub(90_000, 120_000, 300_000, 30);
+  const sent: proto.Message[] = [];
+  const fakeWs = {
+    readyState: WebSocket.OPEN,
+    send: (d: string) => sent.push(JSON.parse(d.toString()) as proto.Message),
+  } as unknown as WebSocket;
+  const user = {
+    ws: fakeWs, userID: "u1", lastHeartbeat: Date.now(), alive: true, isAdmin: false,
+  } as unknown as Parameters<Hub["trackPendingRequest"]>[1];
+  try {
+    hub.trackPendingRequest("req-x", user);
+    assert.equal(hub.pendingRequests.size, 1);
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    assert.equal(hub.pendingRequests.size, 0);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].id, "req-x");
+    assert.equal(sent[0].error?.message, "request timeout");
+  } finally {
+    hub.shutdown();
+  }
+});
+
+test("delivered pending response cancels the timeout", async () => {
+  const hub = new Hub(90_000, 120_000, 300_000, 60);
+  const sent: proto.Message[] = [];
+  const fakeWs = {
+    readyState: WebSocket.OPEN,
+    send: (d: string) => sent.push(JSON.parse(d.toString()) as proto.Message),
+  } as unknown as WebSocket;
+  const user = {
+    ws: fakeWs, userID: "u1", lastHeartbeat: Date.now(), alive: true, isAdmin: false,
+  } as unknown as Parameters<Hub["trackPendingRequest"]>[1];
+  try {
+    hub.trackPendingRequest("req-y", user);
+    const ok = hub.deliverToLocalPending("req-y", proto.newResponse("req-y", { status: "ok" }));
+    assert.equal(ok, true);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    // 只有投递的那一条响应，不应再出现超时错误
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].error, undefined);
+  } finally {
+    hub.shutdown();
   }
 });

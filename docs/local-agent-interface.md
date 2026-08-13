@@ -58,7 +58,8 @@
 **适用场景**：本地 Agent 本身支持 WebSocket（如 Electron 应用内部服务）。
 
 - AgentClient 作为 WebSocket 客户端连接本地 Agent
-- 双向 JSON 消息
+- 双向 JSON 消息（单条 JSON，非 JSONL）；其余消息语义与 stdio 绑定一致（`lifecycle.initialize` 协商、`stream.chunk` 按 `task_id` 路由、取消时补发 `task.cancel`）
+- 当前实现：AgentClient 内置 `ws` 适配器（`src/adapters/ws.ts`），品牌 `conn_type: "ws"` + `endpoint` 即走此通道
 
 优点：真正的全双工，Agent 可随时主动推送。
 
@@ -438,6 +439,53 @@ Agent 主动通知任务完成。
   }
 }
 ```
+
+### 6.5 斜杠命令（Slash Commands）
+
+斜杠命令（`/model`、`/compact`、技能等）**不是协议层概念**：链路上它就是一次普通的 `task.create`，网关与 AgentClient 原样透传、零改动；命令的发现、解析、执行全部收敛在本地 Agent 一处。
+
+**发现：用 capabilities 声明命令。** Agent 在 `lifecycle.register`（§5.2）或 `lifecycle.capabilities_updated`（§5.5）中上报 `type: "command"` 的能力项；`metadata.args` 描述参数规格，供页面渲染补全菜单：
+
+```json
+{
+  "type": "command",
+  "name": "model",
+  "description": "切换模型",
+  "metadata": {
+    "current": "kimi-k2",
+    "args": [
+      { "name": "model", "type": "enum", "options": ["kimi-k2", "kimi-k2-thinking"], "required": true }
+    ]
+  }
+}
+```
+
+- 每个技能注册为一条 command，并以 `metadata.kind: "skill"` 与普通命令区分（页面据此分组显示）。
+- `metadata.current` 回写当前值（如当前模型），页面在会话栏展示；值变化时随 `capabilities_updated` 推送。
+- capabilities 为**全量替换**语义：技能增删、current 变化都重推完整列表；未变化不要推（每次推送触发一次全量 agent 列表广播）。
+
+**执行：`metadata.command` + 斜杠文本双通道。** 页面把命令作为普通任务发送，`content` 是人类可读的斜杠文本（进历史、供旧 Agent 解析），`metadata.command` 是结构化参数（免字符串解析）：
+
+```json
+{
+  "method": "task.create",
+  "params": {
+    "task_id": "task-002",
+    "session_id": "session-001",
+    "type": "chat",
+    "content": "/model kimi-k2-thinking",
+    "metadata": {
+      "command": { "name": "model", "args": { "model": "kimi-k2-thinking" } }
+    }
+  }
+}
+```
+
+- `args` 中枚举参数按 `metadata.args` 里的 `name` 填；命令后的剩余自由文本（如 `/commit 只提交 src 目录`）放在 `args.text`。
+- Agent 应优先读 `metadata.command`；不存在时退化为解析 `content` 的 `/` 前缀（用户手输、旧页面都走这条兜底）。
+- 未在 capabilities 中声明的 `/xxx` 文本也会原样送达，Agent 可自行决定是否识别。
+
+**执行语义由 Agent 自定**：本地命令（如切模型）通常不调用 LLM，直接生效后输出一条 text chunk（如「已切换模型：kimi-k2 → kimi-k2-thinking」）并正常结束任务；模型、技能等状态按 `session_id` 维护，切换只影响当前会话。
 
 ## 7. 流式输出消息
 

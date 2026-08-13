@@ -13,7 +13,7 @@
     "login": "node src/login.ts",
     "typecheck": "tsc --noEmit",
     "bundle": "esbuild src/gateway.ts src/client.ts src/local-agent.ts src/login.ts --bundle --platform=node --format=esm --target=node18 --outdir=dist/bundle --out-extension:.js=.mjs \"--banner:js=import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\"",
-    "test": "node --test 'test/*.test.ts'"
+    "test": "node --test --test-concurrency=1 'test/*.test.ts'"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1097.0",

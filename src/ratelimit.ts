@@ -35,10 +35,13 @@ export class RateLimiter {
   }
 }
 
-// 取客户端 IP：反代后取 X-Forwarded-For 首段
-export function clientIp(headers: Record<string, string | string[] | undefined>, fallback: string | undefined): string {
-  const xff = headers["x-forwarded-for"];
-  const first = Array.isArray(xff) ? xff[0] : xff;
-  if (first) return first.split(",")[0].trim();
+// 取客户端 IP：仅在 trustProxy（前面有可信反代）时采用 X-Forwarded-For 首段，
+// 否则用 socket 地址——直接暴露时 XFF 可被客户端伪造，会绕过按 IP 的限流
+export function clientIp(headers: Record<string, string | string[] | undefined>, fallback: string | undefined, trustProxy = false): string {
+  if (trustProxy) {
+    const xff = headers["x-forwarded-for"];
+    const first = Array.isArray(xff) ? xff[0] : xff;
+    if (first) return first.split(",")[0].trim();
+  }
   return fallback ?? "unknown";
 }

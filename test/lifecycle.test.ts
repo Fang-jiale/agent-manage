@@ -43,6 +43,7 @@ test("session.delete cascades attachment files", async (t) => {
     s3AccessKey: "", s3SecretKey: "", s3PublicURL: "",
     oidcIssuer: "", oidcClientID: "", oidcClientSecret: "", oidcRedirectURL: "",
     oidcEmployeeClaim: "employee_id",
+    trustProxy: false,
   };
   const { server } = await createGatewayServer(cfg, STATIC_FILE, db, store);
   await new Promise<void>((resolve) => server.listen(0, resolve));

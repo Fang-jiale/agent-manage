@@ -137,6 +137,7 @@ function testConfig(issuer: string, gatewayPort?: number): GatewayConfig {
     oidcClientSecret: "test-secret",
     oidcRedirectURL: `http://localhost:${gatewayPort ?? 0}/auth/oidc/callback`,
     oidcEmployeeClaim: "employee_id",
+    trustProxy: false,
   };
 }
 

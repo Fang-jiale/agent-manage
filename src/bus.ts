@@ -21,25 +21,34 @@ export interface RegisteredAgent {
   platform?: proto.PlatformInfo;
   instance_id: string;
   last_heartbeat: number;
+  brand_id?: string | null;
+  approval_status?: string;
 }
 
 export type BusEnvelope =
   | { kind: "agent_msg"; agent_id: string; msg: proto.Message }
   | { kind: "user_msg"; owner_id: string; msg: proto.Message; src?: string }
   | { kind: "pending"; req_id: string; msg: proto.Message }
-  | { kind: "agents_changed"; src?: string };
+  | { kind: "agents_changed"; src?: string }
+  | { kind: "kick"; user_id?: string; device_key_id?: string; reason: string; src?: string }
+  | { kind: "connector_sync"; connector_id: string; msg: proto.Message; src?: string }
+  | { kind: "agent_approval"; agent_id: string; status: string; src?: string };
 
 export interface BusHandlers {
   onAgentMessage(agentID: string, msg: proto.Message): void;
   onUserMessage(ownerID: string, msg: proto.Message): void;
   onPendingResponse(reqID: string, msg: proto.Message): void;
   onAgentsChanged(): void;
+  onKick?(userID: string | undefined, deviceKeyID: string | undefined, reason: string): void;
+  onConnectorSync?(connectorID: string, msg: proto.Message): void;
+  onAgentApproval?(agentID: string, status: string): void;
 }
 
 type RedisClient = ReturnType<typeof createClient>;
 
 export class Bus {
   readonly instanceID: string;
+  readonly registryTtlMs: number;
   private pub: RedisClient;
   private sub: RedisClient;
   private handlers: BusHandlers;
@@ -49,7 +58,8 @@ export class Bus {
 
   constructor(url: string, instanceID: string, registryTtlMs: number, handlers: BusHandlers, prefix = "ywm") {
     this.instanceID = instanceID;
-    this.registryTtlSec = Math.max(10, Math.ceil(registryTtlMs / 1000));
+    this.registryTtlMs = Math.max(10_000, registryTtlMs);
+    this.registryTtlSec = Math.ceil(this.registryTtlMs / 1000);
     this.handlers = handlers;
     this.prefix = prefix;
     this.pub = createClient({ url });
@@ -92,8 +102,9 @@ export class Bus {
     } catch {
       return;
     }
-    // 本实例发出的广播已在本地处理过（forwardToUsers / registerAgent 的本地分支），跳过回声
-    if ((env.kind === "user_msg" || env.kind === "agents_changed") && env.src === this.instanceID) {
+    // 本实例发出的广播已在本地处理过（forwardToUsers / registerAgent / kick 等的本地分支），跳过回声
+    if ((env.kind === "user_msg" || env.kind === "agents_changed" || env.kind === "kick"
+      || env.kind === "connector_sync" || env.kind === "agent_approval") && env.src === this.instanceID) {
       return;
     }
     switch (env.kind) {
@@ -101,6 +112,9 @@ export class Bus {
       case "user_msg": this.handlers.onUserMessage(env.owner_id, env.msg); break;
       case "pending": this.handlers.onPendingResponse(env.req_id, env.msg); break;
       case "agents_changed": this.handlers.onAgentsChanged(); break;
+      case "kick": this.handlers.onKick?.(env.user_id, env.device_key_id, env.reason); break;
+      case "connector_sync": this.handlers.onConnectorSync?.(env.connector_id, env.msg); break;
+      case "agent_approval": this.handlers.onAgentApproval?.(env.agent_id, env.status); break;
     }
   }
 
@@ -174,5 +188,23 @@ export class Bus {
   async publishAgentsChanged(): Promise<void> {
     await this.pub.publish(this.chUsers(),
       JSON.stringify({ kind: "agents_changed", src: this.instanceID } satisfies BusEnvelope));
+  }
+
+  // 跨实例踢线：按 user_id（页面+agent 连接）或 device_key_id（agent 连接）匹配
+  async publishKick(userID: string | undefined, deviceKeyID: string | undefined, reason: string): Promise<void> {
+    await this.pub.publish(this.chUsers(),
+      JSON.stringify({ kind: "kick", user_id: userID, device_key_id: deviceKeyID, reason, src: this.instanceID } satisfies BusEnvelope));
+  }
+
+  // connector 目标集同步：广播到各实例，持有该 connector 的实例负责投递
+  async publishConnectorSync(connectorID: string, msg: proto.Message): Promise<void> {
+    await this.pub.publish(this.chUsers(),
+      JSON.stringify({ kind: "connector_sync", connector_id: connectorID, msg, src: this.instanceID } satisfies BusEnvelope));
+  }
+
+  // 审批结果广播：各实例检查本地是否有该 agent 连接并生效
+  async publishAgentApproval(agentID: string, status: string): Promise<void> {
+    await this.pub.publish(this.chUsers(),
+      JSON.stringify({ kind: "agent_approval", agent_id: agentID, status, src: this.instanceID } satisfies BusEnvelope));
   }
 }

@@ -20,6 +20,9 @@ Environment=AGENT_MANAGE_ADMIN_PASSWORD=CHANGE_ME
 # 多实例时启用：
 # Environment=AGENT_MANAGE_REDIS_URL=redis://127.0.0.1:6379
 # Environment=AGENT_MANAGE_INSTANCE_ID=gw-1
+# 本服务监听 127.0.0.1 且前面是 Caddy/nginx 反代，信任 X-Forwarded-For
+# （直接暴露网关时务必保持默认 false，否则登录限流可被伪造 XFF 绕过）
+Environment=AGENT_MANAGE_TRUST_PROXY=true
 
 [Install]
 WantedBy=multi-user.target

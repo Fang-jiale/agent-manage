@@ -117,6 +117,7 @@
                 <div class="input-inner">
                     <div class="progress-track" id="progressTrack"><div class="progress-fill" id="progressFill"></div></div>
                     <div class="attach-strip" id="attachStrip"></div>
+                    <div class="cmd-menu" id="cmdMenu" hidden></div>
                     <div class="input-box" id="inputBox">
                         <input type="file" id="fileInput" multiple hidden>
                         <button class="icon-btn attach-btn" id="attachBtn" title="添加图片或文件">
@@ -732,6 +733,7 @@
                 typingIndicator: document.getElementById('typingIndicator'),
                 typingAvatar: document.getElementById('typingAvatar'),
                 messageInput: document.getElementById('messageInput'),
+                cmdMenu: document.getElementById('cmdMenu'),
                 sendBtn: document.getElementById('sendBtn'),
                 stopBtn: document.getElementById('stopBtn'),
                 progressTrack: document.getElementById('progressTrack'),
@@ -928,6 +930,12 @@
                 return ICONS.terminal;
             }
 
+            // 品牌 logo 优先，否则按能力推断的类型图标
+            function agentAvatarInner(agent) {
+                if (agent?.logo_url) return '<img class="agent-brand-logo" src="' + escapeAttr(agent.logo_url) + '" alt="">';
+                return agentTypeIcon(agent);
+            }
+
             function platformIcon(os) {
                 const s = String(os || '').toLowerCase();
                 if (s.includes('win')) return ICONS.windows;
@@ -1103,7 +1111,7 @@
                 els.drawerBody.innerHTML =
                     '<div class="drawer-hero">' +
                         '<span class="agent-avatar" style="background:' + avatarColor(a.name || agentId) + '">' +
-                            agentTypeIcon(a) + '</span>' +
+                            agentAvatarInner(a) + '</span>' +
                         '<div><div class="drawer-hero-name">' + escapeHtml(a.name || agentId) + '</div>' +
                         '<div class="drawer-hero-sub">' + escapeHtml(agentId) + '</div></div>' +
                     '</div>' +
@@ -1445,7 +1453,7 @@
                     const statusClass = a.online ? (a.busy ? 'busy' : 'online') : 'offline';
                     let html = '<div class="agent-card-top">' +
                         '<span class="agent-avatar" style="background:' + avatarColor(a.name || id) + '">' +
-                            agentTypeIcon(a) + '</span>' +
+                            agentAvatarInner(a) + '</span>' +
                         '<span class="agent-name">' + escapeHtml(a.name || id) + '</span>' +
                         '<button class="icon-btn agent-info-btn" title="查看详情">' + ICONS.info + '</button>' +
                         '<span class="status-dot ' + statusClass + '" title="' +
@@ -1653,10 +1661,12 @@
                 const agent = state.agents[session.agentId];
                 els.chatTitle.textContent = agent?.name || session.agentId;
                 els.chatSubtitle.textContent = session.title;
-                els.typingAvatar.innerHTML = agentTypeIcon(agent);
+                els.typingAvatar.innerHTML = agentAvatarInner(agent);
                 els.typingAvatar.style.background = avatarColor(agent?.name || session.agentId);
                 const chips = [];
-                if (agent && !agent.online) {
+                if (agent?.status === 'pending' || agent?.approvalStatus === 'pending') {
+                    chips.push('<span class="chip" style="color: var(--warning)">待审批</span>');
+                } else if (agent && !agent.online) {
                     chips.push('<span class="chip" style="color: var(--text-tertiary)">离线</span>');
                 } else if (agent?.busy) {
                     chips.push('<span class="chip" style="color: var(--warning)">忙碌</span>');
@@ -1666,7 +1676,12 @@
                         '<span class="chip-platform-icon">' + platformIcon(agent.platform.os) + '</span>' +
                         escapeHtml(agent.platform.os) + '</span>');
                 }
-                (agent?.capabilities || []).slice(0, 5).forEach(c => {
+                // 当前模型单独成 chip；command 类 capability 是给斜杠菜单用的，不占展示位
+                const model = currentModelOf(agent);
+                if (model) {
+                    chips.push('<span class="chip chip-model" title="当前模型（/model 切换）">' + escapeHtml(model) + '</span>');
+                }
+                (agent?.capabilities || []).filter(c => c.type !== 'command').slice(0, 5).forEach(c => {
                     chips.push('<span class="chip" title="' + escapeAttr(c.description || '') + '">' + escapeHtml(c.name || c.type) + '</span>');
                 });
                 els.headerChips.innerHTML = chips.join('');
@@ -1710,7 +1725,7 @@
                     els.dashRecent.innerHTML = recent.map(a => {
                         const status = a.online ? (a.busy ? 'busy' : 'online') : 'offline';
                         return '<button class="dash-mini-agent" data-agent="' + escapeAttr(a.id) + '" title="' + escapeAttr(a.name || a.id) + '">' +
-                            '<div class="dma-top"><span class="agent-avatar" style="background:' + avatarColor(a.name || a.id) + '">' + agentTypeIcon(a) + '</span>' +
+                            '<div class="dma-top"><span class="agent-avatar" style="background:' + avatarColor(a.name || a.id) + '">' + agentAvatarInner(a) + '</span>' +
                             '<span class="status-dot ' + status + '"></span></div>' +
                             '<div class="dma-name">' + escapeHtml(a.name || a.id) + '</div>' +
                             '<div class="dma-meta">' + (a.platform?.os ? escapeHtml(a.platform.os) : '—') + '</div>' +
@@ -1860,7 +1875,7 @@
                 } else {
                     const agent = state.agents[msg.agentId];
                     const agentName = agent?.name || msg.agentId || 'Agent';
-                    avatar.innerHTML = agentTypeIcon(agent);
+                    avatar.innerHTML = agentAvatarInner(agent);
                     avatar.style.background = avatarColor(String(agentName));
                     avatar.style.color = '#fff';
                 }
@@ -2099,6 +2114,14 @@
                 const message = session?.messages.find(m => m.id === card.dataset.messageId);
                 if (!message) return;
                 card.classList.add('answered');
+                // 解除看门狗的等待标记；同一任务还有其它未答卡片则保持等待态
+                const pendingTask = pendingTasks.get(card.dataset.taskId);
+                if (pendingTask) {
+                    pendingTask.lastActivity = Date.now();
+                    pendingTask.waitingForInput = els.messages.querySelectorAll(
+                        '.interaction-card[data-task-id="' + card.dataset.taskId + '"]:not(.answered)'
+                    ).length > 0;
+                }
                 const answer = document.createElement('div');
                 answer.className = 'ic-answer';
                 answer.textContent = '已回复：' + (
@@ -2155,11 +2178,12 @@
                         const items = chunk.items || [];
                         const richItems = items.filter(it => it.type !== 'text');
                         const label = chunk.name ? 'Result · ' + escapeHtml(chunk.name) : 'Result';
+                        // Read/Bash 等工具结果默认折叠，避免刷屏；点击标题展开
                         if (richItems.length > 0) {
                             const body = items.map(renderResultItem).join('');
-                            return chunkBox('result', label, body, true, ICONS.checkCircle);
+                            return chunkBox('result', label, body, false, ICONS.checkCircle);
                         }
-                        return chunkBox('result', label, escapeHtml(chunk.text || ''), keepOpen(chunk.text), ICONS.checkCircle);
+                        return chunkBox('result', label, escapeHtml(chunk.text || ''), false, ICONS.checkCircle);
                     }
                     case 'image':
                         // 顶层 image chunk 罕见但兼容：包成单元素 result 处理
@@ -2205,9 +2229,14 @@
                 if (item.type === 'resource') {
                     const r = item.resource || {};
                     const name = (r.uri || '').split('/').pop() || '资源';
+                    const lowerUri = (r.uri || '').toLowerCase();
+                    const isCsv = r.mimeType === 'text/csv' || r.mimeType === 'application/csv'
+                        || lowerUri.endsWith('.csv');
                     let body = '';
                     if (r.mimeType && r.mimeType.startsWith('image/') && r.text) {
                         body = '<img class="ci-img" src="data:' + r.mimeType + ';base64,' + escapeAttr(r.text) + '" alt="">';
+                    } else if (isCsv && r.text) {
+                        body = renderCsvTable(r.text);
                     } else if (r.text) {
                         body = '<pre class="cr-text">' + escapeHtml(r.text) + '</pre>';
                     } else if (r.uri) {
@@ -2221,6 +2250,59 @@
                         '</div>' + body + '</div>';
                 }
                 return '';
+            }
+
+            // RFC 4180 兼容的最小 CSV 解析：支持引号包裹、"\"\"" 转义、字段内换行。
+            // 护栏：超过 MAX_ROWS 行或 MAX_COLS 列时截断，并在尾部标注剩余量。
+            function renderCsvTable(text) {
+                const MAX_ROWS = 200, MAX_COLS = 20;
+                const rows = [];
+                let row = [], field = '', inQuotes = false;
+                const pushField = () => {
+                    if (row.length < MAX_COLS) row.push(field);
+                    field = '';
+                };
+                const pushRow = () => {
+                    rows.push(row);
+                    row = [];
+                };
+                for (let i = 0; i < text.length && rows.length <= MAX_ROWS; i++) {
+                    const c = text[i];
+                    if (inQuotes) {
+                        if (c === '"') {
+                            if (text[i + 1] === '"') { field += '"'; i++; }
+                            else inQuotes = false;
+                        } else field += c;
+                    } else if (c === '"') {
+                        inQuotes = true;
+                    } else if (c === ',') {
+                        pushField();
+                    } else if (c === '\n') {
+                        pushField(); pushRow();
+                    } else if (c === '\r') {
+                        // 等 \n 处理
+                    } else {
+                        field += c;
+                    }
+                }
+                if (field || row.length) { pushField(); pushRow(); }
+
+                if (!rows.length) return '<pre class="cr-text"></pre>';
+                const cols = Math.min(Math.max(...rows.map(r => r.length)), MAX_COLS);
+                const truncatedRows = rows.length > MAX_ROWS;
+                const visibleRows = truncatedRows ? MAX_ROWS : rows.length;
+                let html = '<div class="cr-csv"><table class="csv-table"><thead><tr>';
+                for (let c = 0; c < cols; c++) html += '<th>' + escapeHtml(rows[0][c] || '') + '</th>';
+                html += '</tr></thead><tbody>';
+                for (let r = 1; r < visibleRows; r++) {
+                    html += '<tr>';
+                    for (let c = 0; c < cols; c++) html += '<td>' + escapeHtml(rows[r][c] || '') + '</td>';
+                    html += '</tr>';
+                }
+                html += '</tbody></table>';
+                if (truncatedRows) html += '<div class="cr-truncated">仅显示前 ' + MAX_ROWS + ' 行（共 ' + rows.length + ' 行）</div>';
+                html += '</div>';
+                return html;
             }
 
             function chunkBox(kind, label, bodyHtml, open, icon) {
@@ -2640,6 +2722,7 @@
 
             function selectAgent(agentId) {
                 state.currentAgentId = agentId;
+                closeCmdMenu();
                 resetChatVisibleLimit();
                 const sessions = getSessionsForAgent(agentId);
                 const ids = Object.keys(sessions);
@@ -2657,6 +2740,7 @@
 
             function selectSession(sessionId) {
                 state.currentSessionId = sessionId;
+                closeCmdMenu();
                 resetChatVisibleLimit();
                 saveState();
                 renderSessions();
@@ -2850,9 +2934,14 @@
                     name: a.name || a.id,
                     online: a.status === 'online' || a.status === 'busy',
                     busy: a.status === 'busy',
+                    status: a.status || '',
                     owner: a.owner_id || '',
                     capabilities: a.capabilities || base.capabilities || [],
                     platform: a.platform || base.platform || null,
+                    brandId: a.brand_id ?? base.brandId ?? null,
+                    brandName: a.brand_name ?? base.brandName ?? null,
+                    logo_url: a.logo_url ?? base.logo_url ?? null,
+                    approvalStatus: a.approval_status || base.approvalStatus || 'approved',
                     lastHeartbeat: a.last_heartbeat ? Date.parse(a.last_heartbeat) : (base.lastHeartbeat || null)
                 };
             }
@@ -2902,8 +2991,14 @@
                 if (!session) return;
                 task.lastActivity = Date.now();
 
+                // 等待用户裁决（确认/输入/富交互）期间不算"无响应"：看门狗跳过这类任务
+                if (params.type === 'confirm_required' || params.type === 'prompt_required' || params.type === 'block_required') {
+                    task.waitingForInput = true;
+                }
+
                 // 确认框撤销：单独走，不渲染为新 chunk
                 if (params.type === 'confirm_cancelled') {
+                    task.waitingForInput = false;
                     if (task.agentId === state.currentAgentId && task.sessionId === state.currentSessionId) {
                         const card = els.messages.querySelector(
                             '.interaction-card[data-message-id="' + task.messageId + '"][data-confirm-id="' + (params.confirm_id || '') + '"]'
@@ -2948,13 +3043,14 @@
                 }
             }
 
-            /* 看门狗：长时间没有新 chunk 的任务标记为中断，避免 typing 卡死 */
-            const TASK_STALE_MS = 60_000;
+            /* 看门狗：长时间没有新 chunk 的任务标记为中断，避免 typing 卡死。
+               等待用户确认/输入的任务（waitingForInput）不适用——人等多久都正常。 */
+            const TASK_STALE_MS = 180_000;
             setInterval(() => {
                 const now = Date.now();
                 let changed = false;
                 for (const [taskId, task] of pendingTasks) {
-                    if (task.done || now - task.lastActivity <= TASK_STALE_MS) continue;
+                    if (task.done || task.waitingForInput || now - task.lastActivity <= TASK_STALE_MS) continue;
                     task.done = true;
                     pendingTasks.delete(taskId);
                     changed = true;
@@ -3061,6 +3157,118 @@
                 });
             }
 
+            /* ---------- slash commands ---------- */
+
+            // agent 通过 capabilities 声明的斜杠命令（type:"command"），菜单与解析都从这里来
+            function agentCommands(agent) {
+                return (agent?.capabilities || []).filter(c => c && c.type === 'command' && c.name);
+            }
+
+            function currentModelOf(agent) {
+                const cmd = agentCommands(agent).find(c => c.name === 'model');
+                return (cmd && cmd.metadata && cmd.metadata.current) || '';
+            }
+
+            // 输入文本 → 结构化命令（metadata.command）。未声明的 /xxx 返回 null，
+            // 仍按普通文本透传，由 shim 自行解析兜底。
+            function parseSlashCommand(text, agent) {
+                if (!text.startsWith('/')) return null;
+                const m = text.match(/^\/(\S+)(?:\s+([\s\S]*))?$/);
+                if (!m) return null;
+                const cmd = agentCommands(agent).find(c => c.name === m[1]);
+                if (!cmd) return null;
+                let rest = (m[2] || '').trim();
+                const args = {};
+                for (const spec of (cmd.metadata && cmd.metadata.args) || []) {
+                    if (spec && spec.type === 'enum' && rest) {
+                        const tok = rest.split(/\s+/)[0];
+                        if ((spec.options || []).includes(tok)) {
+                            args[spec.name || 'value'] = tok;
+                            rest = rest.slice(tok.length).trim();
+                        }
+                    }
+                }
+                if (rest) args.text = rest;
+                return { name: cmd.name, args };
+            }
+
+            // 补全菜单状态：mode=cmd 补全命令名，mode=arg 补全枚举参数
+            const cmdMenu = { open: false, items: [], active: 0 };
+
+            function firstEnumArgSpec(cmd) {
+                return ((cmd.metadata && cmd.metadata.args) || [])
+                    .find(s => s && s.type === 'enum' && Array.isArray(s.options));
+            }
+
+            function closeCmdMenu() {
+                cmdMenu.open = false;
+                els.cmdMenu.hidden = true;
+            }
+
+            function renderCmdMenu() {
+                els.cmdMenu.innerHTML = cmdMenu.items.map((it, i) =>
+                    '<div class="cmd-item' + (i === cmdMenu.active ? ' active' : '') + '" data-idx="' + i + '">' +
+                    '<span class="cmd-name">' + escapeHtml(it.label) + '</span>' +
+                    (it.desc ? '<span class="cmd-desc">' + escapeHtml(it.desc) + '</span>' : '') +
+                    '<span class="cmd-kind">' + escapeHtml(it.kind) + '</span></div>'
+                ).join('');
+                els.cmdMenu.hidden = false;
+                els.cmdMenu.querySelectorAll('.cmd-item').forEach(el => {
+                    // mousedown + preventDefault：点击菜单时保住输入框焦点
+                    el.addEventListener('mousedown', (e) => {
+                        e.preventDefault();
+                        const it = cmdMenu.items[Number(el.dataset.idx)];
+                        if (it) { it.apply(); afterCmdEdit(); }
+                    });
+                });
+            }
+
+            function afterCmdEdit() {
+                els.messageInput.focus();
+                els.messageInput.setSelectionRange(els.messageInput.value.length, els.messageInput.value.length);
+                els.messageInput.dispatchEvent(new Event('input'));
+            }
+
+            function updateCmdMenu() {
+                const v = els.messageInput.value;
+                const session = getCurrentSession();
+                const cmds = agentCommands(session && state.agents[session.agentId]);
+                if (!v.startsWith('/') || v.includes('\n') || cmds.length === 0) { closeCmdMenu(); return; }
+                const spIdx = v.search(/\s/);
+                if (spIdx === -1) {
+                    // 还在输入命令名：按前缀过滤
+                    const prefix = v.slice(1).toLowerCase();
+                    cmdMenu.items = cmds.filter(c => c.name.toLowerCase().startsWith(prefix))
+                        .map(c => ({
+                            label: '/' + c.name,
+                            desc: c.description || '',
+                            kind: (c.metadata && c.metadata.kind) || 'command',
+                            apply: () => {
+                                // 统一补尾随空格：有枚举参数则进入参数补全，没有则留位给用户输自由文本
+                                els.messageInput.value = '/' + c.name + ' ';
+                            }
+                        }));
+                } else {
+                    // 命令名已完整：第一个枚举参数给选项补全
+                    const cmd = cmds.find(c => c.name === v.slice(1, spIdx));
+                    const spec = cmd && firstEnumArgSpec(cmd);
+                    const argPrefix = v.slice(spIdx + 1);
+                    if (!spec || /\s/.test(argPrefix)) { closeCmdMenu(); return; }
+                    cmdMenu.items = spec.options
+                        .filter(o => o.toLowerCase().startsWith(argPrefix.toLowerCase()))
+                        .map(o => ({
+                            label: o,
+                            desc: cmd.description || '',
+                            kind: spec.name || 'arg',
+                            apply: () => { els.messageInput.value = '/' + cmd.name + ' ' + o; }
+                        }));
+                }
+                if (cmdMenu.items.length === 0) { closeCmdMenu(); return; }
+                cmdMenu.active = 0;
+                cmdMenu.open = true;
+                renderCmdMenu();
+            }
+
             async function sendMessage() {
                 const text = els.messageInput.value.trim();
                 const files = composerFiles;
@@ -3130,6 +3338,7 @@
                 renderAttachStrip();
                 els.messageInput.value = '';
                 els.messageInput.style.height = 'auto';
+                closeCmdMenu();
 
                 const taskId = generateId();
                 const assistantMsgId = generateId();
@@ -3154,6 +3363,8 @@
                 const requestId = generateId();
                 pendingRequests.set(requestId, taskId);
                 const metadata = {};
+                const slashCmd = parseSlashCommand(text, agent);
+                if (slashCmd) metadata.command = slashCmd;
                 if (msgAttachments.length) {
                     metadata.attachments = msgAttachments.map((a, i) =>
                         a.url ? { ...a } : { ...a, data: files[i].dataUrl });
@@ -3345,6 +3556,26 @@
                 els.stopBtn.addEventListener('click', stopCurrentTask);
 
                 els.messageInput.addEventListener('keydown', e => {
+                    // 斜杠命令菜单打开时优先响应导航键，Enter/Tab 选中而不是发送
+                    if (cmdMenu.open) {
+                        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                            e.preventDefault();
+                            cmdMenu.active = (cmdMenu.active + (e.key === 'ArrowDown' ? 1 : -1) + cmdMenu.items.length) % cmdMenu.items.length;
+                            renderCmdMenu();
+                            return;
+                        }
+                        if (e.key === 'Enter' || e.key === 'Tab') {
+                            e.preventDefault();
+                            const it = cmdMenu.items[cmdMenu.active];
+                            if (it) { it.apply(); afterCmdEdit(); }
+                            return;
+                        }
+                        if (e.key === 'Escape') {
+                            e.preventDefault();
+                            closeCmdMenu();
+                            return;
+                        }
+                    }
                     if (e.key !== 'Enter') return;
                     if (state.settings.sendWith === 'cmd-enter') {
                         if (e.metaKey || e.ctrlKey) {
@@ -3358,6 +3589,7 @@
                 });
                 els.messageInput.addEventListener('input', () => {
                     updateInputState();
+                    updateCmdMenu();
                     els.messageInput.style.height = 'auto';
                     els.messageInput.style.height = Math.min(els.messageInput.scrollHeight, 200) + 'px';
                 });

@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { WebSocketServer, WebSocket } from "ws";
 import * as proto from "./protocol.ts";
 import { envString, envDurationMs, parseDurationMs, parseFlags, setLogLevel, logger, parseListenAddr } from "./util.ts";
-import { Db, type DbUser } from "./db.ts";
+import { Db, type DbUser, type DbAgent, type DbAgentBrand, type DbPairingCode } from "./db.ts";
 import { Bus, type RegisteredAgent } from "./bus.ts";
 import {
   type AttachmentStore,
@@ -33,6 +33,24 @@ interface AgentConn {
   alive: boolean;
   deviceKeyID?: string; // 设备密钥连接记录 key id，吊销时按此踢线
   lastDbTouch?: number; // agents 表状态落库节流用
+  lastRegistryTouch?: number; // 注册表刷新节流用
+  ip?: string; // AgentClient 连接远端 IP（X-Forwarded-For 优先，否则 socket 远端）
+  brandID?: string; // 品牌目录 id（治理模式）
+  connectorID?: string; // 承载该 agent 的 connector（页面分配的实例才有）
+  approval?: string; // approved | pending；pending 可用连接但不可接任务
+  pairing?: boolean; // 无凭证的配对连接（?pair=1），只允许 connector.pair
+}
+
+// 待接入 connector（内存态）：pair 受理后挂起，等管理员批准后下发设备密钥
+interface PendingPair {
+  connectorID: string;
+  ownerID: string; // 配对码归属用户，批准后密钥归该用户
+  codeID: string;
+  conn: AgentConn;
+  platform?: proto.PlatformInfo;
+  version?: string;
+  ip?: string;
+  pairedAt: number;
 }
 
 interface UserConn {
@@ -51,17 +69,29 @@ interface TaskState {
   createdAt: number;
 }
 
+interface PendingEntry {
+  user: UserConn;
+  timer: NodeJS.Timeout; // agent 不应答时兜底，防泄漏
+}
+
 interface TaskBuffer {
   ownerID: string;
   agentID: string;
   sessionID: string;
   chunks: proto.LocalAgentChunk[];
+  bytes: number;    // 已缓冲体积，配合 MAX_TASK_BUFFER_BYTES 防长任务撑爆内存
+  truncated: boolean;
 }
+
+// 单任务落库缓冲上限：超出部分丢弃并在最终消息里标注截断
+const MAX_TASK_BUFFER_BYTES = 4 * 1024 * 1024;
 
 export class Hub {
   agents = new Map<string, AgentConn>();
   users = new Map<WebSocket, UserConn>();
-  pendingRequests = new Map<string, UserConn>();
+  connectors = new Map<string, AgentConn>(); // connector 模式 client 连接（id = connector_id）
+  pendingPairs = new Map<string, PendingPair>(); // 待审批的配对连接（id = connector_id）
+  pendingRequests = new Map<string, PendingEntry>();
   tasks = new Map<string, TaskState>();
   taskBuffers = new Map<string, TaskBuffer>();
   db?: Db;
@@ -71,16 +101,21 @@ export class Hub {
   taskLimiter = new RateLimiter(30, 60_000); // 每用户每分钟 30 个任务
   deviceKeyLimiter = new RateLimiter(10, 60_000); // 每用户每分钟 10 次密钥创建
   draining = false;
+  // 品牌目录缓存：启动时载入，CRUD 后 reload。空目录 = 开放模式（自由注册免审批）
+  brands = new Map<string, DbAgentBrand>();
 
   private agentTimeoutMs: number;
   private userTimeoutMs: number;
   private taskTimeoutMs: number;
+  private pendingTimeoutMs: number;
   private checker: NodeJS.Timeout;
+  private agentListTimer?: NodeJS.Timeout; // broadcastAgentList 防抖
 
-  constructor(agentTimeoutMs: number, userTimeoutMs: number, taskTimeoutMs: number) {
+  constructor(agentTimeoutMs: number, userTimeoutMs: number, taskTimeoutMs: number, pendingTimeoutMs = 60_000) {
     this.agentTimeoutMs = agentTimeoutMs;
     this.userTimeoutMs = userTimeoutMs;
     this.taskTimeoutMs = taskTimeoutMs;
+    this.pendingTimeoutMs = pendingTimeoutMs;
     this.checker = setInterval(() => this.heartbeatCheck(), 30_000);
     this.checker.unref();
     this.metrics.counter("ywm_tasks_created_total", "Tasks created by users");
@@ -111,15 +146,22 @@ export class Hub {
   shutdown(): void {
     this.draining = true;
     clearInterval(this.checker);
+    if (this.agentListTimer) {
+      clearTimeout(this.agentListTimer);
+      this.agentListTimer = undefined;
+    }
     for (const ts of this.tasks.values()) clearTimeout(ts.timer);
     for (const taskID of [...this.taskBuffers.keys()]) this.flushTaskBuffer(taskID);
-    for (const [reqID, u] of this.pendingRequests) {
+    for (const [reqID, p] of this.pendingRequests) {
+      clearTimeout(p.timer);
       try {
-        u.ws.send(JSON.stringify(proto.newErrorResponse(reqID, proto.ERR_INTERNAL_ERROR, "server shutting down")));
+        p.user.ws.send(JSON.stringify(proto.newErrorResponse(reqID, proto.ERR_INTERNAL_ERROR, "server shutting down")));
       } catch { /* 连接可能已断开 */ }
     }
     this.pendingRequests.clear();
     for (const agent of this.agents.values()) agent.ws.close(1001, "server shutting down");
+    for (const conn of this.connectors.values()) conn.ws.close(1001, "server shutting down");
+    for (const p of this.pendingPairs.values()) p.conn.ws.close(1001, "server shutting down");
     for (const ws of this.users.keys()) ws.close(1001, "server shutting down");
   }
 
@@ -135,10 +177,18 @@ export class Hub {
       if (Date.now() - user.lastHeartbeat > this.userTimeoutMs) {
         logger.warn("user heartbeat timeout", { user_id: user.userID });
         this.users.delete(ws);
-        for (const [reqID, u] of this.pendingRequests) {
-          if (u.ws === ws) this.pendingRequests.delete(reqID);
-        }
+        this.dropPendingFor(ws);
         ws.close();
+      }
+    }
+  }
+
+  // 用户连接消失时清掉它名下所有待应答请求
+  private dropPendingFor(ws: WebSocket): void {
+    for (const [reqID, p] of this.pendingRequests) {
+      if (p.user.ws === ws) {
+        clearTimeout(p.timer);
+        this.pendingRequests.delete(reqID);
       }
     }
   }
@@ -153,12 +203,19 @@ export class Hub {
       platform: a.platform,
       instance_id: this.bus?.instanceID ?? "",
       last_heartbeat: a.lastHeartbeat,
+      brand_id: a.brandID ?? null,
+      approval_status: a.approval ?? "approved",
     };
   }
 
-  // 心跳/状态变化时刷新注册表 TTL 与内容（单机模式为 no-op）
-  refreshAgentRegistry(a: AgentConn): void {
+  // 心跳/状态变化时刷新注册表 TTL 与内容（单机模式为 no-op）。
+  // 刷新会重置 TTL：节流水位取 TTL 的 1/3，保证两次刷新之间条目不过期；
+  // 状态/归属变化用 force 立即刷。
+  refreshAgentRegistry(a: AgentConn, force = false): void {
     if (!this.bus || a.id === "") return;
+    const now = Date.now();
+    if (!force && now - (a.lastRegistryTouch ?? 0) < this.bus.registryTtlMs / 3) return;
+    a.lastRegistryTouch = now;
     this.bus.refreshAgent(this.registeredAgentOf(a))
       .catch((e) => logger.error("registry refresh failed", { error: String(e) }));
   }
@@ -166,7 +223,9 @@ export class Hub {
   registerAgent(a: AgentConn): void {
     a.lastHeartbeat = Date.now();
     this.agents.set(a.id, a);
-    if (this.bus) {
+    // pending（待审批）agent 不进注册表：其他实例不可见、不可接任务
+    if (this.bus && a.approval !== "pending") {
+      a.lastRegistryTouch = Date.now(); // register 已写入全量条目，首个心跳不必立刻刷新
       this.bus.registerAgent(this.registeredAgentOf(a))
         .catch((e) => logger.error("registry register failed", { error: String(e) }));
     }
@@ -179,6 +238,7 @@ export class Hub {
         platform: a.platform ? JSON.stringify(a.platform) : null,
         capabilities: JSON.stringify(a.capabilities),
         status: a.status || proto.AGENT_STATUS_ONLINE,
+        last_ip: a.ip ?? null,
       }).catch((e) => logger.error("agent upsert failed", { error: String(e) }));
     }
     this.broadcastAgentList();
@@ -202,6 +262,76 @@ export class Hub {
     logger.info("agent unregistered", { agent_id: id });
   }
 
+  // ---- 品牌目录与 connector ----
+
+  async reloadBrands(): Promise<void> {
+    if (!this.db) return;
+    const rows = await this.db.listBrands();
+    this.brands = new Map(rows.map((b) => [b.id, b]));
+  }
+
+  // 品牌目录非空即进入治理模式：注册必须带品牌，client 主动注册需审批
+  governanceOn(): boolean {
+    return this.brands.size > 0;
+  }
+
+  registerConnector(a: AgentConn): void {
+    a.lastHeartbeat = Date.now();
+    if (a.connectorID) this.connectors.set(a.connectorID, a);
+    logger.info("connector registered", { connector_id: a.connectorID, owner_id: a.ownerID });
+  }
+
+  unregisterConnector(id: string): void {
+    if (this.connectors.delete(id)) logger.info("connector unregistered", { connector_id: id });
+  }
+
+  // 全量推送 connector 的目标 agent 集：本地投递 + 经总线广播到其他实例
+  async pushConnectorSync(connectorID: string): Promise<void> {
+    if (!this.db) return;
+    const rows = await this.db.listConnectorAgents(connectorID);
+    const agents: proto.ConnectorSyncAgent[] = rows.map((r) => {
+      const brand = r.brand_id ? this.brands.get(r.brand_id) : undefined;
+      let capabilities: proto.Capability[] = [];
+      try { capabilities = brand?.capabilities ? JSON.parse(brand.capabilities) as proto.Capability[] : []; } catch { /* 忽略坏数据 */ }
+      return {
+        agent_id: r.id, brand_id: r.brand_id ?? "", name: r.name, capabilities,
+        conn_type: brand?.conn_type || undefined,
+        launch_cmd: brand?.launch_cmd ?? undefined,
+        endpoint: brand?.endpoint ?? undefined,
+      };
+    });
+    const msg = proto.newNotification(proto.METHOD_CONNECTOR_SYNC, { agents } satisfies proto.ConnectorSyncParams);
+    this.deliverToLocalConnector(connectorID, msg);
+    if (this.bus) {
+      this.bus.publishConnectorSync(connectorID, msg)
+        .catch((e) => logger.error("bus publish connector sync failed", { error: String(e) }));
+    }
+  }
+
+  deliverToLocalConnector(connectorID: string, msg: proto.Message): void {
+    const conn = this.connectors.get(connectorID);
+    if (conn) this.trySend(conn.ws, msg);
+  }
+
+  // 审批结果落到在线连接（总线投递入口也走这里）：approved 补进注册表，rejected 踢线
+  applyAgentApproval(agentID: string, status: string): void {
+    const a = this.agents.get(agentID);
+    if (a) {
+      if (status === "approved") {
+        a.approval = "approved";
+        // pending 时未进注册表（键和集合都没有），这里走完整 register
+        if (this.bus) {
+          a.lastRegistryTouch = Date.now();
+          this.bus.registerAgent(this.registeredAgentOf(a))
+            .catch((e) => logger.error("registry register failed", { error: String(e) }));
+        }
+      } else if (status === "rejected") {
+        a.ws.close(4001, "registration rejected");
+      }
+    }
+    this.broadcastAgentList();
+  }
+
   // 心跳/状态变化驱动 agents 表状态更新，60s 节流避免写放大（force 用于状态切换）
   touchAgentThrottled(a: AgentConn, force = false): void {
     if (!this.db || a.id === "") return;
@@ -220,18 +350,40 @@ export class Hub {
 
   unregisterUser(ws: WebSocket): void {
     this.users.delete(ws);
-    for (const [reqID, u] of this.pendingRequests) {
-      if (u.ws === ws) this.pendingRequests.delete(reqID);
+    this.dropPendingFor(ws);
+  }
+
+  // 关闭本实例上匹配的连接：页面连接按 userID，agent 连接按 ownerID 或设备密钥 id。
+  // 总线投递入口也走这里（不会再回传总线）。
+  kickLocal(userID?: string, deviceKeyID?: string, reason = "kicked"): void {
+    for (const u of this.users.values()) {
+      if (userID !== undefined && u.userID === userID) u.ws.close(4001, reason);
+    }
+    for (const a of this.agents.values()) {
+      if ((userID !== undefined && a.ownerID === userID)
+        || (deviceKeyID !== undefined && a.deviceKeyID === deviceKeyID)) {
+        a.ws.close(4001, reason);
+      }
     }
   }
 
-  // 禁用/改密后踢掉该用户的所有页面连接（agent 连接不受影响，下次心跳超时自然清理）
-  kickUser(userID: string): void {
-    for (const u of this.users.values()) {
-      if (u.userID === userID) u.ws.close(4001, "account disabled or password changed");
+  // 禁用/改密后踢掉该用户的所有页面连接；多实例时经总线踢其他实例上的连接
+  // （agent 连接也按属主一并踢掉，未踢到的下次心跳超时自然清理）
+  kickUser(userID: string, reason = "account disabled or password changed"): void {
+    this.kickLocal(userID, undefined, reason);
+    if (this.bus) {
+      this.bus.publishKick(userID, undefined, reason)
+        .catch((e) => logger.error("bus publish kick failed", { error: String(e) }));
     }
-    for (const a of this.agents.values()) {
-      if (a.ownerID === userID) a.ws.close(4001, "account disabled or password changed");
+  }
+
+  // 吊销设备密钥后踢掉使用它的在线 agent（含其他实例上的连接）
+  kickDeviceKey(deviceKeyID: string): void {
+    const reason = "device key revoked";
+    this.kickLocal(undefined, deviceKeyID, reason);
+    if (this.bus) {
+      this.bus.publishKick(undefined, deviceKeyID, reason)
+        .catch((e) => logger.error("bus publish kick failed", { error: String(e) }));
     }
   }
 
@@ -274,12 +426,44 @@ export class Hub {
     return user.userID !== "" && (user.isAdmin || user.userID === agent.ownerID);
   }
 
+  // admin 角色判定缓存（5s TTL）：管理后台一串调用不再每次查库。
+  // setRole/disable 会调 invalidateAdminCache 主动失效，并踢线强制重连。
+  private adminCache = new Map<string, { isAdmin: boolean; expiresAt: number }>();
+
+  async isAdminUser(userID: string, db: Db): Promise<boolean> {
+    const hit = this.adminCache.get(userID);
+    if (hit && hit.expiresAt > Date.now()) return hit.isAdmin;
+    const me = await db.getUserById(userID);
+    const isAdmin = me?.role === "admin";
+    if (this.adminCache.size > 1024) {
+      const now = Date.now();
+      for (const [k, v] of this.adminCache) {
+        if (v.expiresAt <= now) this.adminCache.delete(k);
+      }
+    }
+    this.adminCache.set(userID, { isAdmin, expiresAt: Date.now() + 5_000 });
+    return isAdmin;
+  }
+
+  invalidateAdminCache(userID: string): void {
+    this.adminCache.delete(userID);
+  }
+
+  // 品牌信息附加到 AgentInfo（logo/品牌名），供页面展示
+  private withBrand(info: proto.AgentInfo, brandID: string | null | undefined): proto.AgentInfo {
+    info.brand_id = brandID ?? null;
+    const brand = brandID ? this.brands.get(brandID) : undefined;
+    info.brand_name = brand?.name ?? null;
+    info.logo_url = brand?.logo_url ?? null;
+    return info;
+  }
+
   async agentList(): Promise<proto.AgentInfo[]> {
     const byID = new Map<string, proto.AgentInfo>();
     if (this.bus) {
       try {
         for (const a of await this.bus.listAgents()) {
-          byID.set(a.id, {
+          byID.set(a.id, this.withBrand({
             id: a.id,
             owner_id: a.owner_id,
             name: a.name,
@@ -287,7 +471,8 @@ export class Hub {
             capabilities: a.capabilities,
             platform: a.platform,
             last_heartbeat: new Date(a.last_heartbeat).toISOString(),
-          });
+            approval_status: a.approval_status ?? "approved",
+          }, a.brand_id));
         }
       } catch (e) {
         logger.error("registry list failed", { error: String(e) });
@@ -295,15 +480,16 @@ export class Hub {
     }
     // 本地连接的信息最新，覆盖注册表中的同 id 条目
     for (const [id, a] of this.agents) {
-      byID.set(id, {
+      byID.set(id, this.withBrand({
         id,
         owner_id: a.ownerID,
         name: a.name,
-        status: a.status || proto.AGENT_STATUS_ONLINE,
+        status: a.approval === "pending" ? "pending" : (a.status || proto.AGENT_STATUS_ONLINE),
         capabilities: a.capabilities,
         platform: a.platform,
         last_heartbeat: new Date(a.lastHeartbeat).toISOString(),
-      });
+        approval_status: a.approval ?? "approved",
+      }, a.brandID));
     }
     return [...byID.values()];
   }
@@ -314,13 +500,26 @@ export class Hub {
   }
 
   broadcastAgentList(): void {
-    void this.agentList().then((agents) => {
-      for (const user of this.users.values()) {
-        const filtered = this.filterAgentsForUser(agents, user);
-        const msg = proto.newNotification(proto.METHOD_ADMIN_AGENT_LIST, { agents: filtered });
-        this.trySend(user.ws, msg);
-      }
-    }).catch((e) => logger.error("broadcast agent list failed", { error: String(e) }));
+    // 1s 合并窗口：register/unregister/状态抖动集中刷新一次，避免写放大
+    if (this.agentListTimer) return;
+    this.agentListTimer = setTimeout(() => {
+      this.agentListTimer = undefined;
+      void this.agentList().then((agents) => {
+        // 同一份名单序列化一次：admin 全量共享一帧，普通用户按属主各算一帧
+        const cache = new Map<string, string>();
+        for (const user of this.users.values()) {
+          const key = user.isAdmin ? "" : user.userID;
+          let raw = cache.get(key);
+          if (raw === undefined) {
+            const filtered = this.filterAgentsForUser(agents, user);
+            raw = JSON.stringify(proto.newNotification(proto.METHOD_ADMIN_AGENT_LIST, { agents: filtered }));
+            cache.set(key, raw);
+          }
+          if (user.ws.readyState === WebSocket.OPEN) user.ws.send(raw);
+        }
+      }).catch((e) => logger.error("broadcast agent list failed", { error: String(e) }));
+    }, 1_000);
+    this.agentListTimer.unref();
   }
 
   private sendAgentList(u: UserConn): void {
@@ -345,6 +544,13 @@ export class Hub {
   }
 
   forwardToAgent(agentID: string, msg: proto.Message): void {
+    // connector 多 agent 托管：注入 agent_id 供 client 把消息分派到对应 shim
+    if ((msg.method === proto.METHOD_AGENT_CHAT || msg.method === proto.METHOD_AGENT_CANCEL
+        || msg.method === proto.METHOD_AGENT_RESPOND)
+      && msg.params !== null && typeof msg.params === "object"
+      && (msg.params as { agent_id?: string }).agent_id === undefined) {
+      (msg.params as Record<string, unknown>).agent_id = agentID;
+    }
     const agent = this.getAgent(agentID);
     if (agent) {
       this.trySend(agent.ws, msg);
@@ -395,15 +601,25 @@ export class Hub {
   }
 
   deliverToLocalPending(id: string, msg: proto.Message): boolean {
-    const user = this.pendingRequests.get(id);
-    if (!user) return false;
+    const p = this.pendingRequests.get(id);
+    if (!p) return false;
+    clearTimeout(p.timer);
     this.pendingRequests.delete(id);
-    this.trySend(user.ws, msg);
+    this.trySend(p.user.ws, msg);
     return true;
   }
 
   trackPendingRequest(id: string, user: UserConn): void {
-    this.pendingRequests.set(id, user);
+    const old = this.pendingRequests.get(id);
+    if (old) clearTimeout(old.timer);
+    // agent 不应答时兜底：回错误并删条目，防止 pendingRequests 无限增长
+    const timer = setTimeout(() => {
+      if (!this.pendingRequests.delete(id)) return;
+      logger.warn("pending request timeout", { request_id: id });
+      this.trySend(user.ws, proto.newErrorResponse(id, proto.ERR_INTERNAL_ERROR, "request timeout"));
+    }, this.pendingTimeoutMs);
+    timer.unref();
+    this.pendingRequests.set(id, { user, timer });
   }
 
   trackTask(taskID: string, agentID: string, ownerID: string, sessionID = ""): void {
@@ -456,9 +672,18 @@ export class Hub {
     if (!this.db) return;
     let buf = this.taskBuffers.get(taskID);
     if (!buf) {
-      buf = { ownerID, agentID, sessionID, chunks: [] };
+      buf = { ownerID, agentID, sessionID, chunks: [], bytes: 0, truncated: false };
       this.taskBuffers.set(taskID, buf);
     }
+    const size = JSON.stringify(chunk).length;
+    if (buf.bytes + size > MAX_TASK_BUFFER_BYTES) {
+      if (!buf.truncated) {
+        buf.truncated = true;
+        logger.warn("task buffer truncated", { task_id: taskID, bytes: buf.bytes });
+      }
+      return;
+    }
+    buf.bytes += size;
     buf.chunks.push(chunk);
   }
 
@@ -469,6 +694,7 @@ export class Hub {
       return;
     }
     this.taskBuffers.delete(taskID);
+    if (buf.truncated) buf.chunks.push({ type: proto.CHUNK_TYPE_TEXT, content: proto.textContent("（输出过长，中间内容已截断）") });
     if (errorText) buf.chunks.push({ type: proto.CHUNK_TYPE_TEXT, content: proto.textContent(errorText) });
     if (buf.chunks.length === 0) return;
     const db = this.db;
@@ -496,6 +722,11 @@ export class Hub {
     this.tasks.delete(taskID);
     logger.warn("task timeout", { task_id: taskID, agent_id: ts.agentID });
     this.flushTaskBuffer(taskID, "任务超时");
+    // 通知 agent 中止任务，避免网关侧超时后 agent 还在空跑
+    this.forwardToAgent(ts.agentID, proto.newNotification(proto.METHOD_AGENT_CANCEL, {
+      task_id: taskID,
+      session_id: ts.sessionID || undefined,
+    } satisfies proto.AgentCancelParams));
     const notif = proto.newNotification(proto.METHOD_ADMIN_PROGRESS, {
       task_id: taskID,
       agent_id: ts.agentID,
@@ -665,8 +896,7 @@ function userInfoOf(u: DbUser): proto.UserInfo {
 }
 
 async function requireAdmin(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<boolean> {
-  const me = await db.getUserById(user.userID);
-  if (me?.role !== "admin") {
+  if (!(await hub.isAdminUser(user.userID, db))) {
     sendError(user.ws, msg.id, proto.ERR_UNAUTHORIZED, "admin only");
     return false;
   }
@@ -709,6 +939,7 @@ async function handleUserSetRole(hub: Hub, user: UserConn, msg: proto.Message, d
     sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "user not found");
     return;
   }
+  hub.invalidateAdminCache(params.id);
   hub.kickUser(params.id); // isAdmin 缓存在连接上，强制重连刷新
   sendMsg(user.ws, proto.newResponse(msg.id ?? "", { status: "ok" }));
 }
@@ -750,6 +981,7 @@ async function handleUserDisable(hub: Hub, user: UserConn, msg: proto.Message, d
     sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "user not found");
     return;
   }
+  hub.invalidateAdminCache(params.id);
   if (params.disabled) hub.kickUser(params.id);
   sendMsg(user.ws, proto.newResponse(msg.id ?? "", { status: "ok" }));
 }
@@ -807,17 +1039,24 @@ async function handleAgentList(hub: Hub, user: UserConn, msg: proto.Message, db:
     let plat: proto.PlatformInfo | undefined;
     try { caps = row.capabilities ? JSON.parse(row.capabilities) as proto.Capability[] : []; } catch { /* 忽略坏数据 */ }
     try { plat = row.platform ? JSON.parse(row.platform) as proto.PlatformInfo : undefined; } catch { /* 忽略坏数据 */ }
+    const brand = row.brand_id ? hub.brands.get(row.brand_id) : undefined;
     return {
       id: row.id,
       owner_id: live?.owner_id ?? row.owner_id,
       name: live?.name ?? row.name,
-      status: live?.status ?? row.status,
+      status: live?.status ?? (row.approval_status === "pending" ? "pending" : row.status),
       capabilities: live?.capabilities ?? caps,
       platform: live?.platform ?? plat,
       last_heartbeat: live?.last_heartbeat ?? new Date(row.last_seen).toISOString(),
       first_seen: row.first_seen,
       last_seen: row.last_seen,
       online: live !== undefined,
+      last_ip: row.last_ip ?? null,
+      brand_id: row.brand_id,
+      brand_name: brand?.name ?? null,
+      logo_url: brand?.logo_url ?? null,
+      approval_status: row.approval_status,
+      connector_id: row.connector_id,
     };
   });
   sendMsg(user.ws, proto.newResponse(msg.id ?? "", { agents: rows, total } satisfies proto.AdminAgentListResult));
@@ -830,6 +1069,11 @@ async function handleAgentDisconnect(hub: Hub, user: UserConn, msg: proto.Messag
   if (!local) {
     // 一期限制：只能断连落在本实例上的 agent（跨实例需要 bus 指令通道）
     sendError(user.ws, msg.id, proto.ERR_AGENT_NOT_FOUND, "agent not connected to this instance");
+    return;
+  }
+  if (local.connectorID) {
+    // connector 托管的 agent 与兄弟 agent 共享连接，断连会误伤；移除请用 agent.remove
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "connector-managed agent: use agent.remove");
     return;
   }
   local.ws.close(4001, "disconnected by admin");
@@ -856,7 +1100,7 @@ async function handleAgentReassign(hub: Hub, user: UserConn, msg: proto.Message,
   const local = hub.getAgent(params.agent_id);
   if (local) {
     local.ownerID = params.owner_id;
-    hub.refreshAgentRegistry(local);
+    hub.refreshAgentRegistry(local, true);
   }
   hub.broadcastAgentList();
   sendMsg(user.ws, proto.newResponse(msg.id ?? "", { status: "ok" }));
@@ -953,11 +1197,465 @@ async function handleDeviceKeyRevoke(hub: Hub, user: UserConn, msg: proto.Messag
   } else {
     await db.setDeviceKeyDisabled(target.id, true);
   }
-  // 踢掉使用该密钥的在线 agent 连接
-  for (const a of hub.agents.values()) {
-    if (a.deviceKeyID === params.id) a.ws.close(4001, "device key revoked");
+  // 踢掉使用该密钥的在线 agent 连接（含其他实例）
+  hub.kickDeviceKey(params.id);
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", { status: "ok" }));
+}
+
+// ---- 配对接入：配对码 CRUD + 待接入审批 ----
+
+function pairingCodeInfoOf(c: DbPairingCode): proto.PairingCodeInfo {
+  return {
+    id: c.id,
+    owner_id: c.owner_id,
+    expires_at: c.expires_at,
+    used_at: c.used_at,
+    created_at: c.created_at,
+  };
+}
+
+async function handlePairingCreate(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  const params = proto.decodeParams<proto.PairingCodeCreateParams>(msg);
+  let ownerID = user.userID;
+  if (params.owner_id && params.owner_id !== user.userID) {
+    if (!(await requireAdmin(hub, user, msg, db))) return;
+    if (!(await db.getUserById(params.owner_id))) {
+      sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "owner not found");
+      return;
+    }
+    ownerID = params.owner_id;
+  }
+  if (!hub.deviceKeyLimiter.allow(user.userID)) {
+    sendError(user.ws, msg.id, proto.ERR_RATE_LIMITED, "too many codes created, please slow down");
+    return;
+  }
+  const ttlMs = Math.min(Math.max(params.ttl_seconds ?? 86_400, 60), 7 * 86_400) * 1000;
+  const { plaintext, hash } = generateDeviceKey();
+  const id = crypto.randomUUID();
+  const expiresAt = Date.now() + ttlMs;
+  await db.createPairingCode({ id, owner_id: ownerID, code_hash: hash, expires_at: expiresAt });
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", {
+    id, code: plaintext, owner_id: ownerID, expires_at: expiresAt,
+  } satisfies proto.PairingCodeCreateResult));
+}
+
+async function handlePairingList(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  const codes = await db.listPairingCodes(user.userID);
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", {
+    codes: codes.map(pairingCodeInfoOf),
+  } satisfies proto.PairingCodeListResult));
+}
+
+async function handlePairingDelete(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  const params = proto.decodeParams<proto.PairingCodeDeleteParams>(msg);
+  const codes = await db.listPairingCodes(user.userID);
+  if (!codes.some((c) => c.id === params.id)) {
+    // 非本人需 admin 才能作废
+    if (!(await requireAdmin(hub, user, msg, db))) return;
+  }
+  if (!(await db.deletePairingCode(params.id))) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "code not found");
+    return;
   }
   sendMsg(user.ws, proto.newResponse(msg.id ?? "", { status: "ok" }));
+}
+
+function pendingConnectorInfoOf(p: PendingPair): proto.PendingConnectorInfo {
+  return {
+    connector_id: p.connectorID,
+    owner_id: p.ownerID,
+    code_id: p.codeID,
+    platform: p.platform,
+    version: p.version,
+    ip: p.ip,
+    paired_at: p.pairedAt,
+  };
+}
+
+async function handleConnectorPendingList(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  if (!(await requireAdmin(hub, user, msg, db))) return;
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", {
+    connectors: [...hub.pendingPairs.values()].map(pendingConnectorInfoOf),
+  } satisfies proto.ConnectorPendingListResult));
+}
+
+async function handleConnectorApprove(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  if (!(await requireAdmin(hub, user, msg, db))) return;
+  const params = proto.decodeParams<proto.ConnectorApproveParams>(msg);
+  const p = hub.pendingPairs.get(params.connector_id);
+  if (!p) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "pending connector not found");
+    return;
+  }
+  // 签发设备密钥：owner = 配对码归属用户，明文只随 connector.credential 推一次
+  const { plaintext, hash } = generateDeviceKey();
+  await db.createDeviceKey({
+    id: crypto.randomUUID(), owner_id: p.ownerID,
+    name: `connector:${p.connectorID}`, key_hash: hash,
+  });
+  await db.markPairingCodeUsed(p.codeID);
+  hub.pendingPairs.delete(p.connectorID);
+  sendMsg(p.conn.ws, proto.newNotification(proto.METHOD_CONNECTOR_CREDENTIAL, {
+    connector_id: p.connectorID, key: plaintext,
+  } satisfies proto.ConnectorCredentialParams));
+  logger.info("connector approved", { connector_id: p.connectorID, owner_id: p.ownerID, by: user.userID });
+  // 凭证已投递，配对连接使命完成；client 落盘后用 key 重连走 connector.hello
+  setTimeout(() => p.conn.ws.close(1000, "credential delivered"), 500).unref();
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", { status: "ok" }));
+}
+
+async function handleConnectorReject(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  if (!(await requireAdmin(hub, user, msg, db))) return;
+  const params = proto.decodeParams<proto.ConnectorApproveParams>(msg);
+  const p = hub.pendingPairs.get(params.connector_id);
+  if (!p) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "pending connector not found");
+    return;
+  }
+  hub.pendingPairs.delete(p.connectorID);
+  // 配对码不消耗，持码方可换 connector_id 重试或让管理员重新审批
+  logger.info("connector rejected", { connector_id: p.connectorID, by: user.userID });
+  p.conn.ws.close(4001, "pairing rejected");
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", { status: "ok" }));
+}
+
+// client 凭配对码接入（?pair=1 无凭证连接）：校验码 → 挂起等审批
+async function handleConnectorPair(hub: Hub, agent: AgentConn, msg: proto.Message): Promise<void> {
+  if (!hub.db) {
+    sendError(agent.ws, msg.id, proto.ERR_INTERNAL_ERROR, "storage unavailable");
+    return;
+  }
+  const params = proto.decodeParams<proto.ConnectorPairParams>(msg);
+  const connectorID = params.connector_id?.trim();
+  if (!connectorID || !params.code?.trim()) {
+    sendError(agent.ws, msg.id, proto.ERR_INVALID_PARAMS, "code and connector_id required");
+    return;
+  }
+  const code = await hub.db.getPairingCodeByHash(hashDeviceKey(params.code.trim()));
+  if (!code || code.used_at !== null || code.expires_at <= Date.now()) {
+    sendError(agent.ws, msg.id, proto.ERR_INVALID_PARAMS, "invalid or expired pairing code");
+    agent.ws.close(4001, "invalid pairing code");
+    return;
+  }
+  // 同 connector_id 重复 pair：踢掉旧的挂起连接
+  const old = hub.pendingPairs.get(connectorID);
+  if (old && old.conn.ws !== agent.ws) old.conn.ws.close(4001, "superseded by new pairing");
+  hub.pendingPairs.set(connectorID, {
+    connectorID,
+    ownerID: code.owner_id,
+    codeID: code.id,
+    conn: agent,
+    platform: params.platform,
+    version: params.version,
+    ip: agent.ip,
+    pairedAt: Date.now(),
+  });
+  logger.info("connector pairing pending", { connector_id: connectorID, owner_id: code.owner_id });
+  sendMsg(agent.ws, proto.newResponse(msg.id ?? "", { status: "pending" } satisfies proto.ConnectorPairResult));
+}
+
+// ---- 品牌目录管理 ----
+
+function brandInfoOf(b: DbAgentBrand): proto.BrandInfo {
+  let caps: proto.Capability[] = [];
+  try { caps = b.capabilities ? JSON.parse(b.capabilities) as proto.Capability[] : []; } catch { /* 忽略坏数据 */ }
+  return {
+    id: b.id,
+    name: b.name,
+    description: b.description,
+    logo_url: b.logo_url,
+    capabilities: caps,
+    conn_type: b.conn_type || "stdio",
+    launch_cmd: b.launch_cmd ?? null,
+    endpoint: b.endpoint ?? null,
+    disabled: b.disabled === 1,
+    created_at: b.created_at,
+    updated_at: b.updated_at,
+  };
+}
+
+async function handleBrandList(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  if (!(await requireAdmin(hub, user, msg, db))) return;
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", {
+    brands: (await db.listBrands()).map(brandInfoOf),
+  } satisfies proto.BrandListResult));
+}
+
+async function handleBrandCreate(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  if (!(await requireAdmin(hub, user, msg, db))) return;
+  const params = proto.decodeParams<proto.BrandCreateParams>(msg);
+  const name = params.name?.trim();
+  if (!name) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "name required");
+    return;
+  }
+  if (await db.getBrandByName(name)) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "brand name already exists");
+    return;
+  }
+  const connType = params.conn_type ?? "stdio";
+  if (!["stdio", "http", "ws"].includes(connType)) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "conn_type must be stdio|http|ws");
+    return;
+  }
+  const b: DbAgentBrand = {
+    id: crypto.randomUUID(),
+    name,
+    description: params.description ?? "",
+    logo_url: params.logo_url ?? null,
+    capabilities: JSON.stringify(params.capabilities ?? []),
+    conn_type: connType,
+    launch_cmd: params.launch_cmd ?? null,
+    endpoint: params.endpoint ?? null,
+    disabled: 0,
+    created_at: Date.now(),
+    updated_at: Date.now(),
+  };
+  await db.createBrand(b);
+  await hub.reloadBrands();
+  hub.broadcastAgentList(); // 首个品牌会开启治理模式，列表刷新带品牌信息
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", brandInfoOf(b)));
+}
+
+async function handleBrandUpdate(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  if (!(await requireAdmin(hub, user, msg, db))) return;
+  const params = proto.decodeParams<proto.BrandUpdateParams>(msg);
+  const existing = await db.getBrandById(params.id);
+  if (!existing) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "brand not found");
+    return;
+  }
+  const name = params.name?.trim();
+  if (!name) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "name required");
+    return;
+  }
+  const conflict = await db.getBrandByName(name);
+  if (conflict && conflict.id !== params.id) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "brand name already exists");
+    return;
+  }
+  const connType = params.conn_type ?? "stdio";
+  if (!["stdio", "http", "ws"].includes(connType)) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "conn_type must be stdio|http|ws");
+    return;
+  }
+  await db.updateBrand(params.id, {
+    name,
+    description: params.description ?? "",
+    logo_url: params.logo_url ?? null,
+    capabilities: JSON.stringify(params.capabilities ?? []),
+    conn_type: connType,
+    launch_cmd: params.launch_cmd ?? null,
+    endpoint: params.endpoint ?? null,
+    disabled: params.disabled ?? false,
+  });
+  await hub.reloadBrands();
+  hub.broadcastAgentList();
+  // launch_cmd/capabilities 可能变了：全量重推各 connector 的目标集，client 侧对账重建
+  for (const connectorID of hub.connectors.keys()) {
+    await hub.pushConnectorSync(connectorID);
+  }
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", { status: "ok" }));
+}
+
+async function handleBrandDelete(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  if (!(await requireAdmin(hub, user, msg, db))) return;
+  const params = proto.decodeParams<proto.BrandDeleteParams>(msg);
+  if (!(await db.deleteBrand(params.id))) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "brand not found");
+    return;
+  }
+  await hub.reloadBrands();
+  hub.broadcastAgentList();
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", { status: "ok" }));
+}
+
+// ---- 注册审批 ----
+
+async function handleAgentApprove(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  if (!(await requireAdmin(hub, user, msg, db))) return;
+  const params = proto.decodeParams<proto.AgentApprovalParams>(msg);
+  if (!(await db.setAgentApproval(params.agent_id, "approved"))) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "agent not found");
+    return;
+  }
+  hub.applyAgentApproval(params.agent_id, "approved");
+  if (hub.bus) {
+    hub.bus.publishAgentApproval(params.agent_id, "approved")
+      .catch((e) => logger.error("bus publish approval failed", { error: String(e) }));
+  }
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", { status: "ok" }));
+}
+
+async function handleAgentReject(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  if (!(await requireAdmin(hub, user, msg, db))) return;
+  const params = proto.decodeParams<proto.AgentApprovalParams>(msg);
+  if (!(await db.setAgentApproval(params.agent_id, "rejected"))) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "agent not found");
+    return;
+  }
+  hub.applyAgentApproval(params.agent_id, "rejected");
+  if (hub.bus) {
+    hub.bus.publishAgentApproval(params.agent_id, "rejected")
+      .catch((e) => logger.error("bus publish approval failed", { error: String(e) }));
+  }
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", { status: "ok" }));
+}
+
+// ---- connector 与实例分配 ----
+
+async function handleConnectorList(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  if (!(await requireAdmin(hub, user, msg, db))) return;
+  const connectors: proto.ConnectorInfo[] = [...hub.connectors.values()].map((c) => ({
+    id: c.connectorID ?? "",
+    owner_id: c.ownerID,
+    platform: c.platform,
+    ip: c.ip,
+    agents: [...hub.agents.values()].filter((a) => a.connectorID === c.connectorID).length,
+    last_heartbeat: new Date(c.lastHeartbeat).toISOString(),
+  }));
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", { connectors } satisfies proto.ConnectorListResult));
+}
+
+// 分配主体：admin 通道与 connector 自助通道共用（鉴权由调用方负责）
+async function doAssignAgent(hub: Hub, db: Db, connector: AgentConn, params: proto.AgentAssignParams)
+  : Promise<{ agent_id: string } | { error: string }> {
+  const brand = hub.brands.get(params.brand_id);
+  if (!brand || brand.disabled === 1) return { error: "unknown or disabled brand" };
+  let agentID = params.name?.trim().replace(/[^\w-]/g, "-") ?? "";
+  if (agentID !== "") {
+    if (await db.getAgentRow(agentID)) return { error: "agent id already taken" };
+  } else {
+    // 默认 <品牌名>-<短随机>，撞库则重试
+    for (;;) {
+      agentID = `${brand.name.replace(/[^\w-]/g, "-")}-${crypto.randomUUID().slice(0, 6)}`;
+      if (!(await db.getAgentRow(agentID))) break;
+    }
+  }
+  await db.assignAgent({
+    id: agentID,
+    owner_id: connector.ownerID,
+    name: agentID,
+    brand_id: brand.id,
+    connector_id: connector.connectorID ?? "",
+  });
+  await hub.pushConnectorSync(connector.connectorID ?? "");
+  return { agent_id: agentID };
+}
+
+async function handleAgentAssign(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  const params = proto.decodeParams<proto.AgentAssignParams>(msg);
+  const connector = params.connector_id ? hub.connectors.get(params.connector_id) : undefined;
+  if (!connector) {
+    sendError(user.ws, msg.id, proto.ERR_AGENT_NOT_FOUND, "connector not online");
+    return;
+  }
+  // connector 属主可自助分配，跨属主需 admin
+  if (connector.ownerID !== user.userID && !(await requireAdmin(hub, user, msg, db))) return;
+  const r = await doAssignAgent(hub, db, connector, params);
+  if ("error" in r) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, r.error);
+    return;
+  }
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", {
+    agent_id: r.agent_id,
+    status: "ok",
+  } satisfies proto.AgentAssignResult));
+}
+
+// 移除主体：注意不能关 ws——connector 托管的 agent 与 connector 及其他 agent 共享连接。
+// 网关侧直接注销，client 随后由 sync 对账下线（kill shim）。
+async function doRemoveAgent(hub: Hub, db: Db, row: DbAgent): Promise<void> {
+  await db.unassignAgent(row.id);
+  hub.unregisterAgent(row.id);
+  await hub.pushConnectorSync(row.connector_id ?? "");
+}
+
+async function handleAgentRemove(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  const params = proto.decodeParams<proto.AgentRemoveParams>(msg);
+  const row = await db.getAgentRow(params.agent_id);
+  if (!row) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "agent not found");
+    return;
+  }
+  if (!row.connector_id) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "agent is not connector-managed");
+    return;
+  }
+  if (row.owner_id !== user.userID && !(await requireAdmin(hub, user, msg, db))) return;
+  await doRemoveAgent(hub, db, row);
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", { status: "ok" }));
+}
+
+// Agent 注册：治理模式（品牌目录非空）下必须带合法 brand_id，名称/能力以品牌行覆盖；
+// client 主动注册进入 pending 待审批，页面分配的实例（agents 行已存在且 approved）直接通过。
+// 一条连接可托管多个 agent（connector 模式）：每次注册创建独立 AgentConn，共享 ws。
+async function handleAgentRegister(hub: Hub, base: AgentConn, params: proto.RegisterParams, msg: proto.Message): Promise<void> {
+  const reject = (code: number, m: string): void => {
+    sendError(base.ws, msg.id, code, m);
+    base.ws.close(4001, m);
+  };
+  if (!params.agent_id) {
+    reject(proto.ERR_INVALID_PARAMS, "agent_id required");
+    return;
+  }
+  let brand: DbAgentBrand | undefined;
+  if (hub.governanceOn()) {
+    if (!hub.db || !params.brand_id) {
+      reject(proto.ERR_INVALID_PARAMS, "brand_id required (governance mode)");
+      return;
+    }
+    brand = await hub.db.getBrandById(params.brand_id);
+    if (!brand || brand.disabled === 1) {
+      reject(proto.ERR_INVALID_PARAMS, "unknown or disabled brand");
+      return;
+    }
+  }
+  let approval = "approved";
+  const row = hub.db ? await hub.db.getAgentRow(params.agent_id) : undefined;
+  if (hub.governanceOn() && hub.db) {
+    if (row?.approval_status === "rejected") {
+      reject(proto.ERR_UNAUTHORIZED, "registration rejected");
+      return;
+    }
+    if (!row) {
+      await hub.db.createPendingAgent({
+        id: params.agent_id,
+        owner_id: base.ownerID,
+        name: brand?.name ?? params.name ?? params.agent_id,
+        brand_id: brand?.id ?? null,
+      });
+      approval = "pending";
+      logger.info("agent pending approval", { agent_id: params.agent_id, owner_id: base.ownerID });
+    } else if (row.approval_status === "pending") {
+      approval = "pending";
+    }
+  }
+  let brandCaps: proto.Capability[] = [];
+  try { brandCaps = brand?.capabilities ? JSON.parse(brand.capabilities) as proto.Capability[] : []; } catch { /* 忽略坏数据 */ }
+  const a: AgentConn = {
+    id: params.agent_id,
+    ownerID: base.ownerID, // Owner comes from token; register params owner is ignored for security.
+    name: row?.name || brand?.name
+      || (params.name !== "" && params.name !== undefined ? params.name : params.agent_id),
+    ws: base.ws,
+    capabilities: brand ? brandCaps : (params.capabilities ?? []),
+    platform: params.platform ?? base.platform,
+    status: proto.AGENT_STATUS_ONLINE,
+    lastHeartbeat: Date.now(),
+    alive: true,
+    deviceKeyID: base.deviceKeyID,
+    ip: base.ip,
+    brandID: brand?.id ?? row?.brand_id ?? undefined,
+    connectorID: row?.connector_id ?? undefined,
+    approval,
+  };
+  hub.registerAgent(a);
+  sendMsg(base.ws, proto.newResponse(msg.id ?? "", {
+    status: "ok",
+    server_time: proto.rfc3339Now(),
+  } satisfies proto.RegisterResult));
 }
 
 export function handleAgentMessage(hub: Hub, agent: AgentConn, raw: string): void {
@@ -974,34 +1672,147 @@ export function handleAgentMessage(hub: Hub, agent: AgentConn, raw: string): voi
     return;
   }
 
+  // 配对连接（?pair=1，无凭证）只允许 connector.pair
+  if (agent.pairing && msg.method !== proto.METHOD_CONNECTOR_PAIR) {
+    sendError(agent.ws, msg.id, proto.ERR_INVALID_REQUEST, "pairing connection: only connector.pair allowed");
+    return;
+  }
+
   switch (msg.method) {
+    case proto.METHOD_CONNECTOR_PAIR: {
+      if (!agent.pairing) {
+        sendError(agent.ws, msg.id, proto.ERR_INVALID_REQUEST, "connector.pair requires a ?pair=1 connection");
+        break;
+      }
+      void handleConnectorPair(hub, agent, msg).catch((e) => {
+        logger.error("connector pair failed", { error: String(e) });
+        sendError(agent.ws, msg.id, proto.ERR_INTERNAL_ERROR, "internal error");
+      });
+      break;
+    }
+
     case proto.METHOD_REGISTER: {
       const params = proto.decodeParams<proto.RegisterParams>(msg);
-      agent.id = params.agent_id;
-      agent.name = params.name !== "" && params.name !== undefined ? params.name : params.agent_id;
-      // Owner comes from token; register params owner is ignored for security.
-      agent.capabilities = params.capabilities ?? [];
-      agent.platform = params.platform;
-      hub.registerAgent(agent);
-      sendMsg(agent.ws, proto.newResponse(msg.id ?? "", {
-        status: "ok",
-        server_time: proto.rfc3339Now(),
-      } satisfies proto.RegisterResult));
+      void handleAgentRegister(hub, agent, params, msg).catch((e) => {
+        logger.error("register failed", { error: String(e) });
+        sendError(agent.ws, msg.id, proto.ERR_INTERNAL_ERROR, "internal error");
+      });
+      break;
+    }
+
+    case proto.METHOD_CONNECTOR_HELLO: {
+      const params = proto.decodeParams<proto.ConnectorHelloParams>(msg);
+      if (!params.connector_id) {
+        sendError(agent.ws, msg.id, proto.ERR_INVALID_PARAMS, "connector_id required");
+        break;
+      }
+      agent.connectorID = params.connector_id;
+      if (params.platform) agent.platform = params.platform;
+      hub.registerConnector(agent);
+      sendMsg(agent.ws, proto.newResponse(msg.id ?? "", { status: "ok" }));
+      // 连接建立即推全量目标集（重连后自动恢复承载的 agent）
+      void hub.pushConnectorSync(params.connector_id)
+        .catch((e) => logger.error("connector sync failed", { error: String(e) }));
+      break;
+    }
+
+    // ---- connector 自助（client 本地管理页经 agent 通道调用）：仅限本 connector ----
+
+    case proto.METHOD_BRAND_LIST: {
+      if (!agent.connectorID || agent.pairing) {
+        sendError(agent.ws, msg.id, proto.ERR_UNAUTHORIZED, "connector connections only");
+        break;
+      }
+      const brands = [...hub.brands.values()].filter((b) => b.disabled !== 1).map(brandInfoOf);
+      sendMsg(agent.ws, proto.newResponse(msg.id ?? "", { brands } satisfies proto.BrandListResult));
+      break;
+    }
+
+    case proto.METHOD_AGENT_ASSIGN: {
+      if (!agent.connectorID || agent.pairing) {
+        sendError(agent.ws, msg.id, proto.ERR_UNAUTHORIZED, "connector connections only");
+        break;
+      }
+      if (!hub.db) {
+        sendError(agent.ws, msg.id, proto.ERR_INTERNAL_ERROR, "storage unavailable");
+        break;
+      }
+      const params = proto.decodeParams<proto.AgentAssignParams>(msg);
+      if (params.connector_id !== agent.connectorID) {
+        sendError(agent.ws, msg.id, proto.ERR_UNAUTHORIZED, "cannot assign to another connector");
+        break;
+      }
+      const db = hub.db;
+      void doAssignAgent(hub, db, agent, params).then((r) => {
+        if ("error" in r) {
+          sendError(agent.ws, msg.id, proto.ERR_INVALID_PARAMS, r.error);
+        } else {
+          sendMsg(agent.ws, proto.newResponse(msg.id ?? "", {
+            agent_id: r.agent_id, status: "ok",
+          } satisfies proto.AgentAssignResult));
+        }
+      }).catch((e) => {
+        logger.error("connector self-assign failed", { error: String(e) });
+        sendError(agent.ws, msg.id, proto.ERR_INTERNAL_ERROR, "internal error");
+      });
+      break;
+    }
+
+    case proto.METHOD_AGENT_REMOVE: {
+      if (!agent.connectorID || agent.pairing) {
+        sendError(agent.ws, msg.id, proto.ERR_UNAUTHORIZED, "connector connections only");
+        break;
+      }
+      if (!hub.db) {
+        sendError(agent.ws, msg.id, proto.ERR_INTERNAL_ERROR, "storage unavailable");
+        break;
+      }
+      const params = proto.decodeParams<proto.AgentRemoveParams>(msg);
+      const db = hub.db;
+      void (async () => {
+        const row = await db.getAgentRow(params.agent_id);
+        if (!row || row.connector_id !== agent.connectorID) {
+          sendError(agent.ws, msg.id, proto.ERR_INVALID_PARAMS, "agent not hosted by this connector");
+          return;
+        }
+        await doRemoveAgent(hub, db, row);
+        sendMsg(agent.ws, proto.newResponse(msg.id ?? "", { status: "ok" }));
+      })().catch((e) => {
+        logger.error("connector self-remove failed", { error: String(e) });
+        sendError(agent.ws, msg.id, proto.ERR_INTERNAL_ERROR, "internal error");
+      });
       break;
     }
 
     case proto.METHOD_CAPABILITIES_UPDATED: {
       const params = proto.decodeParams<proto.CapabilitiesUpdatedParams>(msg);
-      const a = hub.agents.get(agent.id);
-      if (a) a.capabilities = params.capabilities;
+      const a = hub.agents.get(params.agent_id || agent.id);
+      if (a) {
+        a.capabilities = params.capabilities;
+        // capabilities 变化立即刷注册表：多实例下其他实例不等心跳节流（TTL/3）就能看到新命令
+        hub.refreshAgentRegistry(a, true);
+      }
       hub.broadcastAgentList();
       break;
     }
 
     case proto.METHOD_HEARTBEAT: {
       agent.lastHeartbeat = Date.now();
-      hub.refreshAgentRegistry(agent);
-      hub.touchAgentThrottled(agent);
+      const params = proto.decodeParams<proto.HeartbeatParams>(msg);
+      // 一条连接可能托管多个 agent（connector 模式）：按 agent_id + 同 ws 全部续命
+      const targets = new Set<AgentConn>();
+      if (params.agent_id) {
+        const a = hub.agents.get(params.agent_id);
+        if (a) targets.add(a);
+      }
+      for (const a of hub.agents.values()) {
+        if (a.ws === agent.ws) targets.add(a);
+      }
+      for (const a of targets) {
+        a.lastHeartbeat = Date.now();
+        hub.refreshAgentRegistry(a);
+        hub.touchAgentThrottled(a);
+      }
       if (msg.id) {
         sendMsg(agent.ws, proto.newResponse(msg.id, { status: "ok" }));
       }
@@ -1011,11 +1822,12 @@ export function handleAgentMessage(hub: Hub, agent: AgentConn, raw: string): voi
     case proto.METHOD_STATUS: {
       agent.lastHeartbeat = Date.now();
       const params = proto.decodeParams<proto.StatusParams>(msg);
-      if (params.status && params.status !== agent.status) {
-        agent.status = params.status;
-        hub.refreshAgentRegistry(agent);
-        hub.touchAgentThrottled(agent, true);
-        if (agent.id !== "") hub.broadcastAgentList();
+      const a = hub.agents.get(params.agent_id || agent.id);
+      if (a && params.status && params.status !== a.status) {
+        a.status = params.status;
+        hub.refreshAgentRegistry(a, true);
+        hub.touchAgentThrottled(a, true);
+        hub.broadcastAgentList();
       }
       if (msg.id) {
         sendMsg(agent.ws, proto.newResponse(msg.id, { status: "ok" }));
@@ -1028,6 +1840,8 @@ export function handleAgentMessage(hub: Hub, agent: AgentConn, raw: string): voi
       const value = params.value;
       if (!value) break;
       if (!value.agent_id) value.agent_id = agent.id;
+      // 多 agent 共享连接（connector）：归属/缓冲按进度里的 agent_id 定位
+      const src = hub.agents.get(value.agent_id) ?? agent;
       const progress: proto.AdminProgressParams = {
         task_id: value.task_id,
         type: value.type,
@@ -1048,14 +1862,14 @@ export function handleAgentMessage(hub: Hub, agent: AgentConn, raw: string): voi
         reason: value.reason,
       };
       const notif = proto.newNotification(proto.METHOD_ADMIN_PROGRESS, progress);
-      hub.forwardToUsers(agent.ownerID, notif);
+      hub.forwardToUsers(src.ownerID, notif);
       // 跨属主任务（admin 操作他人 agent）：进度同时发给任务发起者
       const ts = hub.tasks.get(value.task_id);
-      if (ts && ts.ownerID !== agent.ownerID) hub.forwardToUsers(ts.ownerID, notif);
+      if (ts && ts.ownerID !== src.ownerID) hub.forwardToUsers(ts.ownerID, notif);
       {
         const sessionID = value.session_id ?? ts?.sessionID ?? "";
         if (sessionID !== "") {
-          hub.bufferProgressChunk(value.task_id, agent.ownerID, agent.id, sessionID,
+          hub.bufferProgressChunk(value.task_id, src.ownerID, src.id, sessionID,
             progress as unknown as proto.LocalAgentChunk);
         }
       }
@@ -1084,6 +1898,11 @@ async function handleTaskCreate(hub: Hub, user: UserConn, msg: proto.Message): P
   }
   if (!hub.canManage(user, agent)) {
     sendError(user.ws, msg.id, proto.ERR_UNAUTHORIZED, "not authorized to manage this agent");
+    return;
+  }
+  // 待审批 agent 不接任务（仅本地连接可能处于 pending；注册表里的都已批准）
+  if (hub.getAgent(params.agent_id)?.approval === "pending") {
+    sendError(user.ws, msg.id, proto.ERR_UNAUTHORIZED, "agent pending approval");
     return;
   }
   if (!hub.taskLimiter.allow(user.userID)) {
@@ -1253,6 +2072,66 @@ export function handleUserMessage(hub: Hub, user: UserConn, raw: string): void {
       withDb(hub, user, msg, (db) => handleDeviceKeyRevoke(hub, user, msg, db));
       break;
 
+    case proto.METHOD_BRAND_LIST:
+      withDb(hub, user, msg, (db) => handleBrandList(hub, user, msg, db));
+      break;
+
+    case proto.METHOD_BRAND_CREATE:
+      withDb(hub, user, msg, (db) => handleBrandCreate(hub, user, msg, db));
+      break;
+
+    case proto.METHOD_BRAND_UPDATE:
+      withDb(hub, user, msg, (db) => handleBrandUpdate(hub, user, msg, db));
+      break;
+
+    case proto.METHOD_BRAND_DELETE:
+      withDb(hub, user, msg, (db) => handleBrandDelete(hub, user, msg, db));
+      break;
+
+    case proto.METHOD_AGENT_APPROVE:
+      withDb(hub, user, msg, (db) => handleAgentApprove(hub, user, msg, db));
+      break;
+
+    case proto.METHOD_AGENT_REJECT:
+      withDb(hub, user, msg, (db) => handleAgentReject(hub, user, msg, db));
+      break;
+
+    case proto.METHOD_CONNECTOR_LIST:
+      withDb(hub, user, msg, (db) => handleConnectorList(hub, user, msg, db));
+      break;
+
+    case proto.METHOD_AGENT_ASSIGN:
+      withDb(hub, user, msg, (db) => handleAgentAssign(hub, user, msg, db));
+      break;
+
+    case proto.METHOD_AGENT_REMOVE:
+      withDb(hub, user, msg, (db) => handleAgentRemove(hub, user, msg, db));
+      break;
+
+    case proto.METHOD_PAIRING_CREATE:
+      withDb(hub, user, msg, (db) => handlePairingCreate(hub, user, msg, db));
+      break;
+
+    case proto.METHOD_PAIRING_LIST:
+      withDb(hub, user, msg, (db) => handlePairingList(hub, user, msg, db));
+      break;
+
+    case proto.METHOD_PAIRING_DELETE:
+      withDb(hub, user, msg, (db) => handlePairingDelete(hub, user, msg, db));
+      break;
+
+    case proto.METHOD_CONNECTOR_PENDING_LIST:
+      withDb(hub, user, msg, (db) => handleConnectorPendingList(hub, user, msg, db));
+      break;
+
+    case proto.METHOD_CONNECTOR_APPROVE:
+      withDb(hub, user, msg, (db) => handleConnectorApprove(hub, user, msg, db));
+      break;
+
+    case proto.METHOD_CONNECTOR_REJECT:
+      withDb(hub, user, msg, (db) => handleConnectorReject(hub, user, msg, db));
+      break;
+
     default:
       sendError(user.ws, msg.id, proto.ERR_METHOD_NOT_FOUND, `method not found: ${msg.method}`);
   }
@@ -1290,6 +2169,7 @@ export interface GatewayConfig {
   redisURL: string;
   redisPrefix: string;
   instanceID: string;
+  trustProxy: boolean; // 前面有可信反代时才信任 X-Forwarded-For
   attachDir: string;
   attachQuotaMb: number;
   retentionDays: number;
@@ -1307,7 +2187,7 @@ export interface GatewayConfig {
   oidcEmployeeClaim: string;
 }
 
-export function loadGatewayConfig(argv?: string[]): GatewayConfig {
+export function loadGatewayConfig(): GatewayConfig {
   const specs = [
     { name: "addr", type: "string" as const, default: envString("AGENT_MANAGE_ADDR", ":8080") },
     { name: "log-level", type: "string" as const, default: envString("AGENT_MANAGE_LOG_LEVEL", "info") },
@@ -1321,6 +2201,7 @@ export function loadGatewayConfig(argv?: string[]): GatewayConfig {
     { name: "redis-url", type: "string" as const, default: envString("AGENT_MANAGE_REDIS_URL", "") },
     { name: "redis-prefix", type: "string" as const, default: envString("AGENT_MANAGE_REDIS_PREFIX", "ywm") },
     { name: "instance-id", type: "string" as const, default: envString("AGENT_MANAGE_INSTANCE_ID", crypto.randomBytes(6).toString("hex")) },
+    { name: "trust-proxy", type: "string" as const, default: envString("AGENT_MANAGE_TRUST_PROXY", "") },
     { name: "attach-dir", type: "string" as const, default: envString("AGENT_MANAGE_ATTACH_DIR", "data/attachments") },
     { name: "attach-quota-mb", type: "string" as const, default: envString("AGENT_MANAGE_ATTACH_QUOTA_MB", "0") },
     { name: "retention-days", type: "string" as const, default: envString("AGENT_MANAGE_RETENTION_DAYS", "0") },
@@ -1336,7 +2217,6 @@ export function loadGatewayConfig(argv?: string[]): GatewayConfig {
     { name: "oidc-redirect-url", type: "string" as const, default: envString("AGENT_MANAGE_OIDC_REDIRECT_URL", "") },
     { name: "oidc-employee-claim", type: "string" as const, default: envString("AGENT_MANAGE_OIDC_EMPLOYEE_CLAIM", "employee_id") },
   ];
-  void argv;
   const values = parseFlags(specs);
   const toMs = (v: string, def: number): number => {
     const asNum = Number(v);
@@ -1357,6 +2237,7 @@ export function loadGatewayConfig(argv?: string[]): GatewayConfig {
     redisURL: values["redis-url"],
     redisPrefix: values["redis-prefix"],
     instanceID: values["instance-id"],
+    trustProxy: /^(1|true|yes)$/i.test(values["trust-proxy"]),
     s3Endpoint: values["s3-endpoint"],
     s3Region: values["s3-region"],
     s3Bucket: values["s3-bucket"],
@@ -1400,8 +2281,11 @@ export async function createGatewayServer(cfg: GatewayConfig, staticFile: string
   const hub = new Hub(cfg.agentTimeoutMs, cfg.userTimeoutMs, cfg.taskTimeoutMs);
   hub.db = db;
   hub.attachments = attachments;
+  if (db) await hub.reloadBrands();
   const loginLimiter = new RateLimiter(10, 60_000); // 每 IP 每分钟 10 次登录尝试
   const uploadLimiter = new RateLimiter(20, 60_000); // 每用户每分钟 20 次上传
+  // 用户不存在时也跑一次 scrypt，拉齐登录接口时序，防用户名枚举
+  const dummyPasswordHash = hashPassword(crypto.randomBytes(16).toString("hex"));
 
   // OIDC 四项全配才启用；未启用时 /auth/oidc/* 返回 404
   const oidc = (cfg.oidcIssuer && cfg.oidcClientID && cfg.oidcClientSecret && cfg.oidcRedirectURL)
@@ -1431,13 +2315,20 @@ export async function createGatewayServer(cfg: GatewayConfig, staticFile: string
       },
       onPendingResponse: (reqID, msg) => { hub.deliverToLocalPending(reqID, msg); },
       onAgentsChanged: () => hub.broadcastAgentList(),
+      onKick: (userID, deviceKeyID, reason) => hub.kickLocal(userID, deviceKeyID, reason),
+      onConnectorSync: (connectorID, msg) => hub.deliverToLocalConnector(connectorID, msg),
+      onAgentApproval: (agentID, status) => hub.applyAgentApproval(agentID, status),
     }, cfg.redisPrefix);
     await bus.start();
     hub.bus = bus;
     logger.info("redis bus connected", { instance_id: cfg.instanceID });
   }
 
-  const server = http.createServer((req, res) => {
+  const server = http.createServer({
+    // 显式超时，防慢速请求占住连接（与 Node 18+ 默认值一致，写死防升级漂移）
+    headersTimeout: 60_000,
+    requestTimeout: 300_000,
+  }, (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     if (url.pathname === "/healthz" && req.method === "GET") {
       void (async () => {
@@ -1482,13 +2373,26 @@ export async function createGatewayServer(cfg: GatewayConfig, staticFile: string
       })().catch(() => res.writeHead(500).end("internal error"));
       return;
     }
-    const serveHtml = (file: string) => {
+    // 静态文件内存缓存：文件就几个，首次请求后不再读盘（重启进程即失效，无需失效机制）
+    const fileCache = new Map<string, Buffer | null>();
+    const readCached = (file: string, cb: (data: Buffer | null) => void) => {
+      const hit = fileCache.get(file);
+      if (hit !== undefined || fileCache.has(file)) {
+        cb(hit ?? null);
+        return;
+      }
       fs.readFile(file, (err, data) => {
-        if (err) {
+        fileCache.set(file, err ? null : data);
+        cb(err ? null : data);
+      });
+    };
+    const serveHtml = (file: string) => {
+      readCached(file, (data) => {
+        if (!data) {
           res.writeHead(404).end("not found");
           return;
         }
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" });
         res.end(data);
       });
     };
@@ -1510,8 +2414,8 @@ export async function createGatewayServer(cfg: GatewayConfig, staticFile: string
         res.writeHead(404).end("not found");
         return;
       }
-      fs.readFile(file, (err, data) => {
-        if (err) {
+      readCached(file, (data) => {
+        if (!data) {
           res.writeHead(404).end("not found");
           return;
         }
@@ -1573,24 +2477,35 @@ export async function createGatewayServer(cfg: GatewayConfig, staticFile: string
         // 按工号关联账号；首次登录自动建号（用户名冲突时追加后缀）
         let user = await hub.db.getUserByEmployeeID(identity.employeeID);
         if (!user) {
-          let name = identity.displayName;
-          for (let i = 0; await hub.db.getUserByName(name); i++) {
-            name = `${identity.displayName}-${i + 2}`;
+          // name 与 employee_id 均有唯一约束，并发首次登录时撞哪边处理哪边：
+          // 撞 employee_id 直接复用已建账号，撞 name 换后缀重试
+          for (let attempt = 0; attempt < 5 && !user; attempt++) {
+            let name = identity.displayName;
+            for (let i = 0; await hub.db.getUserByName(name); i++) {
+              name = `${identity.displayName}-${i + 2}`;
+            }
+            const candidate = {
+              id: "u-" + crypto.randomUUID(),
+              name,
+              // OIDC 账号无本地密码：随机哈希占位，密码登录永远不匹配
+              password_hash: hashPassword(crypto.randomBytes(32).toString("hex")),
+              role: "user",
+              disabled: 0,
+              created_at: Date.now(),
+              last_login_at: null,
+              employee_id: identity.employeeID,
+              display_name: identity.displayName,
+            };
+            try {
+              await hub.db.createUser(candidate);
+              user = candidate;
+              logger.info("oidc user provisioned", { user_id: candidate.id, name: candidate.name, employee_id: identity.employeeID });
+            } catch (e) {
+              if ((e as { errno?: number }).errno !== 1062) throw e;
+              user = await hub.db.getUserByEmployeeID(identity.employeeID);
+            }
           }
-          user = {
-            id: "u-" + crypto.randomUUID(),
-            name,
-            // OIDC 账号无本地密码：随机哈希占位，密码登录永远不匹配
-            password_hash: hashPassword(crypto.randomBytes(32).toString("hex")),
-            role: "user",
-            disabled: 0,
-            created_at: Date.now(),
-            last_login_at: null,
-            employee_id: identity.employeeID,
-            display_name: identity.displayName,
-          };
-          await hub.db.createUser(user);
-          logger.info("oidc user provisioned", { user_id: user.id, name: user.name, employee_id: identity.employeeID });
+          if (!user) throw new Error("oidc user provisioning failed");
         }
         if (user.disabled === 1) {
           fail("账号已被禁用，请联系管理员");
@@ -1618,7 +2533,7 @@ location.replace('/');
     }
     if (url.pathname === "/auth/login" && req.method === "POST") {
       void (async () => {
-        const ip = clientIp(req.headers, req.socket.remoteAddress);
+        const ip = clientIp(req.headers, req.socket.remoteAddress, cfg.trustProxy);
         if (!loginLimiter.allow(ip)) {
           res.writeHead(429, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "too many login attempts, try again later" }));
@@ -1642,7 +2557,9 @@ location.replace('/');
           res.end(JSON.stringify({ error: "invalid credentials" }));
         };
         const user = body.name ? await db.getUserByName(body.name) : undefined;
-        if (!user || user.disabled === 1 || !body.password || !verifyPassword(body.password, user.password_hash)) {
+        // 无论用户是否存在都执行一次 scrypt，拉齐响应时序（|| 短路会前功尽弃）
+        const passwordOk = verifyPassword(body.password ?? "", user?.password_hash ?? dummyPasswordHash);
+        if (!user || user.disabled === 1 || !body.password || !passwordOk) {
           fail();
           return;
         }
@@ -1664,9 +2581,10 @@ location.replace('/');
           res.end(JSON.stringify({ error: "attachment store not configured" }));
           return;
         }
+        // 仅接受 Authorization 头；URL query 传 token 会被反代日志/浏览器历史记录
         const bearer = req.headers.authorization?.startsWith("Bearer ")
           ? req.headers.authorization.slice(7)
-          : url.searchParams.get("token") ?? "";
+          : "";
         const claims = bearer ? verifyJwt(bearer, cfg.jwtSecret) : undefined;
         if (!claims) {
           res.writeHead(401, { "Content-Type": "application/json" });
@@ -1724,7 +2642,8 @@ location.replace('/');
     res.writeHead(404).end("not found");
   });
 
-  const wss = new WebSocketServer({ noServer: true });
+  // maxPayload 限制单帧大小（ws 默认 100MiB 太大）；附件走 HTTP，WS 上都是 JSON 控制消息
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 4 * 1024 * 1024 });
 
   server.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -1744,19 +2663,23 @@ location.replace('/');
       socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
       socket.destroy();
     };
-    // /ws/admin 仅接受 JWT；/ws/agent 在无 token 时接受设备密钥（?key=）
+    // /ws/admin 仅接受 JWT；/ws/agent 在无 token 时接受设备密钥（?key=）或配对模式（?pair=1）
     const deviceKey = url.pathname === "/ws/agent" && token === ""
       ? url.searchParams.get("key") ?? ""
       : "";
-    if (claims === undefined && deviceKey === "") {
+    const pairing = url.pathname === "/ws/agent" && token === "" && deviceKey === ""
+      && url.searchParams.get("pair") === "1";
+    if (claims === undefined && deviceKey === "" && !pairing) {
       unauthorized();
       return;
     }
 
     void (async () => {
-      let userID: string;
+      let userID = "";
       let deviceKeyID: string | undefined;
-      if (claims) {
+      if (pairing) {
+        // 无凭证配对连接：只允许 connector.pair，审批下发密钥后重连
+      } else if (claims) {
         userID = claims.sub;
       } else {
         // 设备密钥认证：未知/禁用/属主禁用统一裸 401，防探测
@@ -1775,7 +2698,7 @@ location.replace('/');
 
       // 禁用账号即时生效（JWT 未过期也拒绝新连接）；顺带缓存 admin 角色
       let isAdmin = false;
-      if (hub.db) {
+      if (!pairing && hub.db) {
         const u = await hub.db.getUserById(userID).catch(() => undefined);
         if (!u || u.disabled === 1) {
           unauthorized();
@@ -1799,12 +2722,21 @@ location.replace('/');
           lastHeartbeat: Date.now(),
           alive: true,
           deviceKeyID,
+          ip: clientIp(req.headers, req.socket.remoteAddress, cfg.trustProxy),
+          pairing,
         };
         const ticker = watchPong(ws, agent);
         ws.on("message", (data) => handleAgentMessage(hub, agent, data.toString()));
         ws.on("close", () => {
           clearInterval(ticker);
-          if (agent.id !== "") hub.unregisterAgent(agent.id);
+          // 一条连接可能托管多个 agent（connector 模式）：按 ws 全部注销
+          const ids = [...hub.agents.values()].filter((a) => a.ws === ws).map((a) => a.id);
+          for (const id of ids) hub.unregisterAgent(id);
+          if (agent.connectorID) hub.unregisterConnector(agent.connectorID);
+          // 配对挂起连接断开：移出待接入列表
+          for (const [cid, p] of hub.pendingPairs) {
+            if (p.conn.ws === ws) hub.pendingPairs.delete(cid);
+          }
         });
         ws.on("error", () => ws.close());
       } else {

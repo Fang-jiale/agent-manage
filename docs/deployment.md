@@ -1,5 +1,7 @@
 # 部署指南
 
+> 离线包（自带 Node 运行时的服务端/终端包）的部署与使用见 [离线包部署与使用手册](offline-guide.md)；打包方法：`npm run bundle && node scripts/build-offline.mjs`。本文档面向源码部署。
+
 ## 1. 部署前准备
 
 ### 1.1 确认目标平台
@@ -130,6 +132,8 @@ upstream ywmatrix_gateway {
 ```
 
 每个实例设置相同的 `AGENT_MANAGE_JWT_SECRET`、`AGENT_MANAGE_DATABASE_URL`、`AGENT_MANAGE_REDIS_URL`，以及不同的 `AGENT_MANAGE_INSTANCE_ID`（缺省随机生成亦可）。
+
+网关在可信反代之后时设置 `AGENT_MANAGE_TRUST_PROXY=true`，客户端 IP 才取 `X-Forwarded-For`（登录限流、agent `last_ip` 依赖它）；网关直接暴露时保持默认 `false`，否则限流可被伪造的 XFF 头绕过。
 
 最小可用 Nginx 片段（仅 WS + TLS）：
 
@@ -374,14 +378,24 @@ data: {"jsonrpc":"2.0","method":"stream.chunk","params":{"task_id":"...","type":
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `-gateway` | 网关 WebSocket URL | `ws://localhost:8080/ws/agent` |
-| `-agent-id` | Agent 唯一标识 | 主机名 |
-| `-adapter` | 本地 Agent 适配器类型：`http` 或 `stdio` | `http` |
-| `-local-agent` | 本地 Agent HTTP 地址或命令路径 | `http://localhost:9001` |
+| `-gateway` | 网关 WebSocket URL | 配置文件值，否则 `ws://localhost:8080/ws/agent` |
+| `-agent-id` | Agent 唯一标识（单 agent 模式） | 主机名 |
+| `-adapter` | 本地 Agent 适配器类型：`http` 或 `stdio`（connector 模式下实例的启动命令由品牌 `launch_cmd` 下发，此项仅作兜底） | `http` |
+| `-local-agent` | 本地 Agent HTTP 地址或命令路径（connector 模式下仅作品牌未配 `launch_cmd` 时的兜底） | `http://localhost:9001` |
 | `-token` | 用户 JWT（通过 `node src/login.ts` 获取），随网关 `-jwt-ttl` 过期 | 无（与 `-key` 二选一） |
-| `-key` | 设备密钥（`amk_` 前缀，管理后台「设备密钥」页创建），不过期、可吊销，长期运行的 Agent 推荐 | 无（与 `-token` 二选一） |
+| `-key` | 设备密钥（`amk_` 前缀），不过期、可吊销；也可用配置文件 | 无（与 `-token` 二选一） |
+| `-connector-id` | connector 模式标识（通常用主机名）。设置后 client 只起服务不带 agent 身份，agent 实例在管理后台「Agent 管理 → 注册 Agent」分配（选 connector + 品牌） | 空（单 agent 模式） |
+| `-pair` | 配对码（管理后台「设备密钥」页生成）。凭码发起接入，管理员批准后密钥自动写入配置文件 | 空 |
+| `-config` | connector 配置文件路径（JSON：`{gateway, connector_id, key, overrides}`） | `~/.agent-manage/connector.json` |
+| `-ui-addr` | 本机管理页监听地址（绑回环不鉴权），`off` 关闭 | `127.0.0.1:9321` |
 | `-log-level` | 日志级别 | `info` |
 | `-task-timeout` | 任务超时 | `30m` |
+
+**connector 零配置接入**（推荐）：管理后台生成配对码 → 目标机器执行 `node src/client.ts -pair <码> -gateway ws://网关/ws/agent` → 管理员在后台「待接入」批准 → 凭证自动写入 `~/.agent-manage/connector.json`。之后 `node src/client.ts` 零参数启动即可。该 connector 及其全部 agent 归属于配对码的生成用户。
+
+**本机管理页**：client 启动即在 `127.0.0.1:9321` 提供管理页——未配置时页面上直接完成配对接入；已接入后可查看本机托管的 agent、按品牌添加/移除实例、为单个实例设置本机覆盖（写入配置文件 `overrides`，支持字符串=stdio 命令或对象 `{conn_type, target}`；优先级：本机覆盖 > 品牌 `conn_type`/`launch_cmd`/`endpoint` > `-local-agent`）。品牌连接方式：`stdio`（命令拉起子进程）、`http`（HTTP+SSE 服务地址）、`ws`（WebSocket 服务地址）。
+
+> **品牌治理与审批**：管理后台「品牌管理」创建了品牌后，网关进入治理模式——注册必须带合法 `brand_id`（connector 模式由页面分配自动携带），client 主动注册的 agent 进入「待审批」，admin 批准后可用。品牌目录为空时维持旧的自由注册行为。详见 `docs/protocol.md` §10.4。
 
 ### local-agent
 

@@ -35,7 +35,10 @@
                     用户管理</button>
                 <button class="admin-nav-item" data-tab="agents">
                     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M5.5 6.5L8 8.5l-2.5 2M9 11h2.5"/></svg>
-                    Agent 管理</button>
+                    Agent 管理<span class="chip amber" id="navAgentsPending" style="display:none;margin-left:6px"></span></button>
+                <button class="admin-nav-item" data-tab="brands">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 2.5h5.6l5.4 5.4-5.6 5.6-5.4-5.4z"/><circle cx="6" cy="6" r="1.2"/></svg>
+                    品牌管理</button>
                 <button class="admin-nav-item" data-tab="keys">
                     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="5.5" cy="8" r="2.5"/><path d="M8 8h6M12 8v2.5M14 8v1.8"/></svg>
                     设备密钥</button>
@@ -76,6 +79,20 @@
                 <div class="admin-page" id="adminPageAgents">
                     <h2>Agent 管理</h2>
                     <div class="admin-page-desc">全量 Agent 注册表（含离线历史），实时状态优先</div>
+                    <div id="pendingConnBlock" style="display:none">
+                        <div class="admin-toolbar">
+                            <span style="font-size:13px;font-weight:600">待接入 Connector</span>
+                            <span class="chip amber" id="pendingConnCount"></span>
+                            <span class="spacer"></span>
+                            <button class="btn btn-ghost" id="pendingConnRefresh">刷新</button>
+                        </div>
+                        <div class="admin-table-wrap">
+                            <table class="admin-table">
+                                <thead><tr><th>Connector</th><th>所有者</th><th>平台</th><th>IP</th><th>配对时间</th><th style="text-align:right">操作</th></tr></thead>
+                                <tbody id="pendingConnRows"></tbody>
+                            </table>
+                        </div>
+                    </div>
                     <div class="admin-toolbar">
                         <select id="adminAgentOwner" style="width:150px"><option value="">全部用户</option></select>
                         <select id="adminAgentStatus" style="width:110px">
@@ -85,10 +102,12 @@
                             <option value="offline">离线</option>
                         </select>
                         <input type="text" id="adminAgentSearch" placeholder="搜索名称 / ID…" autocomplete="off">
+                        <span class="spacer"></span>
+                        <button class="btn btn-primary" id="adminRegisterAgentBtn">注册 Agent</button>
                     </div>
                     <div class="admin-table-wrap">
                         <table class="admin-table">
-                            <thead><tr><th>Agent</th><th>所有者</th><th>状态</th><th>平台</th><th>最近在线</th><th style="text-align:right">操作</th></tr></thead>
+                            <thead><tr><th>Agent</th><th>所有者</th><th>状态</th><th>平台</th><th>IP</th><th>最近在线</th><th style="text-align:right">操作</th></tr></thead>
                             <tbody id="adminAgentRows"></tbody>
                         </table>
                         <div class="admin-empty" id="adminAgentEmpty" style="display:none">没有匹配的 Agent</div>
@@ -97,6 +116,21 @@
                         <span id="adminAgentPagerInfo"></span>
                         <button id="adminAgentPrev">上一页</button>
                         <button id="adminAgentNext">下一页</button>
+                    </div>
+                </div>
+                <div class="admin-page" id="adminPageBrands">
+                    <h2>品牌管理</h2>
+                    <div class="admin-page-desc">维护 Agent 品牌：名称、描述、能力标签与 Logo</div>
+                    <div class="admin-toolbar">
+                        <span class="spacer"></span>
+                        <button class="btn btn-primary" id="adminCreateBrandBtn">新建品牌</button>
+                    </div>
+                    <div class="admin-table-wrap">
+                        <table class="admin-table">
+                            <thead><tr><th>品牌</th><th>描述</th><th>能力</th><th>状态</th><th style="text-align:right">操作</th></tr></thead>
+                            <tbody id="adminBrandRows"></tbody>
+                        </table>
+                        <div class="admin-empty" id="adminBrandEmpty" style="display:none">暂无品牌</div>
                     </div>
                 </div>
                 <div class="admin-page" id="adminPageKeys">
@@ -114,6 +148,20 @@
                             <tbody id="adminKeyRows"></tbody>
                         </table>
                         <div class="admin-empty" id="adminKeyEmpty" style="display:none">暂无设备密钥</div>
+                    </div>
+                    <h2 style="margin-top:28px">配对码</h2>
+                    <div class="admin-page-desc">一次性接入码（client -pair 参数），明文仅在创建时展示一次</div>
+                    <div class="admin-toolbar">
+                        <span class="spacer"></span>
+                        <input type="text" id="adminPairTtl" placeholder="有效期秒数（默认 86400）" style="width:170px" autocomplete="off">
+                        <button class="btn btn-primary" id="adminCreatePairBtn">生成配对码</button>
+                    </div>
+                    <div class="admin-table-wrap">
+                        <table class="admin-table">
+                            <thead><tr><th>配对码 ID</th><th>创建时间</th><th>过期时间</th><th>状态</th><th style="text-align:right">操作</th></tr></thead>
+                            <tbody id="adminPairRows"></tbody>
+                        </table>
+                        <div class="admin-empty" id="adminPairEmpty" style="display:none">暂无配对码</div>
                     </div>
                 </div>
             </div>
@@ -145,6 +193,20 @@
         </div>
     </div>
 
+    <div class="modal-overlay" id="pairCreatedOverlay">
+        <div class="modal">
+            <h3>配对码已生成</h3>
+            <p>请立即保存，明文只展示这一次：</p>
+            <div class="key-plaintext" id="pairCreatedValue"></div>
+            <p>在待接入机器上执行：</p>
+            <div class="key-plaintext" id="pairCreatedCmd"></div>
+            <div class="modal-actions">
+                <button class="btn btn-ghost" id="pairCopyBtn">复制命令</button>
+                <button class="btn btn-primary" id="pairCreatedOk">我已保存</button>
+            </div>
+        </div>
+    </div>
+
     <div class="modal-overlay" id="reassignOverlay">
         <div class="modal">
             <h3>转移 Agent 归属</h3>
@@ -153,6 +215,73 @@
             <div class="modal-actions">
                 <button class="btn btn-ghost" id="reassignCancel">取消</button>
                 <button class="btn btn-primary" id="reassignOk">转移</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="brandOverlay">
+        <div class="modal">
+            <h3 id="brandFormTitle">新建品牌</h3>
+            <div class="form-field">
+                <label>名称 <span class="form-req">*</span></label>
+                <input type="text" id="brandFormName" placeholder="品牌名称" autocomplete="off">
+            </div>
+            <div class="form-field">
+                <label>描述</label>
+                <input type="text" id="brandFormDesc" placeholder="一句话介绍（可选）" autocomplete="off">
+            </div>
+            <div class="form-field">
+                <label>能力</label>
+                <input type="text" id="brandFormCaps" placeholder="多个能力用逗号分隔，如：对话, 翻译" autocomplete="off">
+            </div>
+            <div class="form-field">
+                <label>连接方式</label>
+                <select id="brandFormConnType">
+                    <option value="stdio">stdio · 命令启动</option>
+                    <option value="http">http · 服务地址</option>
+                    <option value="ws">ws · 服务地址</option>
+                </select>
+            </div>
+            <div class="form-field" id="brandLaunchCmdField">
+                <label>启动命令（可选）</label>
+                <input type="text" id="brandFormLaunchCmd" placeholder="如：node package/dist/ywmatrix-shim.mjs --workdir /path --permission-mode default" autocomplete="off">
+            </div>
+            <div class="form-field" id="brandEndpointField" style="display:none">
+                <label>服务地址</label>
+                <input type="text" id="brandFormEndpoint" placeholder="如：http://127.0.0.1:9001 或 ws://127.0.0.1:9002" autocomplete="off">
+            </div>
+            <div class="form-field">
+                <label>Logo</label>
+                <div class="brand-logo-row">
+                    <span id="brandLogoPreview"></span>
+                    <input type="file" id="brandFormFile" accept="image/*">
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-ghost" id="brandFormCancel">取消</button>
+                <button class="btn btn-primary" id="brandFormOk">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="assignOverlay">
+        <div class="modal">
+            <h3>注册 Agent</h3>
+            <div class="form-field">
+                <label>Connector</label>
+                <select id="assignConnector"></select>
+            </div>
+            <div class="form-field">
+                <label>品牌</label>
+                <select id="assignBrand"></select>
+            </div>
+            <div class="form-field">
+                <label>名称（可选）</label>
+                <input type="text" id="assignName" placeholder="留空自动生成" autocomplete="off">
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-ghost" id="assignCancel">取消</button>
+                <button class="btn btn-primary" id="assignOk">注册</button>
             </div>
         </div>
     </div>
@@ -237,9 +366,18 @@
              'adminUserPrev', 'adminUserNext', 'adminAgentOwner', 'adminAgentStatus', 'adminAgentSearch',
              'adminAgentRows', 'adminAgentEmpty', 'adminAgentPagerInfo', 'adminAgentPrev', 'adminAgentNext',
              'adminKeyOwner', 'adminNewKeyName', 'adminCreateKeyBtn', 'adminKeyRows', 'adminKeyEmpty',
+             'adminCreateBrandBtn', 'adminBrandRows', 'adminBrandEmpty',
+             'adminRegisterAgentBtn',
+             'navAgentsPending', 'pendingConnBlock', 'pendingConnCount', 'pendingConnRefresh', 'pendingConnRows',
+             'adminPairTtl', 'adminCreatePairBtn', 'adminPairRows', 'adminPairEmpty',
              'keyCreatedOverlay', 'keyCreatedValue', 'keyCopyBtn', 'keyCreatedOk',
+             'pairCreatedOverlay', 'pairCreatedValue', 'pairCreatedCmd', 'pairCopyBtn', 'pairCreatedOk',
              'reassignOverlay', 'reassignText', 'reassignOwner', 'reassignCancel', 'reassignOk',
-             'adminPageOverview', 'adminPageUsers', 'adminPageAgents', 'adminPageKeys'
+             'brandOverlay', 'brandFormTitle', 'brandFormName', 'brandFormDesc', 'brandFormCaps',
+             'brandFormConnType', 'brandLaunchCmdField', 'brandFormLaunchCmd', 'brandEndpointField', 'brandFormEndpoint',
+             'brandFormFile', 'brandLogoPreview', 'brandFormCancel', 'brandFormOk',
+             'assignOverlay', 'assignConnector', 'assignBrand', 'assignName', 'assignCancel', 'assignOk',
+             'adminPageOverview', 'adminPageUsers', 'adminPageAgents', 'adminPageBrands', 'adminPageKeys'
             ].forEach(id => { els[id] = document.getElementById(id); });
 
             function setConnectionStatus(status, text) {
@@ -369,7 +507,7 @@
                 document.querySelectorAll('.admin-nav-item').forEach(b =>
                     b.classList.toggle('active', b.dataset.tab === tab));
                 document.querySelectorAll('.admin-page').forEach(p => p.classList.remove('active'));
-                const pages = { overview: els.adminPageOverview, users: els.adminPageUsers, agents: els.adminPageAgents, keys: els.adminPageKeys };
+                const pages = { overview: els.adminPageOverview, users: els.adminPageUsers, agents: els.adminPageAgents, brands: els.adminPageBrands, keys: els.adminPageKeys };
                 if (pages[tab]) pages[tab].classList.add('active');
                 if (overviewTimer) { clearInterval(overviewTimer); overviewTimer = null; }
                 if (!wsReady()) return;
@@ -381,9 +519,11 @@
                 } else if (tab === 'users') {
                     ensureOwnerOptions(); loadUsers();
                 } else if (tab === 'agents') {
-                    ensureOwnerOptions(); loadAgents();
+                    ensureOwnerOptions(); loadAgents(); loadPendingConnectors();
+                } else if (tab === 'brands') {
+                    loadBrands();
                 } else if (tab === 'keys') {
-                    ensureOwnerOptions(); loadKeys();
+                    ensureOwnerOptions(); loadKeys(); loadPairingCodes();
                 }
             }
 
@@ -531,6 +671,7 @@
             }
 
             function agentStatusChip(a) {
+                if (a.status === 'pending') return '<span class="chip amber">待审批</span>';
                 if (!a.online) return '<span class="chip">离线</span>';
                 if (a.status === 'busy') return '<span class="chip amber">忙碌</span>';
                 return '<span class="chip green">在线</span>';
@@ -540,22 +681,32 @@
                 els.adminAgentEmpty.style.display = agents.length ? 'none' : '';
                 els.adminAgentRows.innerHTML = agents.map(a =>
                     '<tr>' +
-                    '<td><div class="cell-main">' + escapeHtml(a.name || a.id) + '</div>' +
-                    '<div class="cell-sub">' + escapeHtml(a.id) + '</div></td>' +
+                    '<td><div class="agent-cell">' +
+                    (a.logo_url ? '<img class="brand-logo" src="' + escapeAttr(a.logo_url) + '" alt="">' : '') +
+                    '<div><div class="cell-main">' + escapeHtml(a.name || a.id) + '</div>' +
+                    (a.brand_name ? '<div class="cell-sub">' + escapeHtml(a.brand_name) + '</div>' : '') +
+                    '<div class="cell-sub">' + escapeHtml(a.id) + '</div></div></div></td>' +
                     '<td>' + escapeHtml(userNameOf(a.owner_id)) + '</td>' +
                     '<td>' + agentStatusChip(a) + '</td>' +
                     '<td>' + (a.platform && a.platform.os
                         ? '<span class="platform-cell"><span class="platform-ico">' + platformIcon(a.platform.os) + '</span>' + escapeHtml(a.platform.os + '/' + (a.platform.arch || '?')) + '</span>'
                         : '—') + '</td>' +
+                    '<td><span class="cell-sub">' + escapeHtml(a.last_ip || '—') + '</span></td>' +
                     '<td>' + relativeTime(a.last_seen) + '</td>' +
                     '<td><div class="row-actions">' +
+                    (a.approval_status === 'pending'
+                        ? '<button data-act="approve" data-id="' + escapeAttr(a.id) + '">批准</button>' +
+                          '<button data-act="reject" data-id="' + escapeAttr(a.id) + '" class="danger">拒绝</button>'
+                        : '') +
+                    (a.connector_id ? '<button data-act="remove" data-id="' + escapeAttr(a.id) + '" class="danger">移除</button>' : '') +
                     '<button data-act="reassign" data-id="' + escapeAttr(a.id) + '">转移归属</button>' +
                     (a.online ? '<button data-act="disconnect" data-id="' + escapeAttr(a.id) + '" class="danger">断开连接</button>' : '') +
                     '</div></td></tr>').join('');
                 els.adminAgentRows.querySelectorAll('button').forEach(btn => {
                     btn.onclick = async () => {
                         const id = btn.dataset.id;
-                        if (btn.dataset.act === 'disconnect') {
+                        const act = btn.dataset.act;
+                        if (act === 'disconnect') {
                             const ok = await confirmModal('断开连接', '强制断开 Agent ' + id + ' 的当前连接？（客户端通常会自动重连）', '断开');
                             if (!ok) return;
                             try {
@@ -564,6 +715,34 @@
                                 loadAgents();
                             } catch (e) {
                                 showToast('断开失败：' + (e.message || e), 'error');
+                            }
+                        } else if (act === 'approve') {
+                            try {
+                                await rpcCall('agent.approve', { agent_id: id });
+                                showToast('已批准', 'success');
+                                loadAgents();
+                            } catch (e) {
+                                showToast('批准失败：' + (e.message || e), 'error');
+                            }
+                        } else if (act === 'reject') {
+                            const ok = await confirmModal('拒绝注册', '拒绝 Agent ' + id + ' 的注册申请？', '拒绝');
+                            if (!ok) return;
+                            try {
+                                await rpcCall('agent.reject', { agent_id: id });
+                                showToast('已拒绝', 'success');
+                                loadAgents();
+                            } catch (e) {
+                                showToast('拒绝失败：' + (e.message || e), 'error');
+                            }
+                        } else if (act === 'remove') {
+                            const ok = await confirmModal('移除 Agent', '将 Agent ' + id + ' 从 Connector 上移除？移除后需重新注册。', '移除');
+                            if (!ok) return;
+                            try {
+                                await rpcCall('agent.remove', { agent_id: id });
+                                showToast('已移除', 'success');
+                                loadAgents();
+                            } catch (e) {
+                                showToast('移除失败：' + (e.message || e), 'error');
                             }
                         } else {
                             openReassign(id);
@@ -584,6 +763,207 @@
                 els.reassignOwner.innerHTML = usersCache.map(u =>
                     '<option value="' + u.id + '">' + escapeHtml(u.name) + '</option>').join('');
                 els.reassignOverlay.classList.add('open');
+            }
+
+            async function openAssign() {
+                try {
+                    const [cr, br] = await Promise.all([rpcCall('connector.list', {}), rpcCall('brand.list', {})]);
+                    const connectors = cr.connectors || [];
+                    const brands = (br.brands || []).filter(b => !b.disabled);
+                    if (!connectors.length) { showToast('当前没有在线 Connector，无法注册 Agent', 'warning'); return; }
+                    if (!brands.length) { showToast('没有可用品牌，请先在品牌管理中创建', 'warning'); return; }
+                    els.assignConnector.innerHTML = connectors.map(c =>
+                        '<option value="' + escapeAttr(c.id) + '">' + escapeHtml(c.id) +
+                        '（' + (c.platform && c.platform.os ? escapeHtml(c.platform.os) + ' · ' : '') +
+                        (c.agents != null ? c.agents : 0) + ' 个 Agent）</option>').join('');
+                    els.assignBrand.innerHTML = brands.map(b =>
+                        '<option value="' + escapeAttr(b.id) + '">' + escapeHtml(b.name) + '</option>').join('');
+                    els.assignName.value = '';
+                    els.assignOverlay.classList.add('open');
+                } catch (e) {
+                    showToast('加载 Connector / 品牌失败：' + (e.message || e), 'error');
+                }
+            }
+
+            /* ---------- 待接入 Connector 审批 ---------- */
+
+            async function loadPendingConnectors() {
+                if (!wsReady()) return;
+                try {
+                    const r = await rpcCall('connector.pending.list', {});
+                    renderPendingConnectors(r.connectors || []);
+                } catch (e) {
+                    showToast('加载待接入 Connector 失败：' + (e.message || e), 'error');
+                }
+            }
+
+            function renderPendingConnectors(connectors) {
+                els.pendingConnBlock.style.display = connectors.length ? '' : 'none';
+                els.pendingConnCount.textContent = connectors.length + ' 台待审批';
+                els.navAgentsPending.style.display = connectors.length ? '' : 'none';
+                els.navAgentsPending.textContent = connectors.length;
+                els.pendingConnRows.innerHTML = connectors.map(c =>
+                    '<tr>' +
+                    '<td><div class="cell-main">' + escapeHtml(c.connector_id) + '</div>' +
+                    (c.version ? '<div class="cell-sub">v' + escapeHtml(c.version) + '</div>' : '') + '</td>' +
+                    '<td>' + escapeHtml(userNameOf(c.owner_id)) + '</td>' +
+                    '<td>' + (c.platform && c.platform.os
+                        ? '<span class="platform-cell"><span class="platform-ico">' + platformIcon(c.platform.os) + '</span>' + escapeHtml(c.platform.os + (c.platform.arch ? '/' + c.platform.arch : '')) + '</span>'
+                        : '—') + '</td>' +
+                    '<td><span class="cell-sub">' + escapeHtml(c.ip || '—') + '</span></td>' +
+                    '<td>' + (c.paired_at ? relativeTime(c.paired_at) : '—') + '</td>' +
+                    '<td><div class="row-actions">' +
+                    '<button data-act="approve" data-id="' + escapeAttr(c.connector_id) + '">批准</button>' +
+                    '<button data-act="reject" data-id="' + escapeAttr(c.connector_id) + '" class="danger">拒绝</button>' +
+                    '</div></td></tr>').join('');
+                els.pendingConnRows.querySelectorAll('button').forEach(btn => {
+                    btn.onclick = async () => {
+                        const id = btn.dataset.id;
+                        try {
+                            if (btn.dataset.act === 'approve') {
+                                await rpcCall('connector.approve', { connector_id: id });
+                                showToast('已批准，凭证已下发', 'success');
+                            } else {
+                                const ok = await confirmModal('拒绝接入', '拒绝 Connector ' + id + ' 的接入申请？（配对码不消耗，可重新发起）', '拒绝');
+                                if (!ok) return;
+                                await rpcCall('connector.reject', { connector_id: id });
+                                showToast('已拒绝', 'success');
+                            }
+                            loadPendingConnectors();
+                        } catch (e) {
+                            showToast('操作失败：' + (e.message || e), 'error');
+                        }
+                    };
+                });
+            }
+
+            /* ---------- 品牌管理 ---------- */
+
+            let brandsCache = [];
+
+            async function loadBrands() {
+                if (!wsReady()) return;
+                try {
+                    const r = await rpcCall('brand.list', {});
+                    brandsCache = r.brands || [];
+                    renderBrands(brandsCache);
+                } catch (e) {
+                    showToast('加载品牌失败：' + (e.message || e), 'error');
+                }
+            }
+
+            function brandLogoHtml(logoUrl, name, cls) {
+                if (logoUrl) return '<img class="' + cls + '" src="' + escapeAttr(logoUrl) + '" alt="">';
+                return '<span class="' + cls + ' brand-logo-ph">' + escapeHtml((name || '?').charAt(0)) + '</span>';
+            }
+
+            function renderBrands(brands) {
+                els.adminBrandEmpty.style.display = brands.length ? 'none' : '';
+                els.adminBrandRows.innerHTML = brands.map(b => {
+                    const caps = (b.capabilities || []).map(c =>
+                        '<span class="chip">' + escapeHtml(c.name) + '</span>').join(' ');
+                    const connType = b.conn_type || 'stdio';
+                    const connChip = connType === 'stdio' ? '' : ' <span class="chip accent">' + connType + '</span>';
+                    return '<tr>' +
+                        '<td><div class="brand-cell">' + brandLogoHtml(b.logo_url, b.name, 'brand-logo') +
+                        '<div><div class="cell-main">' + escapeHtml(b.name) + connChip + '</div>' +
+                        '<div class="cell-sub">' + escapeHtml(b.id) + '</div>' +
+                        (connType !== 'stdio' && b.endpoint ? '<div class="cell-sub">' + escapeHtml(b.endpoint) + '</div>' : '') +
+                        '</div></div></td>' +
+                        '<td>' + (b.description ? escapeHtml(b.description) : '<span class="cell-sub">—</span>') + '</td>' +
+                        '<td><div class="cap-chips">' + (caps || '<span class="cell-sub">—</span>') + '</div></td>' +
+                        '<td>' + (b.disabled ? '<span class="chip red">已禁用</span>' : '<span class="chip green">启用</span>') + '</td>' +
+                        '<td><div class="row-actions">' +
+                        '<button data-act="edit" data-id="' + escapeAttr(b.id) + '">编辑</button>' +
+                        '<button data-act="toggle" data-id="' + escapeAttr(b.id) + '">' + (b.disabled ? '启用' : '禁用') + '</button>' +
+                        '<button data-act="delete" data-id="' + escapeAttr(b.id) + '" class="danger">删除</button>' +
+                        '</div></td></tr>';
+                }).join('');
+                els.adminBrandRows.querySelectorAll('button').forEach(btn => {
+                    btn.onclick = async () => {
+                        const b = brandsCache.find(x => x.id === btn.dataset.id);
+                        if (!b) return;
+                        const act = btn.dataset.act;
+                        if (act === 'edit') {
+                            openBrandForm(b);
+                            return;
+                        }
+                        try {
+                            if (act === 'toggle') {
+                                await rpcCall('brand.update', {
+                                    id: b.id, name: b.name, disabled: !b.disabled,
+                                    description: b.description || undefined,
+                                    logo_url: b.logo_url || undefined,
+                                    capabilities: (b.capabilities || []).length ? b.capabilities : undefined,
+                                    conn_type: b.conn_type || 'stdio',
+                                    launch_cmd: b.launch_cmd || null,
+                                    endpoint: b.endpoint || null
+                                });
+                                showToast(b.disabled ? '已启用' : '已禁用', 'success');
+                            } else {
+                                const ok = await confirmModal('删除品牌',
+                                    '删除品牌「' + b.name + '」？已关联该品牌的 Agent 将失去品牌信息。', '删除');
+                                if (!ok) return;
+                                await rpcCall('brand.delete', { id: b.id });
+                                showToast('已删除', 'success');
+                            }
+                            loadBrands();
+                        } catch (e) {
+                            showToast('操作失败：' + (e.message || e), 'error');
+                        }
+                    };
+                });
+            }
+
+            let brandEditing = null;   // null = 新建，否则为正在编辑的品牌对象
+            let brandLogoURL = '';     // 当前表单生效的 logo_url（已有或刚上传）
+
+            function updateBrandLogoPreview() {
+                const name = els.brandFormName.value.trim();
+                els.brandLogoPreview.innerHTML = brandLogoHtml(brandLogoURL, name || '牌', 'brand-logo brand-logo-lg');
+            }
+
+            function updateBrandConnFields() {
+                const stdio = els.brandFormConnType.value === 'stdio';
+                els.brandLaunchCmdField.style.display = stdio ? '' : 'none';
+                els.brandEndpointField.style.display = stdio ? 'none' : '';
+            }
+
+            function openBrandForm(brand) {
+                brandEditing = brand || null;
+                brandLogoURL = brand ? (brand.logo_url || '') : '';
+                els.brandFormTitle.textContent = brand ? '编辑品牌' : '新建品牌';
+                els.brandFormName.value = brand ? brand.name : '';
+                els.brandFormDesc.value = brand ? (brand.description || '') : '';
+                els.brandFormCaps.value = brand ? (brand.capabilities || []).map(c => c.name).join(', ') : '';
+                els.brandFormConnType.value = brand ? (brand.conn_type || 'stdio') : 'stdio';
+                els.brandFormLaunchCmd.value = brand ? (brand.launch_cmd || '') : '';
+                els.brandFormEndpoint.value = brand ? (brand.endpoint || '') : '';
+                updateBrandConnFields();
+                els.brandFormFile.value = '';
+                updateBrandLogoPreview();
+                els.brandOverlay.classList.add('open');
+            }
+
+            async function uploadBrandLogo(file) {
+                const dataURL = await new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = () => resolve(reader.result);
+                    reader.onerror = () => reject(new Error('读取文件失败'));
+                    reader.readAsDataURL(file);
+                });
+                const resp = await fetch('/attachments', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + token
+                    },
+                    body: JSON.stringify({ name: file.name, mime: file.type || 'application/octet-stream', data: dataURL })
+                });
+                if (!resp.ok) throw new Error('上传失败（HTTP ' + resp.status + '）');
+                const r = await resp.json();
+                if (!r.url) throw new Error('上传响应缺少 url');
+                return r.url;
             }
 
             /* ---------- 设备密钥 ---------- */
@@ -627,6 +1007,52 @@
                             loadKeys();
                         } catch (e) {
                             showToast('吊销失败：' + (e.message || e), 'error');
+                        }
+                    };
+                });
+            }
+
+            /* ---------- 配对码 ---------- */
+
+            const AGENT_WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/agent';
+
+            function pairStatusChip(c) {
+                if (c.used_at) return '<span class="chip">已使用</span>';
+                if (c.expires_at && c.expires_at < Date.now()) return '<span class="chip red">已过期</span>';
+                return '<span class="chip green">未使用</span>';
+            }
+
+            async function loadPairingCodes() {
+                if (!wsReady()) return;
+                try {
+                    const r = await rpcCall('pairing.list', {});
+                    renderPairingCodes(r.codes || []);
+                } catch (e) {
+                    showToast('加载配对码失败：' + (e.message || e), 'error');
+                }
+            }
+
+            function renderPairingCodes(codes) {
+                els.adminPairEmpty.style.display = codes.length ? 'none' : '';
+                els.adminPairRows.innerHTML = codes.map(c =>
+                    '<tr>' +
+                    '<td><div class="cell-sub">' + escapeHtml(c.id) + '</div></td>' +
+                    '<td>' + formatTime(c.created_at) + '</td>' +
+                    '<td>' + formatTime(c.expires_at) + '</td>' +
+                    '<td>' + pairStatusChip(c) + '</td>' +
+                    '<td><div class="row-actions">' +
+                    (c.used_at ? '' : '<button data-id="' + c.id + '" class="danger">作废</button>') +
+                    '</div></td></tr>').join('');
+                els.adminPairRows.querySelectorAll('button').forEach(btn => {
+                    btn.onclick = async () => {
+                        const ok = await confirmModal('作废配对码', '作废后该配对码将立即失效，未接入的机器无法再用它配对。', '作废');
+                        if (!ok) return;
+                        try {
+                            await rpcCall('pairing.delete', { id: btn.dataset.id });
+                            showToast('已作废', 'success');
+                            loadPairingCodes();
+                        } catch (e) {
+                            showToast('作废失败：' + (e.message || e), 'error');
                         }
                     };
                 });
@@ -712,6 +1138,35 @@
                 } catch { showToast('复制失败，请手动选择复制', 'warning'); }
             });
 
+            els.adminCreatePairBtn.addEventListener('click', async () => {
+                const ttlRaw = els.adminPairTtl.value.trim();
+                const params = {};
+                if (ttlRaw) {
+                    const ttl = parseInt(ttlRaw, 10);
+                    if (!Number.isFinite(ttl) || ttl <= 0) { showToast('有效期需为正整数秒数', 'warning'); return; }
+                    params.ttl_seconds = ttl;
+                }
+                try {
+                    const r = await rpcCall('pairing.create', params);
+                    els.adminPairTtl.value = '';
+                    els.pairCreatedValue.textContent = r.code;
+                    els.pairCreatedCmd.textContent = 'node src/client.ts -pair ' + r.code + ' -gateway ' + AGENT_WS_URL;
+                    els.pairCreatedOverlay.classList.add('open');
+                    loadPairingCodes();
+                } catch (e) {
+                    showToast('生成失败：' + (e.message || e), 'error');
+                }
+            });
+            els.pairCreatedOk.addEventListener('click', () => els.pairCreatedOverlay.classList.remove('open'));
+            els.pairCopyBtn.addEventListener('click', async () => {
+                try {
+                    await navigator.clipboard.writeText(els.pairCreatedCmd.textContent);
+                    showToast('已复制', 'success');
+                } catch { showToast('复制失败，请手动选择复制', 'warning'); }
+            });
+
+            els.pendingConnRefresh.addEventListener('click', loadPendingConnectors);
+
             els.reassignCancel.addEventListener('click', () => els.reassignOverlay.classList.remove('open'));
             els.reassignOk.addEventListener('click', async () => {
                 if (!reassignAgentID) return;
@@ -725,6 +1180,76 @@
                 }
             });
 
+            els.adminCreateBrandBtn.addEventListener('click', () => openBrandForm(null));
+            els.brandFormCancel.addEventListener('click', () => els.brandOverlay.classList.remove('open'));
+            els.brandFormName.addEventListener('input', () => {
+                if (!brandLogoURL) updateBrandLogoPreview();
+            });
+            els.brandFormFile.addEventListener('change', async () => {
+                const file = els.brandFormFile.files[0];
+                if (!file) return;
+                els.brandFormOk.disabled = true;
+                try {
+                    brandLogoURL = await uploadBrandLogo(file);
+                    updateBrandLogoPreview();
+                    showToast('Logo 已上传', 'success');
+                } catch (e) {
+                    showToast('Logo 上传失败：' + (e.message || e), 'error');
+                } finally {
+                    els.brandFormOk.disabled = false;
+                }
+            });
+            els.brandFormConnType.addEventListener('change', updateBrandConnFields);
+            els.brandFormOk.addEventListener('click', async () => {
+                const name = els.brandFormName.value.trim();
+                if (!name) { showToast('请填写品牌名称', 'warning'); return; }
+                const caps = els.brandFormCaps.value.split(',').map(s => s.trim()).filter(Boolean)
+                    .map(n => ({ type: 'chat', name: n }));
+                const connType = els.brandFormConnType.value;
+                const params = {
+                    name,
+                    description: els.brandFormDesc.value.trim() || undefined,
+                    logo_url: brandLogoURL || undefined,
+                    capabilities: caps.length ? caps : undefined,
+                    conn_type: connType,
+                    launch_cmd: connType === 'stdio' ? (els.brandFormLaunchCmd.value.trim() || null) : null,
+                    endpoint: connType === 'stdio' ? null : (els.brandFormEndpoint.value.trim() || null)
+                };
+                try {
+                    if (brandEditing) {
+                        params.id = brandEditing.id;
+                        await rpcCall('brand.update', params);
+                        showToast('品牌已更新', 'success');
+                    } else {
+                        await rpcCall('brand.create', params);
+                        showToast('品牌已创建', 'success');
+                    }
+                    els.brandOverlay.classList.remove('open');
+                    loadBrands();
+                } catch (e) {
+                    showToast('保存失败：' + (e.message || e), 'error');
+                }
+            });
+
+            els.adminRegisterAgentBtn.addEventListener('click', openAssign);
+            els.assignCancel.addEventListener('click', () => els.assignOverlay.classList.remove('open'));
+            els.assignOk.addEventListener('click', async () => {
+                const connectorID = els.assignConnector.value;
+                const brandID = els.assignBrand.value;
+                if (!connectorID || !brandID) { showToast('请选择 Connector 和品牌', 'warning'); return; }
+                const params = { connector_id: connectorID, brand_id: brandID };
+                const name = els.assignName.value.trim();
+                if (name) params.name = name;
+                try {
+                    const r = await rpcCall('agent.assign', params);
+                    showToast('Agent 已注册：' + r.agent_id, 'success', 5000);
+                    els.assignOverlay.classList.remove('open');
+                    loadAgents();
+                } catch (e) {
+                    showToast('注册失败：' + (e.message || e), 'error');
+                }
+            });
+
             els.modalOk.addEventListener('click', () => closeModal(true));
             els.modalCancel.addEventListener('click', () => closeModal(false));
             els.modalOverlay.addEventListener('click', (e) => {
@@ -733,7 +1258,10 @@
             window.addEventListener('keydown', (e) => {
                 if (e.key === 'Escape') {
                     els.keyCreatedOverlay.classList.remove('open');
+                    els.pairCreatedOverlay.classList.remove('open');
                     els.reassignOverlay.classList.remove('open');
+                    els.brandOverlay.classList.remove('open');
+                    els.assignOverlay.classList.remove('open');
                     if (els.modalOverlay.classList.contains('open')) closeModal(false);
                 }
             });

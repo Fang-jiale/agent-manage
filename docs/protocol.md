@@ -324,6 +324,8 @@ AgentClient 定期发送：
 }
 ```
 
+> **斜杠命令**：`content` 以 `/` 开头表示斜杠命令（如 `/model kimi-k2`）。页面对已声明的命令会附带 `metadata.command: {name, args}` 结构化参数，网关不解析、原样透传给 AgentClient。命令的 capabilities 声明格式与执行语义见《本地 Agent 接口标准》§6.5。
+
 ### 7.2 网关转发任务给 AgentClient（Gateway → AgentClient）
 
 ```json
@@ -537,6 +539,8 @@ AgentClient 收到后必须做两件事：
 }
 ```
 
+> 页面的斜杠命令菜单即来自这里的 `type: "command"` 能力项（含 `metadata.args` 参数规格与 `metadata.current` 当前值）；Agent 运行中通过 `system.capabilities_updated` 推送全量新列表，网关更新注册表并重新广播（广播有 1s 合并窗口）。
+
 ### 9.2 Agent 事件通知
 
 ```json
@@ -658,6 +662,70 @@ AgentClient 向 stdin 写入：
 当本地 Agent 返回 `confirm_required` 或 `prompt_required` 时，本次请求读取暂停，等待用户通过 `task.respond` 回复后继续。
 
 **取消必须显式转发**：AgentClient 收到 `agent.cancel` 后只中断本地 AbortController 是不够的（shim 与子进程仍在跑、继续烧 token）。stdio 适配器在 AbortSignal 触发时必须额外通过 stdin 写一条 `task.cancel` 通知给本地 Agent。详见 [本地 Agent 接口标准 §6.3](local-agent-interface.md)。
+
+## 10.4 品牌目录、注册审批与连接器（connector）
+
+### 品牌目录与治理模式
+
+网关维护 `agent_brands` 表（名称、描述、logo、能力标签、连接方式 `conn_type`（stdio/http/ws）、stdio 启动命令 `launch_cmd`、http/ws 服务地址 `endpoint`），由 admin 在管理后台通过 `brand.create/update/delete/list` 维护。**目录为空 = 开放模式**（自由注册，兼容旧部署）；目录非空即进入**治理模式**：
+
+- `system.register` 必须携带合法 `brand_id`（存在且未禁用），否则拒绝并断开（4001）。
+- 注册参数里的 `name`/`capabilities` 被品牌行覆盖——client 自报什么不算数。
+- 页面展示所需的 `brand_id/brand_name/logo_url` 随 `admin.agentList` / `agent.list` 下发。
+
+### 注册审批
+
+治理模式下，**client 主动发起的注册**（agents 表中无对应行）进入 `pending`：连接保持、列表可见（状态「待审批」），但 `task.create` 一律拒绝（`agent pending approval`）。admin 在 Agent 管理页操作：
+
+- `agent.approve {agent_id}` → 转 approved，立即生效（多实例经总线广播）；
+- `agent.reject {agent_id}` → 标记 rejected 并踢线；被拒 agent 再次注册仍被拒绝（需先由 admin 处理记录）。
+
+页面上分配的实例（见下）视为 admin 已决策，直接 approved，免审批。
+
+### 连接器模式（connector）
+
+AgentClient 以 `-connector-id <id>` 启动时进入 connector 模式：不携带 agent 身份，只持有设备密钥/JWT 连接网关，发送 `connector.hello {connector_id, platform}` 报到。agent 实例的创建/移除全部在管理后台操作：
+
+```text
+Admin 页面                Gateway                 AgentClient(connector)
+    │──agent.assign────────▶│                        │
+    │  {connector_id,       │──connector.sync───────▶│ 全量目标 agent 集
+    │   brand_id, name?}    │  {agents:[{agent_id,   │ 对比现状：新 agent 起本地
+    │                       │   brand_id,name,       │ 服务进程并 system.register；
+    │                       │   capabilities}]}      │ 移除的 kill 并注销
+    │◀──{agent_id}──────────│                        │
+```
+
+- `connector.sync` 是**全量对账**：hello 后自动推一次（重连自愈），assign/remove 后再推；条目含品牌的 `conn_type`/`launch_cmd`/`endpoint`，client 按连接方式起/连本地服务（stdio 拉起子进程，http/ws 连指定地址），配置变更时 client 重建对应实例。
+- 页面上 `agent.assign`（connector 属主或 admin）生成实例（默认 id `<品牌名>-<短随机>`），`agent.remove` 移除。
+- 一个 connector 可托管多个 agent：网关转发 `agent.chat/cancel/respond` 时注入 `agent_id`，client 按此分派到对应本地服务进程；注册为每 agent 建独立连接记录（共享一条 WS）。
+- connector 托管的 agent 不能用 `agent.disconnect`（共享连接会误伤兄弟实例），用 `agent.remove`。
+
+相关 RPC：`connector.list`（admin）返回在线 connector 及其承载数。
+
+**connector 自助通道**：已 hello 的 connector 连接上还允许 `brand.list`（只读品牌目录）、`agent.assign` / `agent.remove`（强制限定本 connector，`connector_id` 填别人的直接拒绝）——client 本机管理页经此自助管理实例，无需 admin 通道凭证。
+
+### 配对接入（pairing）
+
+connector 的凭证不落启动参数，走一次性配对码换发设备密钥，**owner 在生成码时绑定**（谁生成归谁，admin 可用 `owner_id` 代他人生成）：
+
+```text
+用户(后台)                Gateway                 AgentClient
+   │──pairing.create──────▶│                        │
+   │◀──{code}(明文一次)─────│                        │
+   │                        │◀──connector.pair───────│ node src/client.ts
+   │                        │   {code,connector_id}  │   -pair <code>
+   │──connector.approve────▶│  待接入列表            │   （?pair=1 无凭证连接，
+   │  {connector_id}        │──connector.credential─▶│    只允许 pair）
+   │                        │  {key}(明文一次)       │ 写入 ~/.agent-manage/
+   │                        │                        │ connector.json，之后零参数启动
+```
+
+- `pairing.create/list/delete`：用户管理自己的码（存哈希，一次性，默认 24h 有效）。
+- `connector.pair`：`/ws/agent?pair=1` 无凭证连接上唯一允许的方法；码校验通过后进入待接入列表（内存态），回复 `{status:"pending"}` 挂起。
+- `connector.pending.list` / `connector.approve` / `connector.reject`（admin）：批准即签发设备密钥（`owner_id` = 配对码 owner）并经 `connector.credential` 推送，码同时消耗；拒绝则断开配对连接，码不消耗。
+- client 收到凭证后写入配置文件（默认 `~/.agent-manage/connector.json`，0600），随后自动进入 connector 模式；之后 `node src/client.ts` 零参数启动读该文件。
+- 待接入列表是内存态：网关重启后未批准的配对连接断开，client 重试 pair 即可（码未消耗前仍有效）。
 
 ## 11. 消息时序图
 

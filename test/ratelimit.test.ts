@@ -20,9 +20,11 @@ test("window expires", async () => {
   assert.equal(rl.allow("k"), true);
 });
 
-test("clientIp prefers x-forwarded-for", () => {
-  assert.equal(clientIp({ "x-forwarded-for": "1.2.3.4, 10.0.0.1" }, "127.0.0.1"), "1.2.3.4");
-  assert.equal(clientIp({ "x-forwarded-for": ["5.6.7.8"] }, "127.0.0.1"), "5.6.7.8");
+test("clientIp prefers x-forwarded-for only behind a trusted proxy", () => {
+  assert.equal(clientIp({ "x-forwarded-for": "1.2.3.4, 10.0.0.1" }, "127.0.0.1", true), "1.2.3.4");
+  assert.equal(clientIp({ "x-forwarded-for": ["5.6.7.8"] }, "127.0.0.1", true), "5.6.7.8");
+  // 默认不信任代理：XFF 可被伪造，回落到 socket 地址
+  assert.equal(clientIp({ "x-forwarded-for": "1.2.3.4" }, "127.0.0.1"), "127.0.0.1");
   assert.equal(clientIp({}, "127.0.0.1"), "127.0.0.1");
   assert.equal(clientIp({}, undefined), "unknown");
 });

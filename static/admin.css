@@ -124,6 +124,36 @@
 }
 .modal select:focus { border-color: var(--accent); }
 
+.modal .form-field { margin-top: 12px; }
+.modal .form-field label {
+    display: block; font-size: 12px; font-weight: 600;
+    color: var(--text-secondary); margin-bottom: 6px;
+}
+.modal .form-field .form-req { color: var(--danger); }
+.modal .form-field input[type="text"] {
+    width: 100%; padding: 7px 10px;
+    border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+    background: var(--bg); outline: none; font-size: 13.5px;
+}
+.modal .form-field input[type="text"]:focus { border-color: var(--accent); }
+.modal .form-field select { margin-top: 0; }
+.modal .form-field input[type="file"] { font-size: 12.5px; color: var(--text-secondary); }
+
+.brand-logo {
+    width: 24px; height: 24px; border-radius: 6px; object-fit: cover; flex-shrink: 0;
+}
+.brand-logo-lg { width: 40px; height: 40px; border-radius: 8px; }
+.brand-logo-ph {
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--accent-soft); color: var(--accent);
+    font-size: 12px; font-weight: 650;
+}
+.brand-logo-lg.brand-logo-ph { font-size: 16px; }
+.brand-cell { display: flex; align-items: center; gap: 10px; }
+.agent-cell { display: flex; align-items: center; gap: 10px; }
+.cap-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.brand-logo-row { display: flex; align-items: center; gap: 12px; }
+
 @media (max-width: 768px) {
     .admin-nav { width: 56px; padding: 16px 8px; }
     .admin-nav-title { display: none; }

@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AgentClient 本机管理</title>
+    <style>
+        :root {
+            --bg: #f8fafc;
+            --bg-sidebar: #eef2f7;
+            --bg-hover: #e2e8f0;
+            --bg-code: #f1f5f9;
+            --text: #0f172a;
+            --text-secondary: #475569;
+            --text-tertiary: #94a3b8;
+            --border: #e2e8f0;
+            --border-strong: #cbd5e1;
+            --accent: #10b981;
+            --accent-soft: #d1fae5;
+            --accent-gradient: linear-gradient(135deg, #10b981 0%, #14b8a6 100%);
+            --accent-gradient-hover: linear-gradient(135deg, #059669 0%, #0d9488 100%);
+            --danger: #ef4444;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --shadow-sm: 0 1px 2px rgba(15,23,42,.04), 0 1px 3px rgba(15,23,42,.06);
+            --shadow-md: 0 2px 6px rgba(15,23,42,.05), 0 8px 20px rgba(15,23,42,.08);
+            --shadow-lg: 0 4px 12px rgba(15,23,42,.06), 0 20px 44px rgba(15,23,42,.14);
+            --radius: 12px;
+            --radius-sm: 8px;
+            --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "HarmonyOS Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+            --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #0f172a;
+                --bg-sidebar: #1e293b;
+                --bg-hover: #334155;
+                --bg-code: #1e293b;
+                --text: #e2e8f0;
+                --text-secondary: #94a3b8;
+                --text-tertiary: #64748b;
+                --border: #334155;
+                --border-strong: #475569;
+                --accent: #34d399;
+                --accent-soft: #064e3b;
+                --shadow-sm: 0 1px 2px rgba(0,0,0,.3);
+                --shadow-md: 0 4px 12px rgba(0,0,0,.4);
+                --shadow-lg: 0 12px 32px rgba(0,0,0,.5);
+            }
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: var(--font); font-size: 14.5px; line-height: 1.65;
+            color: var(--text); background: var(--bg-sidebar);
+            -webkit-font-smoothing: antialiased;
+        }
+        button { font-family: inherit; cursor: pointer; border: none; background: none; color: inherit; }
+        input, select { font-family: inherit; color: inherit; }
+
+        .topbar {
+            display: flex; align-items: center; gap: 12px;
+            padding: 0 20px; height: 56px;
+            border-bottom: 1px solid var(--border); background: var(--bg);
+        }
+        .topbar-title { font-size: 14.5px; font-weight: 700; }
+        .topbar-sub { font-size: 12.5px; color: var(--text-tertiary); }
+        .topbar .spacer { flex: 1; }
+        .conn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-tertiary); }
+        .conn-dot.connected { background: var(--success); }
+        .conn-text { font-size: 12.5px; color: var(--text-secondary); }
+
+        .page { max-width: 920px; margin: 0 auto; padding: 24px 20px 48px; }
+
+        .card {
+            border: 1px solid var(--border); border-radius: var(--radius);
+            background: var(--bg); box-shadow: var(--shadow-sm);
+            padding: 18px 20px; margin-bottom: 18px;
+        }
+        .card h2 { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
+        .card .card-desc { font-size: 12.5px; color: var(--text-tertiary); margin-bottom: 14px; }
+
+        .info-row { display: flex; gap: 10px; font-size: 13.5px; padding: 3px 0; }
+        .info-row .info-label { width: 96px; flex-shrink: 0; color: var(--text-tertiary); font-size: 12.5px; padding-top: 1px; }
+        .info-row .info-value { min-width: 0; word-break: break-all; }
+        .mono { font-family: var(--mono); font-size: 12.5px; }
+
+        .form-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+        .form-row input, .form-row select {
+            padding: 6px 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+            background: var(--bg); outline: none; font-size: 13.5px; flex: 1; min-width: 180px;
+        }
+        .form-row input:focus, .form-row select:focus { border-color: var(--accent); }
+        .form-hint { font-size: 12px; color: var(--text-tertiary); margin-top: 8px; }
+
+        .btn {
+            padding: 7px 16px; border-radius: var(--radius-sm);
+            font-size: 13.5px; font-weight: 550;
+            transition: background .15s, opacity .15s, transform .1s, box-shadow .15s;
+        }
+        .btn:active { transform: scale(.97); }
+        .btn-primary { background: var(--accent-gradient); color: #fff; box-shadow: 0 2px 8px rgba(16,185,129,.3); }
+        .btn-primary:hover { background: var(--accent-gradient-hover); }
+        .btn-ghost { background: var(--bg-hover); color: var(--text-secondary); }
+        .btn-ghost:hover { color: var(--text); }
+        .btn:disabled { opacity: .45; cursor: not-allowed; transform: none; box-shadow: none; }
+
+        .chip {
+            display: inline-flex; align-items: center; gap: 5px;
+            font-size: 11.5px; font-weight: 600; padding: 2px 9px; border-radius: 99px;
+            background: var(--bg-hover); color: var(--text-secondary); white-space: nowrap;
+        }
+        .chip.green { background: color-mix(in srgb, var(--success) 14%, transparent); color: var(--success); }
+        .chip.amber { background: color-mix(in srgb, var(--warning) 14%, transparent); color: var(--warning); }
+        .chip.accent { background: var(--accent-soft); color: var(--accent); }
+
+        .table-wrap {
+            border: 1px solid var(--border); border-radius: var(--radius);
+            overflow: hidden; background: var(--bg); box-shadow: var(--shadow-sm);
+            margin-bottom: 18px;
+        }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th {
+            text-align: left; padding: 9px 14px; font-size: 12px; font-weight: 600;
+            color: var(--text-secondary); background: var(--bg);
+            border-bottom: 1px solid var(--border); white-space: nowrap;
+        }
+        td { padding: 9px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+        tr:last-child td { border-bottom: none; }
+        .cell-main { font-weight: 550; }
+        .cell-sub { font-size: 11.5px; color: var(--text-tertiary); font-family: var(--mono); word-break: break-all; }
+        .row-actions { display: flex; gap: 6px; justify-content: flex-end; }
+        .row-actions button {
+            font-size: 12px; color: var(--text-secondary); padding: 3px 8px;
+            border-radius: 6px; transition: background .15s, color .15s; white-space: nowrap;
+        }
+        .row-actions button:hover { background: var(--bg-hover); color: var(--text); }
+        .row-actions button.danger { color: var(--danger); }
+        .empty-tip { padding: 30px; text-align: center; color: var(--text-tertiary); font-size: 13px; }
+
+        .section-error { font-size: 12.5px; color: var(--danger); margin-top: 8px; display: none; }
+
+        .modal-overlay {
+            position: fixed; inset: 0; z-index: 300;
+            background: rgba(10,10,15,.45);
+            display: none; align-items: center; justify-content: center;
+        }
+        .modal-overlay.open { display: flex; }
+        .modal {
+            background: var(--bg); border: 1px solid var(--border); border-radius: 14px;
+            padding: 22px 24px; width: 420px; max-width: 92vw;
+            box-shadow: var(--shadow-lg);
+        }
+        .modal h3 { font-size: 15px; font-weight: 650; margin-bottom: 8px; }
+        .modal p { font-size: 13.5px; color: var(--text-secondary); }
+        .modal .form-field { margin-top: 12px; }
+        .modal .form-field label {
+            display: block; font-size: 12px; font-weight: 600;
+            color: var(--text-secondary); margin-bottom: 6px;
+        }
+        .modal .form-field input[type="text"] {
+            width: 100%; padding: 7px 10px;
+            border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+            background: var(--bg); outline: none; font-size: 13.5px; font-family: var(--mono);
+        }
+        .modal .form-field input[type="text"]:focus { border-color: var(--accent); }
+        .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+
+        .toast-container {
+            position: fixed; top: 16px; right: 16px; z-index: 400;
+            display: flex; flex-direction: column; gap: 8px;
+        }
+        .toast {
+            padding: 10px 16px; border-radius: 10px; font-size: 13.5px;
+            background: var(--bg); border: 1px solid var(--border);
+            box-shadow: var(--shadow-md); transition: opacity .3s;
+            max-width: 340px;
+        }
+        .toast.success { border-left: 3px solid var(--success); }
+        .toast.warning { border-left: 3px solid var(--warning); }
+        .toast.error { border-left: 3px solid var(--danger); }
+    </style>
+</head>
+<body>
+    <header class="topbar">
+        <span class="topbar-title">AgentClient 本机管理</span>
+        <span class="topbar-sub">127.0.0.1 本地接口 · 无需登录</span>
+        <span class="spacer"></span>
+        <span class="conn-dot" id="connDot"></span>
+        <span class="conn-text" id="connText">网关未连接</span>
+    </header>
+
+    <div class="page">
+        <!-- 连接状态 / 配对 -->
+        <div class="card" id="stateCard"></div>
+
+        <!-- Agent 列表 -->
+        <div class="card">
+            <h2>Agent 列表</h2>
+            <div class="card-desc">由网关分配到本机 Connector 的 Agent 实例，每 5 秒自动刷新</div>
+            <div class="table-wrap" style="margin-bottom:0">
+                <table>
+                    <thead><tr><th>Agent</th><th>品牌</th><th>状态</th><th>生效命令 / 地址</th><th style="text-align:right">操作</th></tr></thead>
+                    <tbody id="agentRows"></tbody>
+                </table>
+                <div class="empty-tip" id="agentEmpty" style="display:none">暂无 Agent</div>
+            </div>
+            <div class="section-error" id="agentsError"></div>
+        </div>
+
+        <!-- 添加 Agent -->
+        <div class="card" id="addCard" style="display:none">
+            <h2>添加 Agent</h2>
+            <div class="card-desc">从网关注册一个新 Agent 到本机 Connector</div>
+            <div class="form-row">
+                <select id="addBrand"></select>
+            </div>
+            <div class="form-hint mono" id="addBrandCmd" style="display:none"></div>
+            <div class="form-hint" id="addCmdLabel">启动命令覆盖（可选）</div>
+            <div class="form-row" style="margin-top:6px">
+                <input type="text" id="addName" placeholder="名称（可选，默认自动生成）" autocomplete="off">
+                <input type="text" id="addCmd" placeholder="默认用品牌命令" autocomplete="off">
+                <button class="btn btn-primary" id="addBtn">添加</button>
+            </div>
+            <div class="section-error" id="addError"></div>
+        </div>
+    </div>
+
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- 通用确认弹窗 -->
+    <div class="modal-overlay" id="modalOverlay">
+        <div class="modal">
+            <h3 id="modalTitle">确认</h3>
+            <p id="modalText"></p>
+            <div class="modal-actions">
+                <button class="btn btn-ghost" id="modalCancel">取消</button>
+                <button class="btn btn-ghost" id="modalOk" style="color:var(--danger)">确定</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 编辑启动命令弹窗 -->
+    <div class="modal-overlay" id="cmdOverlay">
+        <div class="modal">
+            <h3>编辑启动命令</h3>
+            <p id="cmdAgentLabel"></p>
+            <div class="form-field">
+                <label id="cmdLabel">启动命令覆盖</label>
+                <input type="text" id="cmdInput" placeholder="留空 = 清除本机覆盖，回退品牌/本地命令" autocomplete="off">
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-ghost" id="cmdCancel">取消</button>
+                <button class="btn btn-primary" id="cmdOk">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        (function () {
+            'use strict';
+
+            const els = {};
+            ['connDot', 'connText', 'stateCard', 'agentRows', 'agentEmpty', 'agentsError',
+             'addCard', 'addBrand', 'addBrandCmd', 'addCmdLabel', 'addName', 'addCmd', 'addBtn', 'addError',
+             'toastContainer', 'modalOverlay', 'modalTitle', 'modalText', 'modalOk', 'modalCancel',
+             'cmdOverlay', 'cmdAgentLabel', 'cmdLabel', 'cmdInput', 'cmdCancel', 'cmdOk'
+            ].forEach(id => { els[id] = document.getElementById(id); });
+
+            function escapeHtml(text) {
+                const div = document.createElement('div');
+                div.textContent = text == null ? '' : String(text);
+                return div.innerHTML;
+            }
+            function escapeAttr(text) { return escapeHtml(text).replace(/"/g, '&quot;'); }
+
+            function showToast(message, type, duration) {
+                const toast = document.createElement('div');
+                toast.className = 'toast ' + (type || 'info');
+                toast.textContent = message;
+                els.toastContainer.appendChild(toast);
+                setTimeout(() => {
+                    toast.style.opacity = '0';
+                    setTimeout(() => toast.remove(), 300);
+                }, duration || 3000);
+            }
+
+            function showError(el, message) {
+                el.textContent = message || '';
+                el.style.display = message ? '' : 'none';
+            }
+
+            let modalResolve = null;
+            function confirmModal(title, text, okLabel) {
+                els.modalTitle.textContent = title;
+                els.modalText.textContent = text;
+                els.modalOk.textContent = okLabel || '确定';
+                els.modalOverlay.classList.add('open');
+                return new Promise(resolve => { modalResolve = resolve; });
+            }
+            function closeModal(result) {
+                els.modalOverlay.classList.remove('open');
+                if (modalResolve) { modalResolve(result); modalResolve = null; }
+            }
+
+            async function api(path, opts) {
+                const resp = await fetch(path, opts);
+                let body = null;
+                try { body = await resp.json(); } catch (e) { /* 忽略非 JSON 响应 */ }
+                if (!resp.ok) throw new Error((body && body.error) || ('HTTP ' + resp.status));
+                return body;
+            }
+            function jsonOpts(method, obj) {
+                return { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(obj) };
+            }
+
+            /* ---------- 状态卡片 / 配对表单 ---------- */
+
+            let lastConfigured = null;   // null 首渲染；configured 变化时整体重渲染卡片
+            let pairRendered = false;
+
+            function defaultGateway() {
+                return 'ws://' + location.hostname + ':8080/ws/agent';
+            }
+
+            function renderStateCard(s) {
+                els.connDot.className = 'conn-dot' + (s.connected ? ' connected' : '');
+                els.connText.textContent = s.connected ? '网关已连接' : '网关未连接';
+
+                if (s.configured === lastConfigured && (s.configured || pairRendered)) return;
+                lastConfigured = s.configured;
+
+                if (s.configured) {
+                    els.stateCard.innerHTML =
+                        '<h2>连接状态</h2>' +
+                        '<div class="card-desc">本机 Connector 的网关接入信息</div>' +
+                        '<div class="info-row"><span class="info-label">状态</span><span class="info-value">' +
+                        (s.connected ? '<span class="chip green">已连接</span>' : '<span class="chip">未连接</span>') +
+                        '</span></div>' +
+                        '<div class="info-row"><span class="info-label">网关地址</span><span class="info-value mono">' + escapeHtml(s.gateway || '—') + '</span></div>' +
+                        '<div class="info-row"><span class="info-label">Connector</span><span class="info-value mono">' + escapeHtml(s.connector_id || '—') + '</span></div>' +
+                        '<div class="info-row"><span class="info-label">配置文件</span><span class="info-value mono">' + escapeHtml(s.config_path || '—') + '</span></div>' +
+                        '<div class="form-hint">如需重新接入：删除上方配置文件后重启 AgentClient。</div>';
+                } else {
+                    els.stateCard.innerHTML =
+                        '<h2>接入网关</h2>' +
+                        '<div class="card-desc">本机尚未配置凭证，请用管理后台生成的配对码完成接入</div>' +
+                        '<div class="form-row"><input type="text" id="pairGateway" placeholder="网关地址" autocomplete="off"></div>' +
+                        '<div class="form-row"><input type="text" id="pairCode" placeholder="配对码（管理后台 · 设备密钥 · 生成配对码）" autocomplete="off"></div>' +
+                        '<div class="form-row">' +
+                        '<input type="text" id="pairName" placeholder="Connector 名称（可选，默认主机名）" autocomplete="off">' +
+                        '<button class="btn btn-primary" id="pairBtn">接入</button>' +
+                        '</div>' +
+                        '<div class="form-hint">已配置过的机器要重新接入，需删除配置文件后重启 AgentClient。</div>' +
+                        '<div class="section-error" id="pairError"></div>';
+                    document.getElementById('pairGateway').value = defaultGateway();
+                    document.getElementById('pairBtn').addEventListener('click', doPair);
+                    pairRendered = true;
+                }
+            }
+
+            async function doPair() {
+                const gateway = document.getElementById('pairGateway').value.trim();
+                const code = document.getElementById('pairCode').value.trim();
+                const name = document.getElementById('pairName').value.trim();
+                const errEl = document.getElementById('pairError');
+                if (!gateway || !code) { showError(errEl, '请填写网关地址和配对码'); return; }
+                const btn = document.getElementById('pairBtn');
+                btn.disabled = true;
+                showError(errEl, '');
+                try {
+                    const body = { gateway, code };
+                    if (name) body.connector_id = name;
+                    await api('/api/pair', jsonOpts('POST', body));
+                    showToast('配对成功，正在连接网关', 'success');
+                    pairRendered = false;
+                    lastConfigured = null;
+                    loadState();
+                } catch (e) {
+                    showError(errEl, '接入失败：' + (e.message || e));
+                } finally {
+                    btn.disabled = false;
+                }
+            }
+
+            /* ---------- Agent 列表 ---------- */
+
+            const SOURCE_CHIPS = {
+                override: '<span class="chip amber">本机覆盖</span>',
+                brand: '<span class="chip accent">品牌</span>',
+                local: '<span class="chip">本地兜底</span>'
+            };
+            const CONN_TYPE_LABELS = { stdio: 'stdio · 命令启动', http: 'http · 服务地址', ws: 'ws · 服务地址' };
+            function connTypeOf(x) { return x.conn_type === 'http' || x.conn_type === 'ws' ? x.conn_type : 'stdio'; }
+
+            let agentsCache = [];
+
+            function renderAgents(agents) {
+                agentsCache = agents;
+                els.agentEmpty.style.display = agents.length ? 'none' : '';
+                els.agentRows.innerHTML = agents.map(a =>
+                    '<tr>' +
+                    '<td><div class="cell-main">' + escapeHtml(a.name || a.agent_id) + '</div>' +
+                    '<div class="cell-sub">' + escapeHtml(a.agent_id) + '</div></td>' +
+                    '<td><span class="cell-sub">' + escapeHtml(a.brand_id || '—') + '</span></td>' +
+                    '<td>' + (a.running ? '<span class="chip green">运行中</span>' : '<span class="chip">未运行</span>') +
+                    ' <span class="chip">' + connTypeOf(a) + '</span></td>' +
+                    '<td><div class="cell-sub">' + escapeHtml(a.launch_cmd || '—') + '</div>' +
+                    (SOURCE_CHIPS[a.launch_cmd_source] || '') + '</td>' +
+                    '<td><div class="row-actions">' +
+                    '<button data-act="edit" data-id="' + escapeAttr(a.agent_id) + '" data-cmd="' + escapeAttr(a.launch_cmd_source === 'override' ? a.launch_cmd : '') + '">编辑启动命令</button>' +
+                    '<button data-act="remove" data-id="' + escapeAttr(a.agent_id) + '" data-name="' + escapeAttr(a.name || a.agent_id) + '" class="danger">移除</button>' +
+                    '</div></td></tr>').join('');
+                els.agentRows.querySelectorAll('button').forEach(btn => {
+                    btn.onclick = () => {
+                        if (btn.dataset.act === 'edit') openCmdForm(btn.dataset.id, btn.dataset.cmd);
+                        else removeAgent(btn.dataset.id, btn.dataset.name);
+                    };
+                });
+            }
+
+            async function removeAgent(id, name) {
+                const ok = await confirmModal('移除 Agent', '将 Agent「' + name + '」（' + id + '）从本机 Connector 移除？移除后需重新添加。', '移除');
+                if (!ok) return;
+                try {
+                    await api('/api/agents/' + encodeURIComponent(id), { method: 'DELETE' });
+                    showToast('已移除', 'success');
+                    loadState();
+                } catch (e) {
+                    showError(els.agentsError, '移除失败：' + (e.message || e));
+                }
+            }
+
+            let cmdAgentID = null;
+            function openCmdForm(agentID, currentCmd) {
+                cmdAgentID = agentID;
+                const a = agentsCache.find(x => x.agent_id === agentID);
+                const stdio = connTypeOf(a || {}) === 'stdio';
+                els.cmdAgentLabel.textContent = 'Agent：' + agentID;
+                els.cmdLabel.textContent = stdio ? '启动命令覆盖' : '服务地址覆盖';
+                els.cmdInput.value = currentCmd || '';
+                els.cmdOverlay.classList.add('open');
+            }
+
+            /* ---------- 品牌下拉 / 添加 Agent ---------- */
+
+            let brandsCache = [];
+            let brandsLoaded = false;
+
+            async function loadBrands() {
+                try {
+                    const r = await api('/api/brands');
+                    brandsCache = (r.brands || []).filter(b => !b.disabled);
+                    brandsLoaded = true;
+                    if (!brandsCache.length) {
+                        els.addBrand.innerHTML = '<option value="">暂无可用品牌</option>';
+                    } else {
+                        els.addBrand.innerHTML = brandsCache.map(b =>
+                            '<option value="' + escapeAttr(b.id) + '">' + escapeHtml(b.name) + '（' + escapeHtml(b.id) + '）</option>').join('');
+                    }
+                    updateBrandCmdHint();
+                    showError(els.addError, '');
+                } catch (e) {
+                    brandsLoaded = false;
+                    els.addBrand.innerHTML = '<option value="">网关未连接，无法加载品牌</option>';
+                    els.addBrandCmd.style.display = 'none';
+                }
+            }
+
+            function updateBrandCmdHint() {
+                const b = brandsCache.find(x => x.id === els.addBrand.value);
+                if (!b) {
+                    els.addBrandCmd.style.display = 'none';
+                    return;
+                }
+                const ct = connTypeOf(b);
+                const target = ct === 'stdio' ? b.launch_cmd : b.endpoint;
+                els.addBrandCmd.textContent = '连接方式：' + CONN_TYPE_LABELS[ct] +
+                    (target ? ' · 品牌默认' + (ct === 'stdio' ? '命令' : '地址') + '：' + target : '');
+                els.addBrandCmd.style.display = '';
+                els.addCmdLabel.textContent = ct === 'stdio' ? '启动命令覆盖（可选）' : '服务地址覆盖（可选）';
+                els.addCmd.placeholder = ct === 'stdio' ? '默认用品牌命令' : '默认用品牌地址';
+            }
+
+            async function doAdd() {
+                const brandID = els.addBrand.value;
+                if (!brandID) { showError(els.addError, '请选择品牌'); return; }
+                els.addBtn.disabled = true;
+                showError(els.addError, '');
+                try {
+                    const body = { brand_id: brandID };
+                    const name = els.addName.value.trim();
+                    const cmd = els.addCmd.value.trim();
+                    if (name) body.name = name;
+                    if (cmd) body.launch_cmd = cmd;
+                    const r = await api('/api/agents', jsonOpts('POST', body));
+                    showToast('已添加 Agent：' + r.agent_id, 'success', 5000);
+                    els.addName.value = els.addCmd.value = '';
+                    loadState();
+                } catch (e) {
+                    showError(els.addError, '添加失败：' + (e.message || e));
+                } finally {
+                    els.addBtn.disabled = false;
+                }
+            }
+
+            /* ---------- 轮询 ---------- */
+
+            async function loadState() {
+                try {
+                    const s = await api('/api/state');
+                    renderStateCard(s);
+                    renderAgents(s.agents || []);
+                    showError(els.agentsError, '');
+                    els.addCard.style.display = s.configured ? '' : 'none';
+                    if (s.configured && s.connected && !brandsLoaded) loadBrands();
+                } catch (e) {
+                    els.connDot.className = 'conn-dot';
+                    els.connText.textContent = '本地接口不可达';
+                    showError(els.agentsError, '状态加载失败：' + (e.message || e));
+                }
+            }
+
+            /* ---------- 事件 ---------- */
+
+            els.addBrand.addEventListener('change', updateBrandCmdHint);
+            els.addBtn.addEventListener('click', doAdd);
+
+            els.cmdCancel.addEventListener('click', () => els.cmdOverlay.classList.remove('open'));
+            els.cmdOk.addEventListener('click', async () => {
+                if (!cmdAgentID) return;
+                try {
+                    await api('/api/agents/' + encodeURIComponent(cmdAgentID),
+                        jsonOpts('PUT', { launch_cmd: els.cmdInput.value.trim() }));
+                    showToast('启动命令已保存', 'success');
+                    els.cmdOverlay.classList.remove('open');
+                    loadState();
+                } catch (e) {
+                    showToast('保存失败：' + (e.message || e), 'error');
+                }
+            });
+
+            els.modalOk.addEventListener('click', () => closeModal(true));
+            els.modalCancel.addEventListener('click', () => closeModal(false));
+            els.modalOverlay.addEventListener('click', (e) => {
+                if (e.target === els.modalOverlay) closeModal(false);
+            });
+            window.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') {
+                    els.cmdOverlay.classList.remove('open');
+                    if (els.modalOverlay.classList.contains('open')) closeModal(false);
+                }
+            });
+
+            loadState();
+            setInterval(loadState, 5000);
+        })();
+    </script>
+</body>
+</html>

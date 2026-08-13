@@ -64,6 +64,31 @@ export const METHOD_AGENT_DISCONNECT = "agent.disconnect";
 export const METHOD_AGENT_REASSIGN = "agent.reassign";
 export const METHOD_ADMIN_OVERVIEW = "admin.overview";
 
+// 品牌目录（admin 维护）与注册审批
+export const METHOD_BRAND_LIST = "brand.list";
+export const METHOD_BRAND_CREATE = "brand.create";
+export const METHOD_BRAND_UPDATE = "brand.update";
+export const METHOD_BRAND_DELETE = "brand.delete";
+export const METHOD_AGENT_APPROVE = "agent.approve";
+export const METHOD_AGENT_REJECT = "agent.reject";
+
+// 连接器（connector）：AgentClient 纯服务模式，agent 实例在页面上分配
+export const METHOD_CONNECTOR_HELLO = "connector.hello"; // client → gateway
+export const METHOD_CONNECTOR_LIST = "connector.list";   // admin RPC
+export const METHOD_CONNECTOR_SYNC = "connector.sync";   // gateway → client，全量目标 agent 集
+export const METHOD_AGENT_ASSIGN = "agent.assign";       // 页面分配 agent 实例
+export const METHOD_AGENT_REMOVE = "agent.remove";       // 页面移除 agent 实例
+
+// 配对接入：配对码（owner 生成时绑定）→ connector.pair → 审批 → 下发设备密钥
+export const METHOD_PAIRING_CREATE = "pairing.create";     // 用户 RPC：生成一次性接入码
+export const METHOD_PAIRING_LIST = "pairing.list";         // 用户 RPC：列自己的码
+export const METHOD_PAIRING_DELETE = "pairing.delete";     // 用户 RPC：作废自己的码
+export const METHOD_CONNECTOR_PAIR = "connector.pair";     // client → gateway（无凭证，凭码）
+export const METHOD_CONNECTOR_PENDING_LIST = "connector.pending.list";   // admin RPC
+export const METHOD_CONNECTOR_APPROVE = "connector.approve";             // admin RPC：发密钥
+export const METHOD_CONNECTOR_REJECT = "connector.reject";               // admin RPC
+export const METHOD_CONNECTOR_CREDENTIAL = "connector.credential";       // gateway → client 推送
+
 // 设备密钥（普通用户管理自己的，admin 可管理全员的）
 export const METHOD_DEVICE_KEY_CREATE = "device_key.create";
 export const METHOD_DEVICE_KEY_LIST = "device_key.list";
@@ -204,6 +229,7 @@ export interface RegisterParams {
   description?: string;
   capabilities: Capability[];
   platform?: PlatformInfo;
+  brand_id?: string; // 治理模式下必填；name/capabilities 以品牌目录为准被网关覆盖
 }
 
 export interface RegisterResult {
@@ -255,6 +281,11 @@ export interface AgentInfo {
   capabilities: Capability[];
   platform?: PlatformInfo;
   last_heartbeat?: string;
+  // 品牌治理：注册时由网关按品牌行覆盖/补充
+  brand_id?: string | null;
+  brand_name?: string | null;
+  logo_url?: string | null;
+  approval_status?: string; // approved | pending | rejected（开放模式下恒 approved）
 }
 
 export interface AgentListParams {
@@ -334,11 +365,13 @@ export interface AgentChatParams {
   type: string;
   content: string;
   metadata?: Record<string, unknown>;
+  agent_id?: string; // connector 多 agent 托管时由网关注入，client 据此分派
 }
 
 export interface AgentCancelParams {
   task_id: string;
   session_id?: string;
+  agent_id?: string; // connector 分派用（网关注入）
 }
 
 export interface AgentRespondParams {
@@ -349,6 +382,7 @@ export interface AgentRespondParams {
   block_id?: string;
   action_id?: string;
   response?: unknown;
+  agent_id?: string; // connector 分派用（网关注入）
 }
 
 export interface ProgressValue {
@@ -484,6 +518,8 @@ export interface AdminAgentInfo extends AgentInfo {
   first_seen: number;
   last_seen: number;
   online: boolean;
+  last_ip?: string | null;
+  connector_id?: string | null;
 }
 
 export interface AdminAgentListParams {
@@ -566,6 +602,174 @@ export interface UserResetPasswordParams {
 export interface UserChangePasswordParams {
   old_password: string;
   new_password: string;
+}
+
+// ---- 品牌目录与注册审批 ----
+
+export interface BrandInfo {
+  id: string;
+  name: string;
+  description: string;
+  logo_url: string | null;
+  capabilities: Capability[];
+  conn_type: string; // stdio | http | ws：托管实例与本地服务的连接方式
+  launch_cmd: string | null; // conn_type=stdio：本地服务启动命令
+  endpoint: string | null; // conn_type=http/ws：本地服务地址
+  disabled: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface BrandListResult {
+  brands: BrandInfo[];
+}
+
+export interface BrandCreateParams {
+  name: string;
+  description?: string;
+  logo_url?: string | null;
+  capabilities?: Capability[];
+  conn_type?: string; // 默认 stdio
+  launch_cmd?: string | null;
+  endpoint?: string | null;
+}
+
+export interface BrandUpdateParams {
+  id: string;
+  name: string;
+  description?: string;
+  logo_url?: string | null;
+  capabilities?: Capability[];
+  conn_type?: string;
+  launch_cmd?: string | null;
+  endpoint?: string | null;
+  disabled?: boolean;
+}
+
+export interface BrandDeleteParams {
+  id: string;
+}
+
+export interface AgentApprovalParams {
+  agent_id: string;
+}
+
+// ---- 连接器（connector）----
+
+export interface ConnectorHelloParams {
+  connector_id: string;
+  platform?: PlatformInfo;
+  version?: string;
+}
+
+export interface ConnectorInfo {
+  id: string;
+  owner_id: string;
+  platform?: PlatformInfo;
+  ip?: string;
+  agents: number; // 当前承载的 agent 数
+  last_heartbeat: string;
+}
+
+export interface ConnectorListResult {
+  connectors: ConnectorInfo[];
+}
+
+// connector.sync 的全量目标集条目
+export interface ConnectorSyncAgent {
+  agent_id: string;
+  brand_id: string;
+  name: string;
+  capabilities: Capability[];
+  conn_type?: string; // stdio | http | ws（品牌定义），缺省按 launch_cmd 推断
+  launch_cmd?: string; // stdio：本地服务启动命令
+  endpoint?: string; // http/ws：本地服务地址
+}
+
+export interface ConnectorSyncParams {
+  agents: ConnectorSyncAgent[];
+}
+
+export interface AgentAssignParams {
+  connector_id: string;
+  brand_id: string;
+  name?: string; // 可选自定义后缀/名称，默认 <brand>-<短id>
+}
+
+export interface AgentAssignResult {
+  agent_id: string;
+  status: string;
+}
+
+export interface AgentRemoveParams {
+  agent_id: string;
+}
+
+// ---- 配对接入 ----
+
+export interface PairingCodeCreateParams {
+  owner_id?: string; // 仅 admin 可代他人生成，默认自己
+  ttl_seconds?: number; // 默认 86400（24h）
+}
+
+export interface PairingCodeCreateResult {
+  id: string;
+  code: string; // 明文仅此一次返回
+  owner_id: string;
+  expires_at: number;
+}
+
+export interface PairingCodeInfo {
+  id: string;
+  owner_id: string;
+  expires_at: number;
+  used_at: number | null;
+  created_at: number;
+}
+
+export interface PairingCodeListResult {
+  codes: PairingCodeInfo[];
+}
+
+export interface PairingCodeDeleteParams {
+  id: string;
+}
+
+// client 凭配对码请求接入（无需已有凭证）；批准前连接挂起等待
+export interface ConnectorPairParams {
+  code: string;
+  connector_id: string;
+  platform?: PlatformInfo;
+  version?: string;
+}
+
+export interface ConnectorPairResult {
+  status: "pending"; // 已受理，等待管理员审批；批准后推送 connector.credential
+}
+
+// 待接入 connector（内存态，网关重启后 client 会重试 pair）
+export interface PendingConnectorInfo {
+  connector_id: string;
+  owner_id: string; // 配对码归属用户，批准后密钥归该用户
+  code_id: string;
+  platform?: PlatformInfo;
+  version?: string;
+  ip?: string;
+  paired_at: number;
+}
+
+export interface ConnectorPendingListResult {
+  connectors: PendingConnectorInfo[];
+}
+
+export interface ConnectorApproveParams {
+  connector_id: string;
+}
+
+// 批准后网关推送给 client 的凭证，client 落盘后凭 key 走 connector.hello
+export interface ConnectorCredentialParams {
+  connector_id: string;
+  key: string; // 设备密钥明文，仅此一次
 }
 
 export interface LocalAgentRequest {
