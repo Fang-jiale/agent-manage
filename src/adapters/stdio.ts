@@ -10,6 +10,39 @@ interface PendingLine {
 
 // StdioAdapter talks to a local agent by spawning it as a subprocess and
 // communicating over stdin/stdout using JSON-RPC over JSON lines.
+// shell 风格分词：支持单/双引号包裹含空格的路径；中文输入法易把引号打成
+// 弯引号（‘’“”），先归一化成 ASCII 引号再解析，否则整段参数被字面带进引号。
+function tokenizeCommand(cmd: string): string[] {
+  const s = cmd.replace(/[‘’]/g, "'").replace(/[“”]/g, '"');
+  const parts: string[] = [];
+  let cur = "";
+  let quote: string | undefined;
+  let has = false;
+  for (const ch of s) {
+    if (quote) {
+      if (ch === quote) quote = undefined;
+      else cur += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      has = true;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (cur !== "" || has) {
+        parts.push(cur);
+        cur = "";
+        has = false;
+      }
+      continue;
+    }
+    cur += ch;
+  }
+  if (cur !== "" || has) parts.push(cur);
+  return parts;
+}
+
 export class StdioAdapter implements LocalAgentAdapter {
   private proc: ChildProcess;
   private capabilities: proto.Capability[] = [];
@@ -31,7 +64,7 @@ export class StdioAdapter implements LocalAgentAdapter {
   }
 
   static async create(command: string, args: string[] = []): Promise<StdioAdapter> {
-    const parts = command.split(/\s+/).filter((p) => p.length > 0);
+    const parts = tokenizeCommand(command);
     if (parts.length > 0) {
       command = parts[0];
       args = [...parts.slice(1), ...args];
@@ -181,6 +214,14 @@ export class StdioAdapter implements LocalAgentAdapter {
       case "task.completed":
         this.eventsQueue.push({ method: msg.method, params: msg.params });
         break;
+      case proto.METHOD_TASK_INVOKE:
+        // 管理者编排请求：带 id 上抛，client 桥接到网关后须回响应
+        this.eventsQueue.push({
+          method: msg.method,
+          params: msg.params,
+          id: msg.id !== undefined && msg.id !== null ? String(msg.id) : undefined,
+        });
+        break;
       default:
         // Ignore unrecognized messages.
     }
@@ -250,6 +291,16 @@ export class StdioAdapter implements LocalAgentAdapter {
 
   getCapabilities(): proto.Capability[] {
     return this.capabilities;
+  }
+
+  sendToAgent(msg: proto.Message): boolean {
+    if (this.closed) return false;
+    try {
+      this.writeMessage(msg);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   events(): AsyncIterable<LocalAgentEvent> {

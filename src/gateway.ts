@@ -59,6 +59,7 @@ interface UserConn {
   lastHeartbeat: number;
   alive: boolean;
   isAdmin: boolean; // WS 升级时缓存的角色；角色变更通过 kickUser 强制重连刷新
+  ownOnly: boolean; // 对话页连接（?scope=own）：即使 admin 也只推送/通知自己名下的 agent
 }
 
 interface TaskState {
@@ -67,7 +68,14 @@ interface TaskState {
   sessionID: string;
   timer: NodeJS.Timeout;
   createdAt: number;
+  groupID?: string;       // 群聊任务：归属群
+  parentTaskID?: string;  // 管理者编排：发起 invoke 的父任务
+  invokerAgentID?: string; // 管理者编排：管理者 agent（子任务结束时回投结果）
+  depth: number;          // 0 = 用户直发，1 = 管理者编排的子任务
 }
+
+// 群消息 fan-out 的单群目标 agent 上限
+const MAX_GROUP_FANOUT = 8;
 
 interface PendingEntry {
   user: UserConn;
@@ -85,6 +93,33 @@ interface TaskBuffer {
 
 // 单任务落库缓冲上限：超出部分丢弃并在最终消息里标注截断
 const MAX_TASK_BUFFER_BYTES = 4 * 1024 * 1024;
+
+// 交互 chunk（confirm/prompt/block）在任务缓冲里的应答/撤销标记，随任务落库
+interface BufferedInteractionChunk {
+  type?: string;
+  confirm_id?: string;
+  prompt_id?: string;
+  block_id?: string;
+  answered?: boolean;
+  answer?: unknown;
+  cancelled?: boolean;
+  reason?: string;
+}
+
+function isInteractionChunk(c: BufferedInteractionChunk): boolean {
+  return c.type === proto.CHUNK_TYPE_CONFIRM_REQUIRED
+    || c.type === proto.CHUNK_TYPE_PROMPT_REQUIRED
+    || c.type === proto.CHUNK_TYPE_BLOCK_REQUIRED;
+}
+
+// respond 只带命中的 id；id 缺省（旧 client）时退化为同类型首个待决 chunk
+function matchesInteractionChunk(
+  c: BufferedInteractionChunk, confirmID: string, promptID: string, blockID: string,
+): boolean {
+  if (c.type === proto.CHUNK_TYPE_CONFIRM_REQUIRED) return confirmID === "" || c.confirm_id === confirmID;
+  if (c.type === proto.CHUNK_TYPE_PROMPT_REQUIRED) return promptID === "" || c.prompt_id === promptID;
+  return blockID === "" || c.block_id === blockID;
+}
 
 export class Hub {
   agents = new Map<string, AgentConn>();
@@ -281,8 +316,13 @@ export class Hub {
     logger.info("connector registered", { connector_id: a.connectorID, owner_id: a.ownerID });
   }
 
-  unregisterConnector(id: string): void {
-    if (this.connectors.delete(id)) logger.info("connector unregistered", { connector_id: id });
+  // ws 不传时无条件删除（管理动作）；传了只删仍指向该连接的条目——
+  // 防止旧连接迟到的 close 事件把新连接（重连恢复）的 connector 条目误删
+  unregisterConnector(id: string, ws?: WebSocket): void {
+    const cur = this.connectors.get(id);
+    if (!cur || (ws !== undefined && cur.ws !== ws)) return;
+    this.connectors.delete(id);
+    logger.info("connector unregistered", { connector_id: id });
   }
 
   // 全量推送 connector 的目标 agent 集：本地投递 + 经总线广播到其他实例
@@ -495,7 +535,7 @@ export class Hub {
   }
 
   private filterAgentsForUser(agents: proto.AgentInfo[], user: UserConn): proto.AgentInfo[] {
-    if (user.isAdmin) return agents;
+    if (user.isAdmin && !user.ownOnly) return agents;
     return agents.filter((a) => a.owner_id === user.userID);
   }
 
@@ -504,14 +544,30 @@ export class Hub {
     if (this.agentListTimer) return;
     this.agentListTimer = setTimeout(() => {
       this.agentListTimer = undefined;
-      void this.agentList().then((agents) => {
-        // 同一份名单序列化一次：admin 全量共享一帧，普通用户按属主各算一帧
+      void this.agentList().then(async (agents) => {
+        // 昵称按 owner 私有：一次查出全表，普通用户帧在序列化前盖上本人昵称
+        const byOwner = new Map<string, Map<string, string>>();
+        if (this.db) {
+          for (const n of await this.db.listAllNicknames().catch((e) => {
+            logger.error("list nicknames failed", { error: String(e) });
+            return [] as { owner_id: string; agent_id: string; nickname: string }[];
+          })) {
+            let m = byOwner.get(n.owner_id);
+            if (!m) { m = new Map(); byOwner.set(n.owner_id, m); }
+            m.set(n.agent_id, n.nickname);
+          }
+        }
+        // 同一份名单序列化一次：全量 admin（非 ownOnly）共享一帧（不含昵称），其余按用户各算一帧
         const cache = new Map<string, string>();
         for (const user of this.users.values()) {
-          const key = user.isAdmin ? "" : user.userID;
+          const key = user.isAdmin && !user.ownOnly ? "" : user.userID;
           let raw = cache.get(key);
           if (raw === undefined) {
-            const filtered = this.filterAgentsForUser(agents, user);
+            let filtered = this.filterAgentsForUser(agents, user);
+            if (key !== "") {
+              const nicks = byOwner.get(key);
+              filtered = filtered.map((a) => ({ ...a, nickname: nicks?.get(a.id) ?? null }));
+            }
             raw = JSON.stringify(proto.newNotification(proto.METHOD_ADMIN_AGENT_LIST, { agents: filtered }));
             cache.set(key, raw);
           }
@@ -523,8 +579,13 @@ export class Hub {
   }
 
   private sendAgentList(u: UserConn): void {
-    void this.agentList().then((agents) => {
-      const filtered = this.filterAgentsForUser(agents, u);
+    void this.agentList().then(async (agents) => {
+      let filtered = this.filterAgentsForUser(agents, u);
+      // 非全量 admin 视图（普通用户 / ownOnly admin）带本人昵称
+      if (this.db && !(u.isAdmin && !u.ownOnly)) {
+        const nicks = await this.db.listNicknamesForOwner(u.userID).catch(() => new Map<string, string>());
+        filtered = filtered.map((a) => ({ ...a, nickname: nicks.get(a.id) ?? null }));
+      }
       const msg = proto.newNotification(proto.METHOD_ADMIN_AGENT_LIST, { agents: filtered });
       this.trySend(u.ws, msg);
     }).catch(() => {});
@@ -537,9 +598,10 @@ export class Hub {
       timestamp: proto.rfc3339Now(),
     } satisfies proto.AgentEventParams);
     this.forwardToUsers(ownerID, msg);
-    // admin 需要看到全量事件（跨实例时其他实例的 admin 靠 agent.list 刷新兜底）
+    // admin 需要看到全量事件（跨实例时其他实例的 admin 靠 agent.list 刷新兜底）；
+    // 对话页连接（ownOnly）不推送他人的事件
     for (const u of this.users.values()) {
-      if (u.isAdmin && u.userID !== ownerID) this.trySend(u.ws, msg);
+      if (u.isAdmin && !u.ownOnly && u.userID !== ownerID) this.trySend(u.ws, msg);
     }
   }
 
@@ -622,10 +684,10 @@ export class Hub {
     this.pendingRequests.set(id, { user, timer });
   }
 
-  trackTask(taskID: string, agentID: string, ownerID: string, sessionID = ""): void {
+  trackTask(taskID: string, agentID: string, ownerID: string, sessionID = "", extra?: Partial<TaskState>): void {
     const timer = setTimeout(() => this.taskTimeoutCallback(taskID), this.taskTimeoutMs);
     timer.unref();
-    this.tasks.set(taskID, { agentID, ownerID, sessionID, timer, createdAt: Date.now() });
+    this.tasks.set(taskID, { agentID, ownerID, sessionID, timer, createdAt: Date.now(), depth: 0, ...extra });
     this.metrics.inc("ywm_tasks_created_total");
   }
 
@@ -639,21 +701,23 @@ export class Hub {
 
   // ---- 消息持久化（db 未配置时静默跳过，保持纯转发模式可运行） ----
 
+  // agent_id 兼容群聊路径：群会话传 "group:<gid>"（会话与消息的归因标识）
   persistUserMessage(params: proto.TaskCreateParams, sessionID: string, ownerID: string): void {
     if (!this.db) return;
     const db = this.db;
+    const agentID = params.agent_id ?? "";
     const now = Date.now();
     const run = async () => {
       const existing = await db.getSession(ownerID, sessionID);
       if (!existing) {
         const title = params.content.trim().replace(/\s+/g, " ").slice(0, 20) || "新会话";
-        await db.createSession({ id: sessionID, owner_id: ownerID, agent_id: params.agent_id, title });
+        await db.createSession({ id: sessionID, owner_id: ownerID, agent_id: agentID, title });
       }
       await db.appendMessage({
         id: crypto.randomUUID(),
         session_id: sessionID,
         owner_id: ownerID,
-        agent_id: params.agent_id,
+        agent_id: agentID,
         role: "user",
         content: JSON.stringify({
           text: params.content,
@@ -687,6 +751,33 @@ export class Hub {
     buf.chunks.push(chunk);
   }
 
+  // 交互应答持久化：把缓冲中的待决交互 chunk 标记为已答（answer 原样随任务落库），
+  // 前端从历史加载时据此渲染"已回复"而非重新弹待确认框
+  markRespondedChunk(taskID: string, confirmID: string, promptID: string, blockID: string, response: unknown): void {
+    const buf = this.taskBuffers.get(taskID);
+    if (!buf) return;
+    for (const c of buf.chunks as Array<BufferedInteractionChunk>) {
+      if (c.answered || !isInteractionChunk(c)) continue;
+      if (matchesInteractionChunk(c, confirmID, promptID, blockID)) {
+        c.answered = true;
+        c.answer = response ?? null;
+      }
+    }
+  }
+
+  // 交互框撤销（confirm_cancelled / 任务终结）：待决交互 chunk 标记 cancelled
+  markCancelledChunks(taskID: string, confirmID: string, reason: string): void {
+    const buf = this.taskBuffers.get(taskID);
+    if (!buf) return;
+    for (const c of buf.chunks as Array<BufferedInteractionChunk>) {
+      if (c.answered || c.cancelled || !isInteractionChunk(c)) continue;
+      if (confirmID === "" || c.confirm_id === confirmID) {
+        c.cancelled = true;
+        c.reason = reason;
+      }
+    }
+  }
+
   flushTaskBuffer(taskID: string, errorText?: string): void {
     const buf = this.taskBuffers.get(taskID);
     if (!buf || !this.db) {
@@ -694,6 +785,13 @@ export class Hub {
       return;
     }
     this.taskBuffers.delete(taskID);
+    // 任务终结时仍未应答的交互框一律标记撤销（与前端实时兜底"已撤销：任务结束"对齐）
+    for (const c of buf.chunks as Array<BufferedInteractionChunk>) {
+      if (!c.answered && !c.cancelled && isInteractionChunk(c)) {
+        c.cancelled = true;
+        c.reason = errorText || "task ended";
+      }
+    }
     if (buf.truncated) buf.chunks.push({ type: proto.CHUNK_TYPE_TEXT, content: proto.textContent("（输出过长，中间内容已截断）") });
     if (errorText) buf.chunks.push({ type: proto.CHUNK_TYPE_TEXT, content: proto.textContent(errorText) });
     if (buf.chunks.length === 0) return;
@@ -715,12 +813,32 @@ export class Hub {
       .catch((e) => logger.error("persist assistant message failed", { error: String(e) }));
   }
 
+  // 管理者编排：子任务终结（done/error/timeout）时把结果回投给管理者 agent
+  notifySubtaskResult(taskID: string, ts: TaskState, errorText?: string): void {
+    if (!ts.parentTaskID || !ts.invokerAgentID) return;
+    const buf = this.taskBuffers.get(taskID);
+    const chunks = [...(buf?.chunks ?? [])];
+    if (buf?.truncated) chunks.push({ type: proto.CHUNK_TYPE_TEXT, content: proto.textContent("（输出过长，中间内容已截断）") });
+    if (errorText) chunks.push({ type: proto.CHUNK_TYPE_TEXT, content: proto.textContent(errorText) });
+    this.forwardToAgent(ts.invokerAgentID, proto.newNotification(proto.METHOD_AGENT_TASK_RESULT, {
+      agent_id: ts.invokerAgentID, // connector 多实例托管时 client 按此路由到管理者实例
+      task_id: taskID,
+      parent_task_id: ts.parentTaskID,
+      group_id: ts.groupID ?? "",
+      target_agent_id: ts.agentID,
+      status: errorText ? "failed" : "completed",
+      chunks,
+      error: errorText,
+    } satisfies proto.AgentTaskResultParams));
+  }
+
   private taskTimeoutCallback(taskID: string): void {
     const ts = this.tasks.get(taskID);
     if (!ts) return;
     this.observeTaskEnd(taskID, "timeout");
     this.tasks.delete(taskID);
     logger.warn("task timeout", { task_id: taskID, agent_id: ts.agentID });
+    this.notifySubtaskResult(taskID, ts, "任务超时");
     this.flushTaskBuffer(taskID, "任务超时");
     // 通知 agent 中止任务，避免网关侧超时后 agent 还在空跑
     this.forwardToAgent(ts.agentID, proto.newNotification(proto.METHOD_AGENT_CANCEL, {
@@ -767,16 +885,40 @@ function withDb(hub: Hub, user: UserConn, msg: proto.Message, fn: (db: Db) => Pr
 async function handleSessionList(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
   const params = proto.decodeParams<proto.SessionListParams>(msg);
   const sessions = await db.listSessions(user.userID, params.agent_id || undefined);
+  const lastMsgs = await db.listLastMessages(user.userID);
+  const previews = new Map(lastMsgs.map((m) => [m.session_id, storedPreview(m.role, m.content)]));
   sendMsg(user.ws, proto.newResponse(msg.id ?? "", {
     sessions: sessions.map((s) => ({
       id: s.id,
       agent_id: s.agent_id,
       title: s.title,
+      workdir: s.workdir ?? null,
       created_at: s.created_at,
       updated_at: s.updated_at,
       message_count: Number(s.message_count ?? 0),
+      preview: previews.get(s.id) || "",
     })),
   } satisfies proto.SessionListResult));
+}
+
+// 从落库的消息 content JSON 里提取一句可展示的摘要（≤80 字）
+function storedPreview(role: string, content: string): string {
+  try {
+    const c = JSON.parse(content) as { text?: string; chunks?: { type?: string; text?: string; content?: unknown }[]; attachments?: { name?: string }[] };
+    let text = "";
+    if (role === "user") {
+      text = c.text || "";
+      if (!text && c.attachments?.length) text = "[附件] " + (c.attachments[0].name || "");
+    } else {
+      const t = (c.chunks || []).find((ch) => ch.type === "text");
+      if (t) text = typeof t.text === "string" ? t.text : "";
+      if (!text && c.chunks?.length) text = "[" + (c.chunks[c.chunks.length - 1].type || "chunk") + "]";
+    }
+    text = text.replace(/[#>*`\-]/g, " ").replace(/\s+/g, " ").trim();
+    return text.length > 80 ? text.slice(0, 80) + "…" : text;
+  } catch {
+    return "";
+  }
 }
 
 async function handleSessionCreate(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
@@ -790,24 +932,46 @@ async function handleSessionCreate(hub: Hub, user: UserConn, msg: proto.Message,
     sendMsg(user.ws, proto.newResponse(msg.id ?? "", sessionInfoOf(existing)));
     return;
   }
+  const workdir = params.workdir?.trim() || "";
+  if (workdir.length > 512) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "workdir too long (max 512)");
+    return;
+  }
   const s = await db.createSession({
     id: params.id || crypto.randomUUID(),
     owner_id: user.userID,
     agent_id: params.agent_id,
     title: params.title?.trim() || "新会话",
+    workdir: workdir || null,
   });
   sendMsg(user.ws, proto.newResponse(msg.id ?? "", sessionInfoOf(s)));
 }
 
-function sessionInfoOf(s: { id: string; agent_id: string; title: string; created_at: number; updated_at: number; message_count?: number }): proto.SessionInfo {
+function sessionInfoOf(s: { id: string; agent_id: string; title: string; workdir?: string | null; created_at: number; updated_at: number; message_count?: number }): proto.SessionInfo {
   return {
     id: s.id,
     agent_id: s.agent_id,
     title: s.title,
+    workdir: s.workdir ?? null,
     created_at: s.created_at,
     updated_at: s.updated_at,
     message_count: Number(s.message_count ?? 0),
   };
+}
+
+async function handleSessionSetWorkdir(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  const params = proto.decodeParams<proto.SessionSetWorkdirParams>(msg);
+  const workdir = params.workdir.trim();
+  if (workdir.length > 512) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "workdir too long (max 512)");
+    return;
+  }
+  const ok = await db.setSessionWorkdir(user.userID, params.id, workdir === "" ? null : workdir);
+  if (!ok) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "session not found");
+    return;
+  }
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", { status: "ok", workdir: workdir === "" ? null : workdir }));
 }
 
 async function handleSessionRename(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
@@ -889,6 +1053,160 @@ async function handleMessageList(hub: Hub, user: UserConn, msg: proto.Message, d
   } satisfies proto.MessageListResult));
 }
 
+// ---- 群组（多 agent 会话）----
+
+function groupInfoOf(g: { id: string; name: string; manager_agent_id: string | null; created_at: number }, agentIDs: string[]): proto.GroupInfo {
+  return { id: g.id, name: g.name, manager_agent_id: g.manager_agent_id, agent_ids: agentIDs, created_at: g.created_at };
+}
+
+// 校验 agent 归属：admin 可用他人 agent，普通用户仅自己的
+async function requireOwnedAgent(db: Db, user: UserConn, agentID: string): Promise<boolean> {
+  const row = await db.getAgentRow(agentID);
+  return !!row && (user.isAdmin || row.owner_id === user.userID);
+}
+
+// 备注名仅属主可设（昵称按 owner 私有，只影响自己的显示）
+async function handleAgentSetNickname(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  const params = proto.decodeParams<proto.AgentSetNicknameParams>(msg);
+  if (!params.agent_id) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "agent_id required");
+    return;
+  }
+  if (!(await requireOwnedAgent(db, user, params.agent_id))) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "agent not available");
+    return;
+  }
+  const nickname = params.nickname?.trim().slice(0, 256) ?? "";
+  await db.setNickname(user.userID, params.agent_id, nickname === "" ? null : nickname);
+  hub.broadcastAgentList();
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", {
+    status: "ok",
+    nickname: nickname === "" ? null : nickname,
+  } satisfies proto.AgentSetNicknameResult));
+}
+
+async function handleGroupCreate(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {  const params = proto.decodeParams<proto.GroupCreateParams>(msg);
+  const agentIDs = [...new Set(params.agent_ids ?? [])];
+  if (!params.name?.trim()) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "name required");
+    return;
+  }
+  if (agentIDs.length === 0) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "agent_ids required");
+    return;
+  }
+  for (const id of agentIDs) {
+    if (!(await requireOwnedAgent(db, user, id))) {
+      sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, `agent not available: ${id}`);
+      return;
+    }
+  }
+  if (params.manager_agent_id && !agentIDs.includes(params.manager_agent_id)) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "manager_agent_id must be a group member");
+    return;
+  }
+  const groupID = crypto.randomUUID();
+  const g = await db.createGroup({
+    id: groupID,
+    owner_id: user.userID,
+    name: params.name.trim().slice(0, 128),
+    manager_agent_id: params.manager_agent_id ?? null,
+  });
+  for (const id of agentIDs) await db.addGroupMember(groupID, id);
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", { group_id: groupID } satisfies proto.GroupCreateResult));
+}
+
+async function handleGroupList(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  const groups = await db.listGroups(user.userID);
+  const infos: proto.GroupInfo[] = [];
+  for (const g of groups) {
+    infos.push(groupInfoOf(g, await db.listGroupMembers(g.id)));
+  }
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", { groups: infos } satisfies proto.GroupListResult));
+}
+
+async function handleGroupDetail(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  const params = proto.decodeParams<proto.GroupDetailParams>(msg);
+  const g = await db.getGroup(user.userID, params.group_id);
+  if (!g) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "group not found");
+    return;
+  }
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", { group: groupInfoOf(g, await db.listGroupMembers(g.id)) } satisfies proto.GroupDetailResult));
+}
+
+async function handleGroupAdd(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  const params = proto.decodeParams<proto.GroupAddParams>(msg);
+  const g = await db.getGroup(user.userID, params.group_id);
+  if (!g) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "group not found");
+    return;
+  }
+  if (!(await requireOwnedAgent(db, user, params.agent_id))) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "agent not available");
+    return;
+  }
+  await db.addGroupMember(params.group_id, params.agent_id);
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", { status: "ok" }));
+}
+
+async function handleGroupRemove(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  const params = proto.decodeParams<proto.GroupRemoveParams>(msg);
+  const g = await db.getGroup(user.userID, params.group_id);
+  if (!g) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "group not found");
+    return;
+  }
+  if (!(await db.removeGroupMember(params.group_id, params.agent_id))) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "agent not in group");
+    return;
+  }
+  if (g.manager_agent_id === params.agent_id) await db.setGroupManager(user.userID, params.group_id, null);
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", { status: "ok" }));
+}
+
+async function handleGroupRename(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  const params = proto.decodeParams<proto.GroupRenameParams>(msg);
+  const name = (params.name || "").trim();
+  if (!name) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "name required");
+    return;
+  }
+  if (!(await db.getGroup(user.userID, params.group_id))) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "group not found");
+    return;
+  }
+  await db.renameGroup(user.userID, params.group_id, name.slice(0, 128));
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", { status: "ok" }));
+}
+
+async function handleGroupSetManager(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  const params = proto.decodeParams<proto.GroupSetManagerParams>(msg);
+  const g = await db.getGroup(user.userID, params.group_id);
+  if (!g) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "group not found");
+    return;
+  }
+  if (params.manager_agent_id) {
+    const members = await db.listGroupMembers(g.id);
+    if (!members.includes(params.manager_agent_id)) {
+      sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "manager_agent_id must be a group member");
+      return;
+    }
+  }
+  await db.setGroupManager(user.userID, params.group_id, params.manager_agent_id ?? null);
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", { status: "ok" }));
+}
+
+async function handleGroupDelete(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  const params = proto.decodeParams<proto.GroupDeleteParams>(msg);
+  if (!(await db.deleteGroup(user.userID, params.group_id))) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "group not found");
+    return;
+  }
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", { status: "ok" }));
+}
+
 // ---- 用户管理 ----
 
 function userInfoOf(u: DbUser): proto.UserInfo {
@@ -955,8 +1273,21 @@ async function handleUserCreate(hub: Hub, user: UserConn, msg: proto.Message, db
     sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "name already taken");
     return;
   }
+  let id: string = crypto.randomUUID();
+  const manualID = (params.id || "").trim();
+  if (manualID) {
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(manualID)) {
+      sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "id must be 1-64 chars of A-Za-z0-9._-");
+      return;
+    }
+    if (await db.getUserById(manualID)) {
+      sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "id already taken");
+      return;
+    }
+    id = manualID;
+  }
   const u: DbUser = {
-    id: crypto.randomUUID(),
+    id,
     name: params.name,
     password_hash: hashPassword(params.password),
     role: params.role === "admin" ? "admin" : "user",
@@ -968,6 +1299,34 @@ async function handleUserCreate(hub: Hub, user: UserConn, msg: proto.Message, db
   };
   await db.createUser(u);
   sendMsg(user.ws, proto.newResponse(msg.id ?? "", userInfoOf(u)));
+}
+
+async function handleUserDelete(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  if (!(await requireAdmin(hub, user, msg, db))) return;
+  const params = proto.decodeParams<proto.UserDeleteParams>(msg);
+  if (!params.id) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "id required");
+    return;
+  }
+  if (params.id === user.userID) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "cannot delete yourself");
+    return;
+  }
+  if (!(await db.getUserById(params.id))) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "user not found");
+    return;
+  }
+  const { agents } = await db.listAgentsPaged({ ownerID: params.id, limit: 100_000, offset: 0 });
+  // purge 先于 agents 行删除：群成员清理的子查询依赖 agents 表仍含这些行
+  await db.purgeUserOwnedData(params.id);
+  for (const row of agents) {
+    await doRemoveAgent(hub, db, row);
+  }
+  await db.deleteUser(params.id);
+  hub.invalidateAdminCache(params.id);
+  hub.kickUser(params.id);
+  hub.broadcastAgentList();
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", { status: "ok" }));
 }
 
 async function handleUserDisable(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
@@ -1019,17 +1378,20 @@ async function handleUserChangePassword(hub: Hub, user: UserConn, msg: proto.Mes
 // ---- 管理后台：agent 管理与概览 ----
 
 async function handleAgentList(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
-  if (!(await requireAdmin(hub, user, msg, db))) return;
+  // admin 可查全量（可按 owner_id 过滤）；普通用户强制限定为本人名下
+  const isAdmin = await hub.isAdminUser(user.userID, db);
   const params = proto.decodeParams<proto.AdminAgentListParams>(msg);
   const limit = Math.min(Math.max(params.limit ?? 50, 1), 200);
   const offset = Math.max(params.offset ?? 0, 0);
+  const ownerFilter = isAdmin ? (params.owner_id || undefined) : user.userID;
   const { agents, total } = await db.listAgentsPaged({
-    ownerID: params.owner_id || undefined,
+    ownerID: ownerFilter,
     status: params.status || undefined,
     query: params.query || undefined,
     limit,
     offset,
   });
+  const nicks = await db.listNicknamesForOwner(ownerFilter ?? user.userID);
   // 实时状态优先：内存/注册表覆盖 DB 行的展示状态，DB 提供离线/历史记录
   const liveByID = new Map<string, proto.AgentInfo>();
   for (const a of await hub.agentList()) liveByID.set(a.id, a);
@@ -1044,6 +1406,7 @@ async function handleAgentList(hub: Hub, user: UserConn, msg: proto.Message, db:
       id: row.id,
       owner_id: live?.owner_id ?? row.owner_id,
       name: live?.name ?? row.name,
+      nickname: nicks.get(row.id) ?? null,
       status: live?.status ?? (row.approval_status === "pending" ? "pending" : row.status),
       capabilities: live?.capabilities ?? caps,
       platform: live?.platform ?? plat,
@@ -1375,7 +1738,7 @@ function brandInfoOf(b: DbAgentBrand): proto.BrandInfo {
 }
 
 async function handleBrandList(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
-  if (!(await requireAdmin(hub, user, msg, db))) return;
+  // 只读目录：任何登录用户可读（发起配对/了解可接入的品牌）；写操作仍仅 admin
   sendMsg(user.ws, proto.newResponse(msg.id ?? "", {
     brands: (await db.listBrands()).map(brandInfoOf),
   } satisfies proto.BrandListResult));
@@ -1588,6 +1951,35 @@ async function handleAgentRemove(hub: Hub, user: UserConn, msg: proto.Message, d
   sendMsg(user.ws, proto.newResponse(msg.id ?? "", { status: "ok" }));
 }
 
+// 重启 connector 托管实例：不动 DB 行，通知 client 杀掉本地子进程并按原配置重建，
+// agent_id / 会话历史 / 审批状态全部保留（适合"程序更新了、命令没变"的场景）
+async function handleAgentRestart(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  const params = proto.decodeParams<proto.AgentRestartParams>(msg);
+  const row = await db.getAgentRow(params.agent_id);
+  if (!row) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "agent not found");
+    return;
+  }
+  if (!row.connector_id) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "agent is not connector-managed");
+    return;
+  }
+  if (row.owner_id !== user.userID && !(await requireAdmin(hub, user, msg, db))) return;
+  if (!hub.connectors.get(row.connector_id) && !hub.bus) {
+    sendError(user.ws, msg.id, proto.ERR_AGENT_NOT_FOUND, "connector not online");
+    return;
+  }
+  const notif = proto.newNotification(proto.METHOD_CONNECTOR_RESTART, {
+    agent_id: row.id,
+  } satisfies proto.ConnectorRestartParams);
+  hub.deliverToLocalConnector(row.connector_id, notif);
+  if (hub.bus) {
+    hub.bus.publishConnectorSync(row.connector_id, notif)
+      .catch((e) => logger.error("bus publish connector restart failed", { error: String(e) }));
+  }
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", { status: "ok", agent_id: row.id }));
+}
+
 // Agent 注册：治理模式（品牌目录非空）下必须带合法 brand_id，名称/能力以品牌行覆盖；
 // client 主动注册进入 pending 待审批，页面分配的实例（agents 行已存在且 approved）直接通过。
 // 一条连接可托管多个 agent（connector 模式）：每次注册创建独立 AgentConn，共享 ws。
@@ -1651,6 +2043,14 @@ async function handleAgentRegister(hub: Hub, base: AgentConn, params: proto.Regi
     connectorID: row?.connector_id ?? undefined,
     approval,
   };
+  // 同 id 已在其他连接上注册（僵尸实例与重启后的新实例并存）：踢掉旧连接。
+  // 否则后注册者覆盖路由表，旧实例还以为自己在线，对话被路由到僵尸上。
+  // 旧 client 收到 4002 必须退出而非重连，否则两个实例互踢。
+  const existing = hub.agents.get(params.agent_id);
+  if (existing && existing.ws !== base.ws) {
+    logger.warn("agent re-registered on new connection, kicking old", { agent_id: params.agent_id });
+    existing.ws.close(4002, "replaced by new connection");
+  }
   hub.registerAgent(a);
   sendMsg(base.ws, proto.newResponse(msg.id ?? "", {
     status: "ok",
@@ -1705,6 +2105,13 @@ export function handleAgentMessage(hub: Hub, agent: AgentConn, raw: string): voi
       if (!params.connector_id) {
         sendError(agent.ws, msg.id, proto.ERR_INVALID_PARAMS, "connector_id required");
         break;
+      }
+      // 同 connector_id 已在其他连接上报到（双实例并存）：踢掉旧连接，
+      // 保证同一时刻只有一个实例承载该 connector 的 agent
+      const prevConn = hub.connectors.get(params.connector_id);
+      if (prevConn && prevConn.ws !== agent.ws) {
+        logger.warn("connector re-hello on new connection, kicking old", { connector_id: params.connector_id });
+        prevConn.ws.close(4002, "replaced by new connection");
       }
       agent.connectorID = params.connector_id;
       if (params.platform) agent.platform = params.platform;
@@ -1835,6 +2242,15 @@ export function handleAgentMessage(hub: Hub, agent: AgentConn, raw: string): voi
       break;
     }
 
+    case proto.METHOD_AGENT_TASK_INVOKE: {
+      const params = proto.decodeParams<proto.AgentTaskInvokeParams>(msg);
+      void handleAgentTaskInvoke(hub, agent, msg, params).catch((e) => {
+        logger.error("agent.task.invoke failed", { error: String(e) });
+        sendError(agent.ws, msg.id, proto.ERR_INTERNAL_ERROR, "internal error");
+      });
+      break;
+    }
+
     case proto.METHOD_PROGRESS: {
       const params = proto.decodeParams<proto.ProgressParams>(msg);
       const value = params.value;
@@ -1862,18 +2278,25 @@ export function handleAgentMessage(hub: Hub, agent: AgentConn, raw: string): voi
         reason: value.reason,
       };
       const notif = proto.newNotification(proto.METHOD_ADMIN_PROGRESS, progress);
+      const ts = hub.tasks.get(value.task_id);
+      if (ts?.groupID) progress.group_id = ts.groupID;
+      if (ts?.parentTaskID) progress.parent_task_id = ts.parentTaskID;
       hub.forwardToUsers(src.ownerID, notif);
       // 跨属主任务（admin 操作他人 agent）：进度同时发给任务发起者
-      const ts = hub.tasks.get(value.task_id);
       if (ts && ts.ownerID !== src.ownerID) hub.forwardToUsers(ts.ownerID, notif);
       {
         const sessionID = value.session_id ?? ts?.sessionID ?? "";
-        if (sessionID !== "") {
+        // confirm_cancelled 是撤销信号：标记待决 chunk 后不单独落库为 chunk
+        if (value.type === proto.CHUNK_TYPE_CONFIRM_CANCELLED) {
+          hub.markCancelledChunks(value.task_id, value.confirm_id ?? "",
+            value.reason ?? proto.CONFIRM_CANCEL_REASON_TASK_CANCELLED);
+        } else if (sessionID !== "") {
           hub.bufferProgressChunk(value.task_id, src.ownerID, src.id, sessionID,
             progress as unknown as proto.LocalAgentChunk);
         }
       }
       if (value.done || (value.error !== undefined && value.error !== "")) {
+        if (ts) hub.notifySubtaskResult(value.task_id, ts, value.error);
         hub.observeTaskEnd(value.task_id, value.error !== undefined && value.error !== "" ? "failed" : "completed");
         hub.untrackTask(value.task_id);
         hub.flushTaskBuffer(value.task_id, value.error);
@@ -1891,7 +2314,19 @@ export function handleAgentMessage(hub: Hub, agent: AgentConn, raw: string): voi
 
 async function handleTaskCreate(hub: Hub, user: UserConn, msg: proto.Message): Promise<void> {
   const params = proto.decodeParams<proto.TaskCreateParams>(msg);
-  const agent = await hub.resolveAgent(params.agent_id);
+  // 会话绑定的工作目录注入 metadata.workdir（单 agent / 群聊 / 编排子任务统一经此）；
+  // 本地 Agent 自行决定如何使用，不识别则忽略，见 local-agent-interface §6.1
+  if (hub.db) {
+    const sess = await hub.db.getSession(user.userID, params.session_id || `${params.task_id}-session`).catch(() => undefined);
+    if (sess?.workdir) {
+      params.metadata = { ...(params.metadata ?? {}), workdir: sess.workdir };
+    }
+  }
+  if (params.group_id) {
+    await handleGroupTaskCreate(hub, user, msg, params);
+    return;
+  }
+  const agent = await hub.resolveAgent(params.agent_id ?? "");
   if (!agent) {
     sendError(user.ws, msg.id, proto.ERR_AGENT_NOT_FOUND, "agent not found");
     return;
@@ -1901,7 +2336,7 @@ async function handleTaskCreate(hub: Hub, user: UserConn, msg: proto.Message): P
     return;
   }
   // 待审批 agent 不接任务（仅本地连接可能处于 pending；注册表里的都已批准）
-  if (hub.getAgent(params.agent_id)?.approval === "pending") {
+  if (hub.getAgent(params.agent_id ?? "")?.approval === "pending") {
     sendError(user.ws, msg.id, proto.ERR_UNAUTHORIZED, "agent pending approval");
     return;
   }
@@ -1911,10 +2346,10 @@ async function handleTaskCreate(hub: Hub, user: UserConn, msg: proto.Message): P
   }
   if (msg.id) hub.trackPendingRequest(msg.id, user);
   const sessionID = params.session_id || `${params.task_id}-session`;
-  hub.trackTask(params.task_id, params.agent_id, user.userID, sessionID);
+  hub.trackTask(params.task_id, params.agent_id ?? "", user.userID, sessionID);
   hub.persistUserMessage(params, sessionID, user.userID);
 
-  hub.forwardToAgent(params.agent_id, proto.newRequest(msg.id ?? "", proto.METHOD_AGENT_CHAT, {
+  hub.forwardToAgent(params.agent_id ?? "", proto.newRequest(msg.id ?? "", proto.METHOD_AGENT_CHAT, {
     task_id: params.task_id,
     session_id: sessionID,
     context_id: params.context_id,
@@ -1922,6 +2357,204 @@ async function handleTaskCreate(hub: Hub, user: UserConn, msg: proto.Message): P
     content: params.content,
     metadata: params.metadata,
   } satisfies proto.AgentChatParams));
+}
+
+// 群上下文注入：转发 agent.chat 时在 metadata.group 带上群/成员/管理者信息，
+// 让本地 Agent 无需额外配置即可感知自己是否为管理者、群里有谁、本条 @ 了谁。
+// metadata 是自由扩展字段，不识别的 Agent 自动忽略，无兼容性问题。
+async function buildGroupMetadata(
+  hub: Hub, ownerID: string,
+  group: { id: string; name: string; manager_agent_id: string | null },
+  members: string[], mentions: string[], base?: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const meta: Record<string, unknown> = { ...(base ?? {}) };
+  let nameOf = new Map<string, string>();
+  if (hub.db) {
+    const page = await hub.db.listAgentsPaged({ ownerID, limit: 1000, offset: 0 });
+    nameOf = new Map(page.agents.map((a) => [a.id, a.name]));
+  }
+  meta.group = {
+    group_id: group.id,
+    group_name: group.name,
+    manager_agent_id: group.manager_agent_id,
+    members: members.map((id) => ({ agent_id: id, name: nameOf.get(id) ?? id })),
+    mentions,
+  };
+  return meta;
+}
+
+// 管理者 agent 编排：父任务的处理连接经 agent 通道调用群内另一 agent（子任务）。
+// 鉴权：调用连接 === 承载父任务的连接 + 群管理者 === 父任务 agent + 目标同群且属主一致；
+// depth 硬限 1（编排产生的子任务不能再发起编排）。多实例下任务态在创建实例，
+// 跨实例 invoke 会得到 parent task not found（编排要求管理者与任务同实例）。
+async function handleAgentTaskInvoke(
+  hub: Hub, agent: AgentConn, msg: proto.Message, params: proto.AgentTaskInvokeParams,
+): Promise<void> {
+  if (!hub.db) {
+    sendError(agent.ws, msg.id, proto.ERR_INTERNAL_ERROR, "storage not configured");
+    return;
+  }
+  const ts = hub.tasks.get(params.parent_task_id);
+  if (!ts) {
+    sendError(agent.ws, msg.id, proto.ERR_INVALID_PARAMS, "parent task not found");
+    return;
+  }
+  if (ts.depth >= 1) {
+    sendError(agent.ws, msg.id, proto.ERR_ORCHESTRATION_VIOLATION, "nested orchestration not allowed");
+    return;
+  }
+  const parentConn = hub.agents.get(ts.agentID);
+  if (!parentConn || parentConn.ws !== agent.ws) {
+    sendError(agent.ws, msg.id, proto.ERR_ORCHESTRATION_VIOLATION, "parent task not served by this connection");
+    return;
+  }
+  const db = hub.db;
+  const group = await db.getGroup(ts.ownerID, params.group_id);
+  if (!group || group.manager_agent_id !== ts.agentID) {
+    sendError(agent.ws, msg.id, proto.ERR_ORCHESTRATION_VIOLATION, "caller is not the group manager");
+    return;
+  }
+  const members = await db.listGroupMembers(group.id);
+  if (params.target_agent_id === ts.agentID || !members.includes(params.target_agent_id)) {
+    sendError(agent.ws, msg.id, proto.ERR_ORCHESTRATION_VIOLATION, "target agent not in group");
+    return;
+  }
+  const target = await hub.resolveAgent(params.target_agent_id);
+  if (!target || target.ownerID !== ts.ownerID) {
+    sendError(agent.ws, msg.id, proto.ERR_AGENT_NOT_FOUND, "target agent not found");
+    return;
+  }
+  if (hub.getAgent(params.target_agent_id)?.approval === "pending") {
+    sendError(agent.ws, msg.id, proto.ERR_UNAUTHORIZED, "target agent pending approval");
+    return;
+  }
+  if (!hub.taskLimiter.allow(ts.ownerID)) {
+    sendError(agent.ws, msg.id, proto.ERR_RATE_LIMITED, "too many tasks");
+    return;
+  }
+  const childTaskID = `${params.parent_task_id}@${crypto.randomUUID().slice(0, 8)}`;
+  hub.trackTask(childTaskID, params.target_agent_id, ts.ownerID, ts.sessionID, {
+    groupID: group.id,
+    parentTaskID: params.parent_task_id,
+    invokerAgentID: ts.agentID,
+    depth: ts.depth + 1,
+  });
+  const childMeta = await buildGroupMetadata(
+    hub, ts.ownerID, group, members, [params.target_agent_id], params.metadata);
+  // 子任务复用父任务会话：会话绑定的 workdir 同样注入（manager 未显式携带时兜底）
+  const childSession = ts.sessionID
+    ? await hub.db!.getSession(ts.ownerID, ts.sessionID).catch(() => undefined)
+    : undefined;
+  if (childSession?.workdir && childMeta.workdir === undefined) {
+    childMeta.workdir = childSession.workdir;
+  }
+  hub.forwardToAgent(params.target_agent_id, proto.newRequest("", proto.METHOD_AGENT_CHAT, {
+    task_id: childTaskID,
+    session_id: ts.sessionID,
+    type: params.type,
+    content: params.content,
+    metadata: childMeta,
+  } satisfies proto.AgentChatParams));
+  sendMsg(agent.ws, proto.newResponse(msg.id ?? "", { task_id: childTaskID, status: "dispatched" } satisfies proto.AgentTaskInvokeResult));
+}
+
+// 群聊路径：@提及 路由（mentions 空则拒绝，保证"默认不触发"），多目标 fan-out 派生 task_id（<tid>#<n>）。
+// 网关立即应答 task.create（不等 agent），避免多个 agent 对同一 msg.id 重复响应。
+async function handleGroupTaskCreate(
+  hub: Hub, user: UserConn, msg: proto.Message, params: proto.TaskCreateParams,
+): Promise<void> {
+  if (!hub.db) {
+    sendError(user.ws, msg.id, proto.ERR_INTERNAL_ERROR, "storage not configured");
+    return;
+  }
+  const db = hub.db;
+  const group = await db.getGroup(user.userID, params.group_id!);
+  if (!group) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "group not found");
+    return;
+  }
+  const members = await db.listGroupMembers(group.id);
+  const mentions = [...new Set(params.mentions ?? [])];
+  if (mentions.length === 0) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "mentions required in group chat (@agent or @all)");
+    return;
+  }
+  const targets = mentions.includes("all") ? members : mentions;
+  if (targets.length === 0) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "group has no member agents");
+    return;
+  }
+  if (targets.length > MAX_GROUP_FANOUT) {
+    sendError(user.ws, msg.id, proto.ERR_ORCHESTRATION_VIOLATION, `too many targets (max ${MAX_GROUP_FANOUT})`);
+    return;
+  }
+  for (const m of targets) {
+    if (!members.includes(m)) {
+      sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, `agent not in group: ${m}`);
+      return;
+    }
+  }
+  if (!hub.taskLimiter.allow(user.userID)) {
+    sendError(user.ws, msg.id, proto.ERR_RATE_LIMITED, "too many tasks, please slow down");
+    return;
+  }
+  // 离线目标不派发（forwardToAgent 只会静默丢弃）：跳过并在响应中告知
+  const online: string[] = [];
+  const skipped: string[] = [];
+  for (const t of targets) {
+    if (await hub.resolveAgent(t)) online.push(t);
+    else skipped.push(t);
+  }
+  if (online.length === 0) {
+    sendError(user.ws, msg.id, proto.ERR_AGENT_NOT_FOUND, `all mentioned agents offline: ${skipped.join(", ")}`);
+    return;
+  }
+  const sessionID = params.session_id || `${params.task_id}-session`;
+  // 群会话标识 group:<gid>；一条 user 消息只落一次
+  hub.persistUserMessage({ ...params, agent_id: `group:${group.id}` }, sessionID, user.userID);
+
+  const taskIDs: string[] = [];
+  const groupMeta = await buildGroupMetadata(
+    hub, user.userID, group, members, online, params.metadata);
+  online.forEach((target, i) => {
+    const taskID = online.length === 1 ? params.task_id : `${params.task_id}#${i}`;
+    taskIDs.push(taskID);
+    hub.trackTask(taskID, target, user.userID, sessionID, { groupID: group.id });
+    hub.forwardToAgent(target, proto.newRequest("", proto.METHOD_AGENT_CHAT, {
+      task_id: taskID,
+      session_id: sessionID,
+      context_id: params.context_id,
+      type: params.type,
+      content: params.content,
+      metadata: groupMeta,
+    } satisfies proto.AgentChatParams));
+  });
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", {
+    task_id: params.task_id,
+    status: "accepted",
+    group_id: group.id,
+    task_ids: taskIDs,
+    ...(skipped.length ? { skipped_offline: skipped } : {}),
+  }));
+}
+
+// 群级取消：按基任务 id 收敛 fan-out 派生任务（<tid>#n）与编排子任务（parent 指向本批），
+// 逐个下发 agent.cancel；任务清理仍由 agent 的 done 进度驱动（与单 agent 取消一致）
+function handleGroupTaskCancel(hub: Hub, user: UserConn, msg: proto.Message, params: proto.TaskCancelParams): void {
+  const prefix = `${params.task_id}#`;
+  const matches: Array<[string, TaskState]> = [];
+  for (const [tid, ts] of hub.tasks) {
+    const inFamily = tid === params.task_id || tid.startsWith(prefix)
+      || (ts.parentTaskID !== undefined && (ts.parentTaskID === params.task_id || ts.parentTaskID.startsWith(prefix)));
+    if (inFamily && (ts.ownerID === user.userID || user.isAdmin)) matches.push([tid, ts]);
+  }
+  for (const [tid, ts] of matches) {
+    hub.forwardToAgent(ts.agentID, proto.newNotification(proto.METHOD_AGENT_CANCEL, {
+      task_id: tid,
+      session_id: ts.sessionID || undefined,
+    } satisfies proto.AgentCancelParams));
+  }
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", { task_id: params.task_id, status: "cancelling" } satisfies proto.TaskCancelResult));
 }
 
 // cancel/respond 的公共转发逻辑：agent_id 为空时广播给该用户名下所有 agent
@@ -1976,7 +2609,12 @@ export function handleUserMessage(hub: Hub, user: UserConn, raw: string): void {
     }
 
     case proto.METHOD_TASK_CANCEL: {
-      void handleTaskForward(hub, user, msg, proto.METHOD_AGENT_CANCEL, proto.decodeParams<proto.TaskCancelParams>(msg)).catch((e) => {
+      const cancelParams = proto.decodeParams<proto.TaskCancelParams>(msg);
+      if (cancelParams.group_id) {
+        handleGroupTaskCancel(hub, user, msg, cancelParams);
+        break;
+      }
+      void handleTaskForward(hub, user, msg, proto.METHOD_AGENT_CANCEL, cancelParams).catch((e) => {
         logger.error("task.cancel failed", { error: String(e) });
         sendError(user.ws, msg.id, proto.ERR_INTERNAL_ERROR, "internal error");
       });
@@ -1985,6 +2623,7 @@ export function handleUserMessage(hub: Hub, user: UserConn, raw: string): void {
 
     case proto.METHOD_TASK_RESPOND: {
       const params = proto.decodeParams<proto.TaskRespondParams>(msg);
+      hub.markRespondedChunk(params.task_id, params.confirm_id ?? "", params.prompt_id ?? "", params.block_id ?? "", params.response);
       void handleTaskForward(hub, user, msg, proto.METHOD_AGENT_RESPOND, {
         task_id: params.task_id,
         session_id: params.session_id,
@@ -2012,12 +2651,48 @@ export function handleUserMessage(hub: Hub, user: UserConn, raw: string): void {
       withDb(hub, user, msg, (db) => handleSessionRename(hub, user, msg, db));
       break;
 
+    case proto.METHOD_SESSION_SET_WORKDIR:
+      withDb(hub, user, msg, (db) => handleSessionSetWorkdir(hub, user, msg, db));
+      break;
+
     case proto.METHOD_SESSION_DELETE:
       withDb(hub, user, msg, (db) => handleSessionDelete(hub, user, msg, db));
       break;
 
     case proto.METHOD_MESSAGE_LIST:
       withDb(hub, user, msg, (db) => handleMessageList(hub, user, msg, db));
+      break;
+
+    case proto.METHOD_GROUP_CREATE:
+      withDb(hub, user, msg, (db) => handleGroupCreate(hub, user, msg, db));
+      break;
+
+    case proto.METHOD_GROUP_LIST:
+      withDb(hub, user, msg, (db) => handleGroupList(hub, user, msg, db));
+      break;
+
+    case proto.METHOD_GROUP_DETAIL:
+      withDb(hub, user, msg, (db) => handleGroupDetail(hub, user, msg, db));
+      break;
+
+    case proto.METHOD_GROUP_ADD:
+      withDb(hub, user, msg, (db) => handleGroupAdd(hub, user, msg, db));
+      break;
+
+    case proto.METHOD_GROUP_REMOVE:
+      withDb(hub, user, msg, (db) => handleGroupRemove(hub, user, msg, db));
+      break;
+
+    case proto.METHOD_GROUP_RENAME:
+      withDb(hub, user, msg, (db) => handleGroupRename(hub, user, msg, db));
+      break;
+
+    case proto.METHOD_GROUP_SET_MANAGER:
+      withDb(hub, user, msg, (db) => handleGroupSetManager(hub, user, msg, db));
+      break;
+
+    case proto.METHOD_GROUP_DELETE:
+      withDb(hub, user, msg, (db) => handleGroupDelete(hub, user, msg, db));
       break;
 
     case proto.METHOD_USER_LIST:
@@ -2042,6 +2717,10 @@ export function handleUserMessage(hub: Hub, user: UserConn, raw: string): void {
 
     case proto.METHOD_USER_SET_ROLE:
       withDb(hub, user, msg, (db) => handleUserSetRole(hub, user, msg, db));
+      break;
+
+    case proto.METHOD_USER_DELETE:
+      withDb(hub, user, msg, (db) => handleUserDelete(hub, user, msg, db));
       break;
 
     case proto.METHOD_AGENT_LIST:
@@ -2106,6 +2785,14 @@ export function handleUserMessage(hub: Hub, user: UserConn, raw: string): void {
 
     case proto.METHOD_AGENT_REMOVE:
       withDb(hub, user, msg, (db) => handleAgentRemove(hub, user, msg, db));
+      break;
+
+    case proto.METHOD_AGENT_RESTART:
+      withDb(hub, user, msg, (db) => handleAgentRestart(hub, user, msg, db));
+      break;
+
+    case proto.METHOD_AGENT_SET_NICKNAME:
+      withDb(hub, user, msg, (db) => handleAgentSetNickname(hub, user, msg, db));
       break;
 
     case proto.METHOD_PAIRING_CREATE:
@@ -2732,7 +3419,7 @@ location.replace('/');
           // 一条连接可能托管多个 agent（connector 模式）：按 ws 全部注销
           const ids = [...hub.agents.values()].filter((a) => a.ws === ws).map((a) => a.id);
           for (const id of ids) hub.unregisterAgent(id);
-          if (agent.connectorID) hub.unregisterConnector(agent.connectorID);
+          if (agent.connectorID) hub.unregisterConnector(agent.connectorID, ws);
           // 配对挂起连接断开：移出待接入列表
           for (const [cid, p] of hub.pendingPairs) {
             if (p.conn.ws === ws) hub.pendingPairs.delete(cid);
@@ -2740,7 +3427,10 @@ location.replace('/');
         });
         ws.on("error", () => ws.close());
       } else {
-        const user: UserConn = { ws, userID, lastHeartbeat: Date.now(), alive: true, isAdmin };
+        const user: UserConn = {
+          ws, userID, lastHeartbeat: Date.now(), alive: true, isAdmin,
+          ownOnly: url.searchParams.get("scope") === "own",
+        };
         hub.registerUser(user);
         const ticker = watchPong(ws, user, () => {
           user.lastHeartbeat = Date.now();

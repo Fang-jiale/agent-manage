@@ -34,3 +34,7 @@ am-offline.mjs
 # third-party packages
 dcywzc-ywcoder-*.tgz
 *.tgz
+
+# runtime workdirs (connector shim)
+.sessions/
+.ywcoder/

@@ -574,3 +574,71 @@ test("connector 自助通道：brand.list / agent.assign / agent.remove 限本 c
     await fx.close();
   }
 });
+
+test("connector 重连：旧连接迟到的 close 不误删新连接的 connector 条目", async (t) => {
+  const fx = await setup(t);
+  if (!fx) return;
+  const conns: Conn[] = [];
+  try {
+    const admin = await Conn.dial(`${fx.base}/ws/admin?token=${jwtFor(fx.adminID)}`);
+    conns.push(admin);
+    await admin.next(proto.METHOD_ADMIN_AGENT_LIST);
+    const connectorID = `conn-${crypto.randomUUID().slice(0, 8)}`;
+
+    const a = await Conn.dial(`${fx.base}/ws/agent?token=${jwtFor(fx.aliceID)}`);
+    conns.push(a);
+    await a.rpc("ha", proto.METHOD_CONNECTOR_HELLO, { connector_id: connectorID } satisfies proto.ConnectorHelloParams);
+    await a.next(proto.METHOD_CONNECTOR_SYNC);
+
+    // 同 connector_id 重连（新连接接管）
+    const b = await Conn.dial(`${fx.base}/ws/agent?token=${jwtFor(fx.aliceID)}`);
+    conns.push(b);
+    await b.rpc("hb", proto.METHOD_CONNECTOR_HELLO, { connector_id: connectorID } satisfies proto.ConnectorHelloParams);
+    await b.next(proto.METHOD_CONNECTOR_SYNC);
+
+    // 旧连接迟到的 close（半连接/事件乱序）：不应删掉新连接的条目
+    a.close();
+    await new Promise((r) => setTimeout(r, 300));
+
+    const cl = await admin.rpc("cl", proto.METHOD_CONNECTOR_LIST, {});
+    assert.ok(
+      (cl.result as proto.ConnectorListResult).connectors.some((c) => c.id === connectorID),
+      "connector entry should survive stale close",
+    );
+  } finally {
+    for (const c of conns) c.close();
+    await fx.close();
+  }
+});
+
+test("connector 双实例：后报到者踢掉旧连接（4002），条目归新连接", async (t) => {
+  const fx = await setup(t);
+  if (!fx) return;
+  const conns: Conn[] = [];
+  try {
+    const connectorID = `conn-${crypto.randomUUID().slice(0, 8)}`;
+    const a = await Conn.dial(`${fx.base}/ws/agent?token=${jwtFor(fx.aliceID)}`);
+    conns.push(a);
+    await a.rpc("ha", proto.METHOD_CONNECTOR_HELLO, { connector_id: connectorID } satisfies proto.ConnectorHelloParams);
+    await a.next(proto.METHOD_CONNECTOR_SYNC);
+
+    const b = await Conn.dial(`${fx.base}/ws/agent?token=${jwtFor(fx.aliceID)}`);
+    conns.push(b);
+    await b.rpc("hb", proto.METHOD_CONNECTOR_HELLO, { connector_id: connectorID } satisfies proto.ConnectorHelloParams);
+    await b.next(proto.METHOD_CONNECTOR_SYNC);
+
+    // 旧连接被 4002 踢掉（client 收到 4002 应退出而非重连）
+    const closed = await a.closed;
+    assert.equal(closed.code, 4002);
+
+    // connector 条目归新连接
+    const admin = await Conn.dial(`${fx.base}/ws/admin?token=${jwtFor(fx.adminID)}`);
+    conns.push(admin);
+    await admin.next(proto.METHOD_ADMIN_AGENT_LIST);
+    const cl = await admin.rpc("cl", proto.METHOD_CONNECTOR_LIST, {});
+    assert.ok((cl.result as proto.ConnectorListResult).connectors.some((c) => c.id === connectorID));
+  } finally {
+    for (const c of conns) c.close();
+    await fx.close();
+  }
+});

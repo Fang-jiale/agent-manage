@@ -414,6 +414,88 @@ function normalizeDecision(response: unknown): "allow" | "deny" | "cancel" | und
   return undefined;
 }
 
+// ---- 管理者编排桥接：本地 Agent task.invoke ⇄ 网关 agent.task.invoke ----
+
+interface PendingInvoke {
+  adapter: LocalAgentAdapter;
+  agentMsgID: string; // 本地 Agent 请求的 id，网关响应后按此回写
+}
+
+// 本地 Agent 发来 task.invoke（请求）→ 转成网关 agent.task.invoke。
+// 鉴权（管理者身份、同群目标、防递归）全部在网关做，client 只透传结果。
+function forwardLocalInvoke(
+  ws: WebSocket, agentID: string, adapter: LocalAgentAdapter,
+  ev: LocalAgentEvent, pendingInvokes: Map<string, PendingInvoke>,
+): void {
+  const reply = (result?: unknown, err?: [number, string]): void => {
+    if (!ev.id) return;
+    adapter.sendToAgent?.(err
+      ? proto.newErrorResponse(ev.id, err[0], err[1])
+      : proto.newResponse(ev.id, result));
+  };
+  if (!ev.id) return;
+  const p = (ev.params ?? {}) as {
+    parent_task_id?: string; group_id?: string; target_agent_id?: string;
+    type?: string; content?: string; metadata?: Record<string, unknown>;
+  };
+  if (!p.parent_task_id || !p.group_id || !p.target_agent_id) {
+    reply(undefined, [proto.ERR_INVALID_PARAMS, "parent_task_id / group_id / target_agent_id are required"]);
+    return;
+  }
+  const rpcID = `inv-${agentID}-${ev.id}`;
+  pendingInvokes.set(rpcID, { adapter, agentMsgID: ev.id });
+  safeSend(ws, proto.newRequest(rpcID, proto.METHOD_AGENT_TASK_INVOKE, {
+    parent_task_id: p.parent_task_id,
+    group_id: p.group_id,
+    target_agent_id: p.target_agent_id,
+    type: p.type || "chat",
+    content: p.content ?? "",
+    metadata: p.metadata,
+  } satisfies proto.AgentTaskInvokeParams));
+}
+
+// 网关对 agent.task.invoke 的响应 → 回给本地 Agent（result/error 原样透传）。
+// 返回 true 表示该消息是桥接的 invoke 响应，已消费。
+function resolveLocalInvoke(msg: proto.Message, pendingInvokes: Map<string, PendingInvoke>): boolean {
+  if (!msg.id || !pendingInvokes.has(msg.id)) return false;
+  const p = pendingInvokes.get(msg.id)!;
+  pendingInvokes.delete(msg.id);
+  p.adapter.sendToAgent?.(msg.error
+    ? proto.newErrorResponse(p.agentMsgID, msg.error.code, msg.error.message)
+    : proto.newResponse(p.agentMsgID, msg.result));
+  return true;
+}
+
+// 网关连接断开：给未决 invoke 回错误，避免本地 Agent 挂等
+function failLocalInvokes(pendingInvokes: Map<string, PendingInvoke>, reason: string): void {
+  for (const p of pendingInvokes.values()) {
+    p.adapter.sendToAgent?.(proto.newErrorResponse(p.agentMsgID, proto.ERR_INTERNAL_ERROR, reason));
+  }
+  pendingInvokes.clear();
+}
+
+// 网关 agent.task.result（notification）→ 本地 Agent task.subtask_result
+function forwardSubtaskResult(adapter: LocalAgentAdapter, params: unknown): void {
+  adapter.sendToAgent?.(proto.newNotification(proto.METHOD_TASK_SUBTASK_RESULT, params));
+}
+
+// 事件循环的统一入口：编排请求走桥接，其余按生命周期消息翻译。
+// 返回翻译后的网关消息（无需上送时返回 undefined）。
+function bridgeAgentEvent(
+  ws: WebSocket | null, agentID: string, adapter: LocalAgentAdapter,
+  ev: LocalAgentEvent, pendingInvokes: Map<string, PendingInvoke>,
+): proto.Message | undefined {
+  if (ev.method === proto.METHOD_TASK_INVOKE) {
+    if (!ws) {
+      if (ev.id) adapter.sendToAgent?.(proto.newErrorResponse(ev.id, proto.ERR_INTERNAL_ERROR, "gateway not connected"));
+      return undefined;
+    }
+    forwardLocalInvoke(ws, agentID, adapter, ev, pendingInvokes);
+    return undefined;
+  }
+  return translateLifecycleEvent(agentID, ev);
+}
+
 function sendRegister(ws: WebSocket, agentID: string, caps: proto.Capability[]): void {
   if (caps.length === 0) {
     caps = [{ type: "chat", name: "general", description: "通用对话能力" }];
@@ -494,11 +576,13 @@ function newLocalUIState(): LocalUIState {
   };
 }
 
-async function mainConnector(cfg: ClientConfig, connectorID: string, ui: LocalUIState): Promise<void> {
+// 返回 true 表示被新实例顶替（4002），调用方应直接退出进程
+async function mainConnector(cfg: ClientConfig, connectorID: string, ui: LocalUIState): Promise<boolean> {
   const hosted = new Map<string, HostedAgent>();
   let currentWS: WebSocket | null = null;
   const platform: proto.PlatformInfo = { os: goOS(), arch: goArch(), hostname: os.hostname() };
   const pendingRPC = new Map<string, { resolve: (m: proto.Message) => void; timer: NodeJS.Timeout }>();
+  const pendingInvokes = new Map<string, PendingInvoke>();
 
   ui.hosted = hosted;
   ui.rpc = (method, params) => new Promise((resolve, reject) => {
@@ -567,7 +651,7 @@ async function mainConnector(cfg: ClientConfig, connectorID: string, ui: LocalUI
         void (async () => {
           for await (const ev of events) {
             if (ev.method === proto.METHOD_LIFECYCLE_REGISTER) continue;
-            const m = translateLifecycleEvent(a.agent_id, ev);
+            const m = bridgeAgentEvent(currentWS, a.agent_id, adapter, ev, pendingInvokes);
             if (m && currentWS) safeSend(currentWS, m);
           }
         })();
@@ -607,6 +691,10 @@ async function mainConnector(cfg: ClientConfig, connectorID: string, ui: LocalUI
 
   let interrupted = false;
   process.on("SIGINT", () => {
+    interrupted = true;
+  });
+  // SIGTERM（kill 默认信号）同样走优雅退出：否则 stdio 子进程全部变孤儿
+  process.on("SIGTERM", () => {
     interrupted = true;
   });
 
@@ -664,10 +752,30 @@ async function mainConnector(cfg: ClientConfig, connectorID: string, ui: LocalUI
           return;
         }
       }
+      if (resolveLocalInvoke(msg, pendingInvokes)) return;
       switch (msg.method) {
         case proto.METHOD_CONNECTOR_SYNC:
           applySync(proto.decodeParams<proto.ConnectorSyncParams>(msg));
           break;
+        case proto.METHOD_CONNECTOR_RESTART: {
+          // 重启单实例：杀子进程后按原目标重建，agent_id 不变（程序更新场景）
+          const p = proto.decodeParams<proto.ConnectorRestartParams>(msg);
+          const target = ui.lastSync.find((x) => x.agent_id === p.agent_id);
+          if (!hosted.has(p.agent_id)) break; // 未托管实例：sync 会按需拉起
+          void (async () => {
+            logger.info("agent restarting", { agent_id: p.agent_id });
+            await dropAgent(p.agent_id);
+            if (target) await ensureAgent(target);
+          })().catch((e) => logger.error("agent restart failed", { agent_id: p.agent_id, error: String(e) }));
+          break;
+        }
+        case proto.METHOD_AGENT_TASK_RESULT: {
+          // 编排子任务结果 → 管理者实例（agent_id 指明接收方）
+          const p = (msg.params ?? {}) as { agent_id?: string };
+          const h = hosted.get(p.agent_id ?? "");
+          if (h) forwardSubtaskResult(h.adapter, msg.params);
+          break;
+        }
         case proto.METHOD_AGENT_CHAT: {
           const p = proto.decodeParams<proto.AgentChatParams>(msg);
           const h = hosted.get(p.agent_id ?? "");
@@ -703,22 +811,30 @@ async function mainConnector(cfg: ClientConfig, connectorID: string, ui: LocalUI
       }
     });
 
-    await new Promise<void>((resolve) => {
-      ws.once("close", () => resolve());
+    const closeCode = await new Promise<number>((resolve) => {
+      ws.once("close", (code) => resolve(code));
       const onSigint = (): void => {
         ws.close(1000);
-        resolve();
+        resolve(1000);
       };
       process.once("SIGINT", onSigint);
+      process.once("SIGTERM", onSigint);
     });
 
     clearInterval(heartbeat);
     currentWS = null;
     ui.connected = false;
     rejectPendingRPC("connection lost");
+    failLocalInvokes(pendingInvokes, "gateway connection lost");
     if (interrupted) {
       logger.info("interrupt received, exiting...");
       break;
+    }
+    if (closeCode === 4002) {
+      // 被同 connector_id 的新实例顶替：退出而不是重连，避免两个实例互踢
+      logger.error("replaced by a newer instance (duplicate connector_id), exiting");
+      for (const id of [...hosted.keys()]) await dropAgent(id);
+      return true;
     }
     logger.info("connection lost, reconnecting...");
     for (const h of hosted.values()) h.tasks.cancelAll();
@@ -727,6 +843,7 @@ async function mainConnector(cfg: ClientConfig, connectorID: string, ui: LocalUI
   }
 
   for (const id of [...hosted.keys()]) await dropAgent(id);
+  return false;
 }
 
 // ---- 本地管理页 HTTP 服务（绑回环，不鉴权）----
@@ -762,7 +879,7 @@ function sendJSON(res: http.ServerResponse, status: number, body: unknown): void
   res.end(JSON.stringify(body));
 }
 
-function startLocalUI(addr: string, cfg: ClientConfig, ui: LocalUIState): void {
+function startLocalUI(addr: string, cfg: ClientConfig, ui: LocalUIState): http.Server {
   const idx = addr.lastIndexOf(":");
   const host = idx === -1 ? "127.0.0.1" : addr.slice(0, idx) || "127.0.0.1";
   const port = idx === -1 ? Number(addr) : Number(addr.slice(idx + 1));
@@ -771,8 +888,24 @@ function startLocalUI(addr: string, cfg: ClientConfig, ui: LocalUIState): void {
       sendJSON(res, 500, { error: e instanceof Error ? e.message : String(e) });
     });
   });
-  server.on("error", (e) => logger.error("本地管理页监听失败", { addr, error: String(e) }));
+  let stopped = false;
+  server.once("close", () => {
+    stopped = true;
+  });
+  server.on("error", (e) => {
+    // 端口可能被一个即将被顶替退出的旧实例占用：每隔 3s 重试，旧实例退出后抢回
+    if ((e as NodeJS.ErrnoException).code === "EADDRINUSE") {
+      logger.warn("本地管理页端口被占，3s 后重试", { addr });
+      const t = setTimeout(() => {
+        if (!stopped) server.listen(port, host);
+      }, 3000);
+      t.unref();
+      return;
+    }
+    logger.error("本地管理页监听失败", { addr, error: String(e) });
+  });
   server.listen(port, host, () => logger.info("本地管理页已启动", { url: `http://${host}:${port}` }));
+  return server;
 }
 
 async function handleUIRequest(
@@ -953,7 +1086,7 @@ async function main(): Promise<void> {
 
   // 本地管理页：无论是否已配置都先起来
   const ui = newLocalUIState();
-  if (cfg.uiAddr !== "off") startLocalUI(cfg.uiAddr, cfg, ui);
+  const uiServer = cfg.uiAddr !== "off" ? startLocalUI(cfg.uiAddr, cfg, ui) : undefined;
 
   // 配对模式：凭码换密钥并落盘，随后直接进入 connector 模式
   if (cfg.pairCode !== "") {
@@ -975,7 +1108,10 @@ async function main(): Promise<void> {
 
   // connector 模式：只起服务，agent 由页面分配
   if (cfg.connectorID !== "") {
-    await mainConnector(cfg, cfg.connectorID, ui);
+    const replaced = await mainConnector(cfg, cfg.connectorID, ui);
+    uiServer?.close();
+    // 被顶替属异常退出（非 0），让 supervisor/日志能看到双实例冲突
+    if (replaced) process.exit(1);
     return;
   }
   if (cfg.agentID === "") {
@@ -1004,17 +1140,22 @@ async function main(): Promise<void> {
 
   const tasks = new TaskRegistry(cfg.taskTimeoutMs);
   let interrupted = false;
+  let replaced = false;
   process.on("SIGINT", () => {
+    interrupted = true;
+  });
+  process.on("SIGTERM", () => {
     interrupted = true;
   });
 
   // Bridge lifecycle events from the local agent to the current gateway connection.
   let currentWS: WebSocket | null = null;
+  const pendingInvokes = new Map<string, PendingInvoke>();
   const events = adapter.events();
   if (events) {
     void (async () => {
       for await (const ev of events) {
-        const msg = translateLifecycleEvent(cfg.agentID, ev);
+        const msg = bridgeAgentEvent(currentWS, cfg.agentID, adapter, ev, pendingInvokes);
         if (msg && currentWS) safeSend(currentWS, msg);
       }
     })();
@@ -1060,12 +1201,17 @@ async function main(): Promise<void> {
       } catch {
         return;
       }
+      if (resolveLocalInvoke(msg, pendingInvokes)) return;
       switch (msg.method) {
         case proto.METHOD_AGENT_CHAT:
           void handleChat(ws, adapter, cfg.agentID, msg, tasks);
           break;
         case proto.METHOD_AGENT_RESPOND:
           void handleRespond(ws, adapter, cfg.agentID, msg, tasks);
+          break;
+        case proto.METHOD_AGENT_TASK_RESULT:
+          // 编排子任务结果 → 本地 Agent（task.subtask_result）
+          forwardSubtaskResult(adapter, msg.params);
           break;
         case proto.METHOD_AGENT_CANCEL: {
           const params = proto.decodeParams<proto.AgentCancelParams>(msg);
@@ -1084,19 +1230,27 @@ async function main(): Promise<void> {
       }
     });
 
-    await new Promise<void>((resolve) => {
-      ws.once("close", () => resolve());
+    const closeCode = await new Promise<number>((resolve) => {
+      ws.once("close", (code) => resolve(code));
       const onSigint = (): void => {
         ws.close(1000);
-        resolve();
+        resolve(1000);
       };
       process.once("SIGINT", onSigint);
+      process.once("SIGTERM", onSigint);
     });
 
     clearInterval(heartbeat);
     currentWS = null;
+    failLocalInvokes(pendingInvokes, "gateway connection lost");
     if (interrupted) {
       logger.info("interrupt received, exiting...");
+      break;
+    }
+    if (closeCode === 4002) {
+      // 被同 agent_id 的新实例顶替：退出而不是重连，避免两个实例互踢
+      logger.error("replaced by a newer instance (duplicate agent_id), exiting");
+      replaced = true;
       break;
     }
     logger.info("connection lost, reconnecting...");
@@ -1106,6 +1260,8 @@ async function main(): Promise<void> {
   }
 
   adapter.close();
+  uiServer?.close();
+  if (replaced) process.exit(1);
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

@@ -86,11 +86,12 @@
         .mono { font-family: var(--mono); font-size: 12.5px; }
 
         .form-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
-        .form-row input, .form-row select {
+        .form-row input, .form-row select, .form-row textarea {
             padding: 6px 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
             background: var(--bg); outline: none; font-size: 13.5px; flex: 1; min-width: 180px;
         }
-        .form-row input:focus, .form-row select:focus { border-color: var(--accent); }
+        .form-row textarea { resize: vertical; font-family: var(--mono); font-size: 12.5px; line-height: 1.5; }
+        .form-row input:focus, .form-row select:focus, .form-row textarea:focus { border-color: var(--accent); }
         .form-hint { font-size: 12px; color: var(--text-tertiary); margin-top: 8px; }
 
         .btn {
@@ -158,12 +159,15 @@
             display: block; font-size: 12px; font-weight: 600;
             color: var(--text-secondary); margin-bottom: 6px;
         }
-        .modal .form-field input[type="text"] {
+        .modal .form-field input[type="text"],
+        .modal .form-field textarea {
             width: 100%; padding: 7px 10px;
             border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
             background: var(--bg); outline: none; font-size: 13.5px; font-family: var(--mono);
         }
-        .modal .form-field input[type="text"]:focus { border-color: var(--accent); }
+        .modal .form-field textarea { resize: vertical; font-size: 12.5px; line-height: 1.5; }
+        .modal .form-field input[type="text"]:focus,
+        .modal .form-field textarea:focus { border-color: var(--accent); }
         .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 
         .toast-container {
@@ -219,7 +223,7 @@
             <div class="form-hint" id="addCmdLabel">启动命令覆盖（可选）</div>
             <div class="form-row" style="margin-top:6px">
                 <input type="text" id="addName" placeholder="名称（可选，默认自动生成）" autocomplete="off">
-                <input type="text" id="addCmd" placeholder="默认用品牌命令" autocomplete="off">
+                <textarea id="addCmd" rows="2" placeholder="默认用品牌命令"></textarea>
                 <button class="btn btn-primary" id="addBtn">添加</button>
             </div>
             <div class="section-error" id="addError"></div>
@@ -247,7 +251,7 @@
             <p id="cmdAgentLabel"></p>
             <div class="form-field">
                 <label id="cmdLabel">启动命令覆盖</label>
-                <input type="text" id="cmdInput" placeholder="留空 = 清除本机覆盖，回退品牌/本地命令" autocomplete="off">
+                <textarea id="cmdInput" rows="3" placeholder="留空 = 清除本机覆盖，回退品牌/本地命令"></textarea>
             </div>
             <div class="modal-actions">
                 <button class="btn btn-ghost" id="cmdCancel">取消</button>

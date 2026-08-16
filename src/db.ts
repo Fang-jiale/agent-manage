@@ -28,6 +28,7 @@ export interface DbAgent {
   brand_id: string | null;
   connector_id: string | null;
   approval_status: string; // approved | pending | rejected
+  is_manager?: number; // 0/1，群组管理者标记（展示用）
 }
 
 export interface DbAgentBrand {
@@ -66,11 +67,26 @@ export interface DbDeviceKey {
 export interface DbSession {
   id: string;
   owner_id: string;
-  agent_id: string;
+  agent_id: string; // 单 agent 会话 = agent id；群会话 = "group:<gid>"
   title: string;
+  workdir: string | null; // 会话绑定的工作目录（空 = 未绑定，随实例启动目录）
   created_at: number;
   updated_at: number;
   message_count?: number;
+}
+
+export interface DbGroup {
+  id: string;
+  owner_id: string;
+  name: string;
+  manager_agent_id: string | null;
+  created_at: number;
+}
+
+export interface DbGroupMember {
+  group_id: string;
+  agent_id: string;
+  added_at: number;
 }
 
 export interface DbMessage {
@@ -99,6 +115,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   owner_id VARCHAR(64) NOT NULL,
   agent_id VARCHAR(128) NOT NULL,
   title VARCHAR(256) NOT NULL,
+  workdir VARCHAR(512) NULL,
   created_at BIGINT NOT NULL,
   updated_at BIGINT NOT NULL,
   KEY idx_owner_agent (owner_id, agent_id, updated_at)
@@ -164,6 +181,32 @@ CREATE TABLE IF NOT EXISTS pairing_codes (
   created_at BIGINT NOT NULL,
   KEY idx_owner (owner_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS agent_groups (
+  id VARCHAR(64) PRIMARY KEY,
+  owner_id VARCHAR(64) NOT NULL,
+  name VARCHAR(128) NOT NULL,
+  manager_agent_id VARCHAR(128) NULL,
+  created_at BIGINT NOT NULL,
+  KEY idx_owner (owner_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS agent_group_members (
+  group_id VARCHAR(64) NOT NULL,
+  agent_id VARCHAR(128) NOT NULL,
+  added_at BIGINT NOT NULL,
+  PRIMARY KEY (group_id, agent_id),
+  KEY idx_agent (agent_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS agent_nicknames (
+  owner_id VARCHAR(64) NOT NULL,
+  agent_id VARCHAR(128) NOT NULL,
+  nickname VARCHAR(256) NOT NULL,
+  updated_at BIGINT NOT NULL,
+  PRIMARY KEY (owner_id, agent_id),
+  KEY idx_agent (agent_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 `;
 
 export class Db {
@@ -222,6 +265,18 @@ export class Db {
         if ((e as { errno?: number }).errno !== 1060) throw e;
       }
     }
+    // 群组编排：管理者标记（展示用辅助字段，实际权限以 agent_groups.manager_agent_id 为准）
+    try {
+      await this.pool.query("ALTER TABLE agents ADD COLUMN is_manager TINYINT(1) NOT NULL DEFAULT 0");
+    } catch (e) {
+      if ((e as { errno?: number }).errno !== 1060) throw e;
+    }
+    // 会话绑定工作目录
+    try {
+      await this.pool.query("ALTER TABLE sessions ADD COLUMN workdir VARCHAR(512) NULL");
+    } catch (e) {
+      if ((e as { errno?: number }).errno !== 1060) throw e;
+    }
   }
 
   async close(): Promise<void> {
@@ -276,6 +331,33 @@ export class Db {
 
   async deleteUser(id: string): Promise<void> {
     await this.pool.query("DELETE FROM users WHERE id = ?", [id]);
+  }
+
+  // 删除用户时的连带清理：会话/消息/设备密钥/配对码/群组/备注名。
+  // agents 行由调用方先行逐个移除（需经 hub 注销在线连接），群成员同时清掉指向这些 agent 的行。
+  // 不用跨表 JOIN/子查询比较：历史库表 collation 不一致（unicode_ci vs 0900_ai_ci）会报
+  // Illegal mix of collations；先 SELECT id 再 IN 常量列表可完全避开。
+  async purgeUserOwnedData(id: string): Promise<void> {
+    const [sessRows] = await this.pool.query("SELECT id FROM sessions WHERE owner_id = ?", [id]);
+    const sessionIds = (sessRows as { id: string }[]).map((r) => r.id);
+    if (sessionIds.length > 0) {
+      await this.pool.query("DELETE FROM messages WHERE session_id IN (?)", [sessionIds]);
+    }
+    await this.pool.query("DELETE FROM sessions WHERE owner_id = ?", [id]);
+    const [grpRows] = await this.pool.query("SELECT id FROM agent_groups WHERE owner_id = ?", [id]);
+    const groupIds = (grpRows as { id: string }[]).map((r) => r.id);
+    if (groupIds.length > 0) {
+      await this.pool.query("DELETE FROM agent_group_members WHERE group_id IN (?)", [groupIds]);
+    }
+    const [agentRows] = await this.pool.query("SELECT id FROM agents WHERE owner_id = ?", [id]);
+    const agentIds = (agentRows as { id: string }[]).map((r) => r.id);
+    if (agentIds.length > 0) {
+      await this.pool.query("DELETE FROM agent_group_members WHERE agent_id IN (?)", [agentIds]);
+    }
+    await this.pool.query("DELETE FROM agent_groups WHERE owner_id = ?", [id]);
+    await this.pool.query("DELETE FROM device_keys WHERE owner_id = ?", [id]);
+    await this.pool.query("DELETE FROM pairing_codes WHERE owner_id = ?", [id]);
+    await this.pool.query("DELETE FROM agent_nicknames WHERE owner_id = ?", [id]);
   }
 
   async touchLastLogin(id: string): Promise<void> {
@@ -505,25 +587,48 @@ export class Db {
     return rows as DbSession[];
   }
 
+  // 每个会话最后一条消息（owner 范围），用于 session.list 的 preview 摘要。
+  // MySQL 8 窗口函数；content 交由上层解析截断
+  async listLastMessages(ownerID: string): Promise<{ session_id: string; role: string; content: string }[]> {
+    const [rows] = await this.pool.query(
+      "SELECT session_id, role, content FROM (" +
+      "  SELECT session_id, role, content," +
+      "    ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY created_at DESC) AS rn" +
+      "  FROM messages WHERE owner_id = ?" +
+      ") t WHERE rn = 1",
+      [ownerID],
+    );
+    return rows as { session_id: string; role: string; content: string }[];
+  }
+
   async getSession(ownerID: string, id: string): Promise<DbSession | undefined> {
     const [rows] = await this.pool.query(
       "SELECT * FROM sessions WHERE id = ? AND owner_id = ?", [id, ownerID]);
     return (rows as DbSession[])[0];
   }
 
-  async createSession(s: { id: string; owner_id: string; agent_id: string; title: string }): Promise<DbSession> {
+  async createSession(s: { id: string; owner_id: string; agent_id: string; title: string; workdir?: string | null }): Promise<DbSession> {
     const now = Date.now();
     await this.pool.query(
-      "INSERT INTO sessions (id, owner_id, agent_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-      [s.id, s.owner_id, s.agent_id, s.title, now, now],
+      "INSERT INTO sessions (id, owner_id, agent_id, title, workdir, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      [s.id, s.owner_id, s.agent_id, s.title, s.workdir ?? null, now, now],
     );
-    return { ...s, created_at: now, updated_at: now };
+    return { ...s, workdir: s.workdir ?? null, created_at: now, updated_at: now };
   }
 
   async renameSession(ownerID: string, id: string, title: string): Promise<boolean> {
     const [res] = await this.pool.query(
       "UPDATE sessions SET title = ?, updated_at = ? WHERE id = ? AND owner_id = ?",
       [title, Date.now(), id, ownerID],
+    );
+    return (res as mysql.ResultSetHeader).affectedRows > 0;
+  }
+
+  // 会话绑定/解绑工作目录（空串 = 清除）
+  async setSessionWorkdir(ownerID: string, id: string, workdir: string | null): Promise<boolean> {
+    const [res] = await this.pool.query(
+      "UPDATE sessions SET workdir = ? WHERE id = ? AND owner_id = ?",
+      [workdir, id, ownerID],
     );
     return (res as mysql.ResultSetHeader).affectedRows > 0;
   }
@@ -575,5 +680,92 @@ export class Db {
       [sessionID, ownerID],
     );
     return Number((rows as { n: number }[])[0]?.n ?? 0);
+  }
+
+  // ---------- agent_groups（群组多 agent 沟通） ----------
+
+  async createGroup(g: { id: string; owner_id: string; name: string; manager_agent_id: string | null }): Promise<DbGroup> {
+    const now = Date.now();
+    await this.pool.query(
+      "INSERT INTO agent_groups (id, owner_id, name, manager_agent_id, created_at) VALUES (?, ?, ?, ?, ?)",
+      [g.id, g.owner_id, g.name, g.manager_agent_id, now],
+    );
+    return { ...g, created_at: now };
+  }
+
+  async getGroup(ownerID: string, id: string): Promise<DbGroup | undefined> {
+    const [rows] = await this.pool.query(
+      "SELECT * FROM agent_groups WHERE id = ? AND owner_id = ?", [id, ownerID]);
+    return (rows as DbGroup[])[0];
+  }
+
+  async listGroups(ownerID: string): Promise<DbGroup[]> {
+    const [rows] = await this.pool.query(
+      "SELECT * FROM agent_groups WHERE owner_id = ? ORDER BY created_at ASC", [ownerID]);
+    return rows as DbGroup[];
+  }
+
+  async renameGroup(ownerID: string, id: string, name: string): Promise<boolean> {
+    const [res] = await this.pool.query(
+      "UPDATE agent_groups SET name = ? WHERE id = ? AND owner_id = ?", [name, id, ownerID]);
+    return (res as mysql.ResultSetHeader).affectedRows > 0;
+  }
+
+  async setGroupManager(ownerID: string, id: string, managerAgentID: string | null): Promise<boolean> {
+    const [res] = await this.pool.query(
+      "UPDATE agent_groups SET manager_agent_id = ? WHERE id = ? AND owner_id = ?", [managerAgentID, id, ownerID]);
+    return (res as mysql.ResultSetHeader).affectedRows > 0;
+  }
+
+  async deleteGroup(ownerID: string, id: string): Promise<boolean> {
+    const [res] = await this.pool.query(
+      "DELETE FROM agent_groups WHERE id = ? AND owner_id = ?", [id, ownerID]);
+    if ((res as mysql.ResultSetHeader).affectedRows === 0) return false;
+    await this.pool.query("DELETE FROM agent_group_members WHERE group_id = ?", [id]);
+    return true;
+  }
+
+  async addGroupMember(groupID: string, agentID: string): Promise<void> {
+    await this.pool.query(
+      "INSERT IGNORE INTO agent_group_members (group_id, agent_id, added_at) VALUES (?, ?, ?)",
+      [groupID, agentID, Date.now()],
+    );
+  }
+
+  async removeGroupMember(groupID: string, agentID: string): Promise<boolean> {
+    const [res] = await this.pool.query(
+      "DELETE FROM agent_group_members WHERE group_id = ? AND agent_id = ?", [groupID, agentID]);
+    return (res as mysql.ResultSetHeader).affectedRows > 0;
+  }
+
+  async listGroupMembers(groupID: string): Promise<string[]> {
+    const [rows] = await this.pool.query(
+      "SELECT agent_id FROM agent_group_members WHERE group_id = ? ORDER BY added_at ASC", [groupID]);
+    return (rows as { agent_id: string }[]).map((r) => r.agent_id);
+  }
+
+  // ---------- agent_nicknames（用户对自有 agent 的备注名，仅展示用） ----------
+
+  async setNickname(ownerID: string, agentID: string, nickname: string | null): Promise<void> {
+    if (nickname === null || nickname === "") {
+      await this.pool.query("DELETE FROM agent_nicknames WHERE owner_id = ? AND agent_id = ?", [ownerID, agentID]);
+      return;
+    }
+    await this.pool.query(
+      `INSERT INTO agent_nicknames (owner_id, agent_id, nickname, updated_at) VALUES (?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE nickname = VALUES(nickname), updated_at = VALUES(updated_at)`,
+      [ownerID, agentID, nickname, Date.now()],
+    );
+  }
+
+  async listNicknamesForOwner(ownerID: string): Promise<Map<string, string>> {
+    const [rows] = await this.pool.query(
+      "SELECT agent_id, nickname FROM agent_nicknames WHERE owner_id = ?", [ownerID]);
+    return new Map((rows as { agent_id: string; nickname: string }[]).map((r) => [r.agent_id, r.nickname]));
+  }
+
+  async listAllNicknames(): Promise<{ owner_id: string; agent_id: string; nickname: string }[]> {
+    const [rows] = await this.pool.query("SELECT owner_id, agent_id, nickname FROM agent_nicknames");
+    return rows as { owner_id: string; agent_id: string; nickname: string }[];
   }
 }

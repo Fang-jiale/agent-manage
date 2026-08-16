@@ -4,44 +4,57 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>YwMatrix</title>
-    <link rel="icon" href="/static/logo.jpg" type="image/jpeg">
+    <link rel="icon" href="/static/logo.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/static/shared.css">
     <link rel="stylesheet" href="/static/index.css">
 </head>
 <body>
     <div id="app">
+        <nav class="side-rail" id="sideRail">
+            <div class="rail-logo" title="YwMatrix"><img class="logo-svg" src="/static/logo.svg" alt=""></div>
+            <button class="rail-item" data-section="sessions" title="消息">
+                <span class="rail-icon-wrap">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 3.5h11v8h-6L4 14v-2.5H2.5z" stroke-linejoin="round"/></svg>
+                    <span class="rail-badge" id="railUnreadBadge"></span>
+                </span>
+            </button>
+            <button class="rail-item" data-section="agents" title="Agent">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="3" width="11" height="9" rx="1.5"/><path d="M5.5 6.5L7.5 8l-2 1.5M9 10h2"/></svg>
+            </button>
+            <button class="rail-item" data-section="groups" title="群组">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="6" cy="5.5" r="2.2"/><path d="M2.5 13c.5-2.3 1.9-3.5 3.5-3.5s3 1.2 3.5 3.5"/><circle cx="11.5" cy="6.5" r="1.7"/><path d="M11 9.8c1.5.2 2.4 1.3 2.8 3.2"/></svg>
+            </button>
+            <div class="rail-spacer"></div>
+            <div class="rail-conn" id="railConn" title="未连接"><span class="conn-dot" id="connectionDot"></span></div>
+            <button class="icon-btn rail-item" id="adminBtn" title="管理后台" style="display:none">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg>
+            </button>
+            <button class="icon-btn rail-item" id="settingsBtn" title="设置">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="2"/><path d="M13.3 8a5.3 5.3 0 0 0-.1-1.1l1.4-1.1-1.4-2.4-1.6.7a5.3 5.3 0 0 0-1.9-1.1L9.4 1.5H6.6l-.3 1.5a5.3 5.3 0 0 0-1.9 1.1l-1.6-.7-1.4 2.4 1.4 1.1a5.3 5.3 0 0 0 0 2.2l-1.4 1.1 1.4 2.4 1.6-.7a5.3 5.3 0 0 0 1.9 1.1l.3 1.5h2.8l.3-1.5a5.3 5.3 0 0 0 1.9-1.1l1.6.7 1.4-2.4-1.4-1.1c.06-.36.1-.72.1-1.1z" stroke-linejoin="round"/></svg>
+            </button>
+        </nav>
         <aside class="sidebar" id="sidebar">
-            <div class="sidebar-header">
-                <div class="logo">
-                    <img class="logo-svg" src="/static/logo.jpg" alt="">
-                    <span class="logo-word">Yw<span>Matrix</span></span>
-                </div>
-                <button class="icon-btn" id="themeToggle" title="切换主题"></button>
-            </div>
             <div class="sidebar-scroll">
-                <div class="section-label">在线 Agent</div>
-                <div id="agentList"></div>
-                <div class="section-label">
-                    会话
-                    <button class="icon-btn" id="newSessionBtn" title="新建会话">
-                        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 3v10M3 8h10"/></svg>
-                    </button>
+                <div class="sidebar-panel" id="panelSessions">
+                    <div class="section-label">消息</div>
+                    <input type="text" name="user" tabindex="-1" aria-hidden="true" autocomplete="username" style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0">
+                    <input type="password" name="pass" tabindex="-1" aria-hidden="true" autocomplete="current-password" style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0">
+                    <input type="search" name="sessionsearch" class="session-search" id="sessionSearch" placeholder="搜索会话…" autocomplete="nope" spellcheck="false" readonly onfocus="this.removeAttribute('readonly')">
+                    <div id="sessionList"></div>
                 </div>
-                <input type="text" name="user" tabindex="-1" aria-hidden="true" autocomplete="username" style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0">
-                <input type="password" name="pass" tabindex="-1" aria-hidden="true" autocomplete="current-password" style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0">
-                <input type="search" name="sessionsearch" class="session-search" id="sessionSearch" placeholder="搜索会话…" autocomplete="nope" spellcheck="false" readonly onfocus="this.removeAttribute('readonly')">
-                <div id="sessionList"></div>
-            </div>
-            <div class="sidebar-footer">
-                <span class="conn-dot" id="connectionDot"></span>
-                <span id="connectionStatus">未连接</span>
-                <span style="flex:1"></span>
-                <button class="icon-btn" id="adminBtn" title="管理后台" style="display:none">
-                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg>
-                </button>
-                <button class="icon-btn" id="settingsBtn" title="设置">
-                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="2"/><path d="M13.3 8a5.3 5.3 0 0 0-.1-1.1l1.4-1.1-1.4-2.4-1.6.7a5.3 5.3 0 0 0-1.9-1.1L9.4 1.5H6.6l-.3 1.5a5.3 5.3 0 0 0-1.9 1.1l-1.6-.7-1.4 2.4 1.4 1.1a5.3 5.3 0 0 0 0 2.2l-1.4 1.1 1.4 2.4 1.6-.7a5.3 5.3 0 0 0 1.9 1.1l.3 1.5h2.8l.3-1.5a5.3 5.3 0 0 0 1.9-1.1l1.6.7 1.4-2.4-1.4-1.1c.06-.36.1-.72.1-1.1z" stroke-linejoin="round"/></svg>
-                </button>
+                <div class="sidebar-panel" id="panelAgents">
+                    <div class="section-label">Agent</div>
+                    <div id="agentList"></div>
+                </div>
+                <div class="sidebar-panel" id="panelGroups">
+                    <div class="section-label">
+                        群组
+                        <button class="icon-btn" id="newGroupBtn" title="新建群组（多 Agent 沟通）">
+                            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 3v10M3 8h10"/></svg>
+                        </button>
+                    </div>
+                    <div id="groupList"></div>
+                </div>
             </div>
         </aside>
 
@@ -54,7 +67,12 @@
                     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M6.2 2.5v11"/></svg>
                 </button>
                 <div class="header-info">
-                    <div class="header-title" id="chatTitle">选择一个 Agent 开始对话</div>
+                    <div class="header-title-row">
+                        <span class="header-title" id="chatTitle">选择一个 Agent 开始对话</span>
+                        <button class="icon-btn session-menu-btn" id="sessionMenuBtn" title="切换历史会话" style="display:none">
+                            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 6l4 4 4-4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                        </button>
+                    </div>
                     <div class="header-sub" id="chatSubtitle"></div>
                 </div>
                 <div class="header-chips" id="headerChips"></div>
@@ -82,10 +100,19 @@
                 </button>
             </div>
 
+            <div class="session-menu" id="sessionMenu">
+                <input type="search" class="session-menu-search" id="sessionMenuSearch" placeholder="搜索该对象的历史会话…" autocomplete="nope" spellcheck="false">
+                <button class="session-menu-new" id="sessionMenuNew">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" width="13" height="13"><path d="M8 3v10M3 8h10"/></svg>
+                    新话题
+                </button>
+                <div class="session-menu-list" id="sessionMenuList"></div>
+            </div>
+
             <div class="chat-container" id="chatContainer">
                 <div class="chat-inner">
                     <div class="empty-state" id="emptyState">
-                        <div class="empty-mark brand-mark"><img class="logo-svg" style="width:48px;height:48px" src="/static/logo.jpg" alt=""></div>
+                        <div class="empty-mark brand-mark"><img class="logo-svg" style="width:48px;height:48px" src="/static/logo.svg" alt=""></div>
                         <h3 id="dashGreeting">欢迎使用 YwMatrix</h3>
                         <p class="dash-sub">选择左侧 Agent 开始对话，或试试下面这些任务。</p>
                         <div class="dash-grid" id="dashStats"></div>
@@ -131,7 +158,7 @@
                             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 13V3M3.5 7.5L8 3l4.5 4.5"/></svg>
                         </button>
                     </div>
-                    <div class="input-hint">Enter 发送 / Shift+Enter 换行 / 支持粘贴或拖入图片、文件</div>
+                    <div class="input-hint" id="inputHint">Enter 发送 / Shift+Enter 换行 / 支持粘贴或拖入图片、文件</div>
                 </div>
             </div>
 
@@ -151,72 +178,112 @@
         </div>
     </div>
 
-    <div class="modal-overlay" id="settingsOverlay">
-        <div class="modal settings-modal">
-            <h3>设置</h3>
-            <div class="settings-row">
-                <div><label>主题</label><div class="settings-desc">跟随系统会随系统外观自动切换</div></div>
-                <select id="themeSelect">
-                    <option value="auto">跟随系统</option>
-                    <option value="light">浅色</option>
-                    <option value="dark">深色</option>
-                </select>
+    <div class="modal-overlay" id="groupOverlay">
+        <div class="modal" style="max-width:420px">
+            <h3 id="groupModalTitle">新建群组</h3>
+            <p style="color:var(--text-tertiary);font-size:13px;margin:4px 0 10px">勾选你的 Agent 加入群组；@管理者 可让它调度群内其他 Agent 帮你干活</p>
+            <input type="text" id="groupNameInput" placeholder="群组名称" style="width:100%;box-sizing:border-box;margin-bottom:10px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text)">
+            <div id="groupMemberList" style="max-height:220px;overflow-y:auto;margin-bottom:10px"></div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+                <span style="font-size:13px;color:var(--text-secondary)">管理者</span>
+                <select id="groupManagerSelect" style="flex:1;padding:6px 8px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text)"></select>
             </div>
-            <div class="settings-row">
-                <div><label>发送方式</label><div class="settings-desc">⌘Enter 模式下 Enter 换行</div></div>
-                <select id="sendWithSelect">
-                    <option value="enter">Enter 发送</option>
-                    <option value="cmd-enter">⌘Enter 发送</option>
-                </select>
-            </div>
-            <div class="settings-row">
-                <div><label>消息密度</label><div class="settings-desc">紧凑模式可显示更多内容</div></div>
-                <select id="densitySelect">
-                    <option value="comfortable">舒适</option>
-                    <option value="compact">紧凑</option>
-                </select>
-            </div>
-            <div class="settings-row">
-                <div><label>任务完成通知</label><div class="settings-desc">后台或非活动标签下任务完成时弹系统通知</div></div>
-                <label class="switch">
-                    <input type="checkbox" id="notifyToggle">
-                    <span class="switch-track"></span>
-                </label>
-            </div>
-            <div class="settings-row">
-                <div><label>修改密码</label><div class="settings-desc">修改后其他设备的登录态将失效</div></div>
-                <div class="pwd-form">
-                    <input type="password" id="oldPwdInput" placeholder="当前密码" autocomplete="current-password">
-                    <input type="password" id="newPwdInput" placeholder="新密码（至少 6 位）" autocomplete="new-password">
-                    <button class="btn" id="changePwdBtn">修改</button>
-                </div>
-            </div>
-            <div class="settings-row" style="border-bottom:none;padding-bottom:4px">
-                <div><label>我的设备密钥</label><div class="settings-desc">供 AgentClient 长期接入（-key 参数），明文仅在创建时展示一次</div></div>
-            </div>
-            <div id="myKeyList" style="font-size:13px"></div>
-            <div class="pwd-form" style="margin-top:8px;flex-direction:row;width:auto">
-                <input id="myNewKeyName" placeholder="密钥备注名" autocomplete="off" style="flex:1">
-                <button class="btn" id="myCreateKeyBtn">创建密钥</button>
-            </div>
-            <div class="settings-shortcuts">
-                <kbd>⌘K</kbd> 命令面板 · <kbd>Enter</kbd> 发送 · <kbd>Shift+Enter</kbd> 换行 · <kbd>Esc</kbd> 关闭浮层
-            </div>
-            <div class="modal-actions" style="margin-top:16px">
-                <button class="btn btn-primary" id="settingsClose">完成</button>
+            <div class="modal-actions">
+                <button class="btn btn-ghost" id="groupCancel">取消</button>
+                <button class="btn btn-primary" id="groupCreate">创建</button>
             </div>
         </div>
     </div>
 
-    <div class="modal-overlay" id="keyCreatedOverlay">
-        <div class="modal">
-            <h3>密钥已创建</h3>
-            <p>请立即保存，明文只展示这一次：</p>
-            <div class="key-plaintext" id="keyCreatedValue"></div>
+    <div class="modal-overlay" id="workdirOverlay">
+        <div class="modal" style="max-width:460px">
+            <h3>会话工作目录</h3>
+            <p style="color:var(--text-tertiary);font-size:13px;margin:4px 0 10px">绑定后本会话的每条消息都会以 <code>metadata.workdir</code> 带给 Agent，Agent 在该目录下干活；留空则跟随 Agent 实例的启动目录</p>
+            <input type="text" id="workdirInput" placeholder="/path/to/project" spellcheck="false" style="width:100%;box-sizing:border-box;margin-bottom:12px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-family:var(--mono)">
             <div class="modal-actions">
-                <button class="btn btn-ghost" id="keyCopyBtn">复制</button>
-                <button class="btn btn-primary" id="keyCreatedOk">我已保存</button>
+                <button class="btn btn-ghost" id="workdirCancel">取消</button>
+                <button class="btn btn-ghost" id="workdirClear">清除绑定</button>
+                <button class="btn btn-primary" id="workdirSave">保存</button>
             </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="pwdOverlay">
+        <div class="modal" style="max-width:400px">
+            <h3>修改密码</h3>
+            <p style="margin:4px 0 12px">修改成功后其他设备的登录态将失效，需要重新登录</p>
+            <div class="pwd-modal-form">
+                <input type="password" id="oldPwdInput" placeholder="当前密码" autocomplete="current-password">
+                <input type="password" id="newPwdInput" placeholder="新密码（至少 6 位）" autocomplete="new-password">
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-ghost" id="pwdCancel">取消</button>
+                <button class="btn btn-primary" id="changePwdBtn">确认修改</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="settingsOverlay">
+        <div class="modal settings-modal">
+            <div class="modal-head-row">
+                <h3>设置</h3>
+                <button class="icon-btn" id="settingsClose" title="关闭">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+                </button>
+            </div>
+            <div class="settings-section">
+                <div class="settings-section-title">外观</div>
+                <div class="settings-row">
+                    <div><label>主题</label><div class="settings-desc">跟随系统会随系统外观自动切换</div></div>
+                    <select id="themeSelect">
+                        <option value="auto">跟随系统</option>
+                        <option value="light">浅色</option>
+                        <option value="dark">深色</option>
+                    </select>
+                </div>
+                <div class="settings-row">
+                    <div><label>消息密度</label><div class="settings-desc">紧凑模式可显示更多内容</div></div>
+                    <select id="densitySelect">
+                        <option value="comfortable">舒适</option>
+                        <option value="compact">紧凑</option>
+                    </select>
+                </div>
+            </div>
+            <div class="settings-section">
+                <div class="settings-section-title">输入与通知</div>
+                <div class="settings-row">
+                    <div><label>发送方式</label><div class="settings-desc">⌘Enter 模式下 Enter 换行</div></div>
+                    <select id="sendWithSelect">
+                        <option value="enter">Enter 发送</option>
+                        <option value="cmd-enter">⌘Enter 发送</option>
+                    </select>
+                </div>
+                <div class="settings-row">
+                    <div><label>任务完成通知</label><div class="settings-desc">后台或非活动标签下任务完成时弹系统通知</div></div>
+                    <label class="switch">
+                        <input type="checkbox" id="notifyToggle">
+                        <span class="switch-track"></span>
+                    </label>
+                </div>
+            </div>
+            <div class="settings-section">
+                <div class="settings-section-title">账号</div>
+                <div class="settings-row">
+                    <div><label>修改密码</label><div class="settings-desc">修改后其他设备的登录态将失效</div></div>
+                    <button class="btn" id="changePwdOpenBtn">修改密码…</button>
+                </div>
+                <div class="settings-row">
+                    <div><label>退出登录</label><div class="settings-desc">清除本设备的登录态并返回登录页</div></div>
+                    <button class="btn btn-danger-ghost" id="logoutBtn">
+                        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" style="width:13px;height:13px"><path d="M9.5 2.5H4a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h5.5M6.5 8h7M11 5.5L13.5 8 11 10.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                        退出登录
+                    </button>
+                </div>
+            </div>
+            <div class="settings-shortcuts">
+                <kbd>⌘K</kbd> 命令面板 · <kbd>Enter</kbd> 发送 · <kbd>Shift+Enter</kbd> 换行 · <kbd>Esc</kbd> 关闭浮层
+            </div>
+            <div class="settings-credit">数据中心运维支持部出品 · 联系人：方家乐、杨偲嘉</div>
         </div>
     </div>
 
@@ -255,7 +322,7 @@
             <div class="login-brand">
                 <div class="login-brand-bg"></div>
                 <div class="login-brand-inner">
-                    <div class="login-brand-logo"><img class="logo-svg" style="width:60px;height:60px" src="/static/logo.jpg" alt=""></div>
+                    <div class="login-brand-logo"><img class="logo-svg" style="width:60px;height:60px" src="/static/logo.svg" alt=""></div>
                     <h1 class="login-brand-title">YwMatrix</h1>
                     <p class="login-brand-tag">统一远程管理员工终端 Agent</p>
                     <ul class="login-features">
@@ -277,7 +344,7 @@
             </div>
             <div class="login-form-wrap">
                 <div class="login-form-inner">
-                    <div class="login-form-logo brand-mark"><img class="logo-svg" style="width:44px;height:44px" src="/static/logo.jpg" alt=""></div>
+                    <div class="login-form-logo brand-mark"><img class="logo-svg" style="width:44px;height:44px" src="/static/logo.svg" alt=""></div>
                     <h2>欢迎回来</h2>
                     <p class="login-form-sub">登录以管理你的终端 Agent</p>
                     <form class="login-form" onsubmit="return false">
@@ -308,6 +375,7 @@
             let pendingRequests = new Map();
             let stickToBottom = true;
             let sessionQuery = '';
+            const expandedTargets = new Set(); // 「消息」面板展开显示会话列表的聊天对象 key
             let composerFiles = [];
             const attachmentBlobs = new Map();
 
@@ -497,8 +565,9 @@
                 const agent = state.agents[session.agentId];
                 const lines = [
                     '# ' + session.title, '',
-                    '> Agent: ' + (agent?.name || session.agentId) +
-                    ' · 导出于 ' + new Date().toLocaleString(), ''
+                    '> Agent: ' + (agentDisplayName(agent) || session.agentId) +
+                    ' · 导出于 ' + new Date().toLocaleString() +
+                    (session.workdir ? ' · 工作目录: ' + session.workdir : ''), ''
                 ];
                 for (const m of session.messages) {
                     lines.push((m.role === 'user' ? '**我**' : '**Agent**') +
@@ -561,9 +630,9 @@
                 if (actions.length) groups.push(['命令', actions.map(a => ({ ...a, hint: '' }))]);
 
                 const agents = Object.values(state.agents)
-                    .filter(a => match(a.name) || match(a.id))
+                    .filter(a => match(a.name) || match(a.nickname) || match(a.id))
                     .map(a => ({
-                        label: a.name || a.id,
+                        label: agentDisplayName(a),
                         hint: a.online ? (a.busy ? '忙碌' : '在线') : '离线',
                         icon: '<span class="status-dot ' + (a.online ? (a.busy ? 'busy' : 'online') : 'offline') + '"></span>',
                         run: () => selectAgent(a.id)
@@ -727,6 +796,7 @@
                 emptyState: document.getElementById('emptyState'),
                 dashStats: document.getElementById('dashStats'),
                 dashGreeting: document.getElementById('dashGreeting'),
+                inputHint: document.getElementById('inputHint'),
                 dashRecent: document.getElementById('dashRecent'),
                 dashPickAgent: document.getElementById('dashPickAgent'),
                 dashPalette: document.getElementById('dashPalette'),
@@ -739,16 +809,13 @@
                 progressTrack: document.getElementById('progressTrack'),
                 progressFill: document.getElementById('progressFill'),
                 connectionDot: document.getElementById('connectionDot'),
-                connectionStatus: document.getElementById('connectionStatus'),
                 toastContainer: document.getElementById('toastContainer'),
                 loginOverlay: document.getElementById('loginOverlay'),
                 nameInput: document.getElementById('nameInput'),
                 passwordInput: document.getElementById('passwordInput'),
                 loginBtn: document.getElementById('loginBtn'),
                 oidcLoginBtn: document.getElementById('oidcLoginBtn'),
-                themeToggle: document.getElementById('themeToggle'),
                 menuToggle: document.getElementById('menuToggle'),
-                newSessionBtn: document.getElementById('newSessionBtn'),
                 searchChatBtn: document.getElementById('searchChatBtn'),
                 exportChatBtn: document.getElementById('exportChatBtn'),
                 chatSearch: document.getElementById('chatSearch'),
@@ -780,6 +847,7 @@
                 paletteInput: document.getElementById('paletteInput'),
                 paletteList: document.getElementById('paletteList'),
                 settingsBtn: document.getElementById('settingsBtn'),
+                logoutBtn: document.getElementById('logoutBtn'),
                 settingsOverlay: document.getElementById('settingsOverlay'),
                 themeSelect: document.getElementById('themeSelect'),
                 sendWithSelect: document.getElementById('sendWithSelect'),
@@ -788,29 +856,45 @@
                 oldPwdInput: document.getElementById('oldPwdInput'),
                 newPwdInput: document.getElementById('newPwdInput'),
                 changePwdBtn: document.getElementById('changePwdBtn'),
+                pwdOverlay: document.getElementById('pwdOverlay'),
+                pwdCancel: document.getElementById('pwdCancel'),
+                changePwdOpenBtn: document.getElementById('changePwdOpenBtn'),
                 adminBtn: document.getElementById('adminBtn'),
-                myKeyList: document.getElementById('myKeyList'),
-                myNewKeyName: document.getElementById('myNewKeyName'),
-                myCreateKeyBtn: document.getElementById('myCreateKeyBtn'),
-                keyCreatedOverlay: document.getElementById('keyCreatedOverlay'),
-                keyCreatedValue: document.getElementById('keyCreatedValue'),
-                keyCopyBtn: document.getElementById('keyCopyBtn'),
-                keyCreatedOk: document.getElementById('keyCreatedOk'),
                 sidebarToggle: document.getElementById('sidebarToggle'),
                 drawerOverlay: document.getElementById('drawerOverlay'),
                 agentDrawer: document.getElementById('agentDrawer'),
                 drawerClose: document.getElementById('drawerClose'),
                 drawerBody: document.getElementById('drawerBody'),
-                notifyToggle: document.getElementById('notifyToggle')
+                notifyToggle: document.getElementById('notifyToggle'),
+                groupList: document.getElementById('groupList'),
+                newGroupBtn: document.getElementById('newGroupBtn'),
+                groupOverlay: document.getElementById('groupOverlay'),
+                groupNameInput: document.getElementById('groupNameInput'),
+                groupMemberList: document.getElementById('groupMemberList'),
+                groupManagerSelect: document.getElementById('groupManagerSelect'),
+                groupCancel: document.getElementById('groupCancel'),
+                groupCreate: document.getElementById('groupCreate'),
+                groupModalTitle: document.getElementById('groupModalTitle'),
+                workdirOverlay: document.getElementById('workdirOverlay'),
+                workdirInput: document.getElementById('workdirInput'),
+                workdirCancel: document.getElementById('workdirCancel'),
+                workdirClear: document.getElementById('workdirClear'),
+                workdirSave: document.getElementById('workdirSave'),
+                railUnreadBadge: document.getElementById('railUnreadBadge'),
+                sessionMenuBtn: document.getElementById('sessionMenuBtn'),
+                sessionMenu: document.getElementById('sessionMenu'),
+                sessionMenuSearch: document.getElementById('sessionMenuSearch'),
+                sessionMenuNew: document.getElementById('sessionMenuNew'),
+                sessionMenuList: document.getElementById('sessionMenuList')
             };
 
             /* ---------- state ---------- */
 
             function loadState() {
                 const fallback = {
-                    token: '', user: null, agents: {}, sessions: {}, currentAgentId: null, currentSessionId: null,
+                    token: '', user: null, agents: {}, sessions: {}, groups: {}, currentAgentId: null, currentSessionId: null,
                     settings: { themeMode: 'auto', sendWith: 'enter', density: 'comfortable', notifyOnDone: false },
-                    sidebarCollapsed: false
+                    sidebarCollapsed: false, sidebarSection: 'sessions'
                 };
                 try {
                     const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
@@ -826,10 +910,12 @@
                         user: parsed.user || null,
                         agents: parsed.agents || {},
                         sessions: pruneSessions(parsed.sessions || {}),
+                        groups: parsed.groups || {},
                         currentAgentId: parsed.currentAgentId || null,
                         currentSessionId: parsed.currentSessionId || null,
                         settings,
-                        sidebarCollapsed: !!parsed.sidebarCollapsed
+                        sidebarCollapsed: !!parsed.sidebarCollapsed,
+                        sidebarSection: ['sessions', 'agents', 'groups'].includes(parsed.sidebarSection) ? parsed.sidebarSection : 'sessions'
                     };
                 } catch (e) {
                     return fallback;
@@ -948,7 +1034,7 @@
 
             function setConnectionStatus(status, text) {
                 els.connectionDot.className = 'conn-dot ' + status;
-                els.connectionStatus.textContent = text;
+                els.connectionDot.parentElement.title = text;
             }
 
             function showToast(message, type = 'info', duration = 3000) {
@@ -979,68 +1065,17 @@
             function openSettings() {
                 applySettings();
                 els.settingsOverlay.classList.add('open');
-                loadMyKeys();
             }
             function closeSettings() {
                 els.settingsOverlay.classList.remove('open');
             }
 
-            /* ---------- 设备密钥（设置弹窗与管理后台共用） ---------- */
-
-            function keyStatusChip(k) {
-                return k.disabled ? '<span class="chip red">已吊销</span>' : '<span class="chip green">有效</span>';
-            }
-
-            async function createDeviceKeyFlow(name, ownerID, done) {
-                if (!name) { showToast('请填写密钥备注名', 'warning'); return; }
-                try {
-                    const params = ownerID ? { name, owner_id: ownerID } : { name };
-                    const r = await rpcCall('device_key.create', params);
-                    els.keyCreatedValue.textContent = r.key;
-                    els.keyCreatedOverlay.classList.add('open');
-                    if (done) done();
-                } catch (e) {
-                    showToast('创建失败：' + (e.message || e), 'error');
-                }
-            }
-
-            async function revokeDeviceKeyFlow(id, name, reload) {
-                const ok = await confirmModal('吊销密钥', '吊销后使用该密钥的 Agent 将立即断线且无法重连：' + (name || id), '吊销');
-                if (!ok) return;
-                try {
-                    await rpcCall('device_key.revoke', { id });
-                    showToast('已吊销', 'success');
-                    reload();
-                } catch (e) {
-                    showToast('吊销失败：' + (e.message || e), 'error');
-                }
-            }
-
-            async function loadMyKeys() {
-                if (!ws || ws.readyState !== WebSocket.OPEN) return;
-                try {
-                    const r = await rpcCall('device_key.list', {});
-                    const keys = r.keys || [];
-                    els.myKeyList.innerHTML = keys.length === 0
-                        ? '<div style="color:var(--text-tertiary);padding:4px 0 8px">暂无密钥</div>'
-                        : keys.map(k =>
-                            '<div class="user-row">' +
-                                '<span class="user-name">' + escapeHtml(k.name) + '</span>' +
-                                keyStatusChip(k) +
-                                '<span style="color:var(--text-tertiary);font-size:12px">' +
-                                (k.last_used_at ? '最近用 ' + relativeTime(k.last_used_at) : '从未使用') + '</span>' +
-                                (k.disabled ? '' : '<button data-id="' + k.id + '" data-name="' + escapeAttr(k.name) + '">吊销</button>') +
-                            '</div>').join('');
-                    els.myKeyList.querySelectorAll('button').forEach(btn => {
-                        btn.onclick = () => revokeDeviceKeyFlow(btn.dataset.id, btn.dataset.name, loadMyKeys);
-                    });
-                } catch (e) { /* 连接未就绪等 */ }
-            }
-
             function isAdmin() { return state.user?.role === 'admin'; }
 
+            // 管理后台对普通用户即个人控制台（我的 Agent/设备密钥/配对码），全员可见
             function updateAdminBtn() {
-                els.adminBtn.style.display = isAdmin() ? '' : 'none';
+                els.adminBtn.style.display = state.user ? '' : 'none';
+                els.adminBtn.title = isAdmin() ? '管理后台' : '个人中心';
             }
 
 
@@ -1108,19 +1143,51 @@
                         }).join('') + '</div>';
                 }
 
+                const displayName = agentDisplayName(a);
                 els.drawerBody.innerHTML =
                     '<div class="drawer-hero">' +
                         '<span class="agent-avatar" style="background:' + avatarColor(a.name || agentId) + '">' +
                             agentAvatarInner(a) + '</span>' +
-                        '<div><div class="drawer-hero-name">' + escapeHtml(a.name || agentId) + '</div>' +
+                        '<div><div class="drawer-hero-name">' + escapeHtml(displayName) + '</div>' +
                         '<div class="drawer-hero-sub">' + escapeHtml(agentId) + '</div></div>' +
                     '</div>' +
                     '<div class="drawer-section"><div class="drawer-section-title">信息</div>' +
                     kv.map(([k, v]) => '<div class="drawer-kv"><span class="k">' + k + '</span><span class="v">' + v + '</span></div>').join('') +
                     '</div>' +
+                    '<div class="drawer-section"><div class="drawer-section-title">备注名</div>' +
+                        '<div class="nickname-row">' +
+                            '<input type="text" id="nicknameInput" class="nickname-input" maxlength="256" ' +
+                                'placeholder="' + (a.nickname ? '' : '给这个 Agent 起个备注名（可选）') + '" value="' + escapeAttr(a.nickname || '') + '">' +
+                            '<button class="btn btn-primary btn-sm" id="nicknameSaveBtn">保存</button>' +
+                        '</div>' +
+                        '<div class="nickname-hint">仅自己可见；清空后保存即删除备注</div>' +
+                    '</div>' +
                     statsHtml +
                     capsHtml +
                     recentHtml;
+                els.drawerBody.querySelector('#nicknameSaveBtn').onclick = async () => {
+                    const input = els.drawerBody.querySelector('#nicknameInput');
+                    const btn = els.drawerBody.querySelector('#nicknameSaveBtn');
+                    const nickname = (input.value || '').trim();
+                    btn.disabled = true;
+                    try {
+                        const r = await rpcCall('agent.set_nickname', { agent_id: agentId, nickname });
+                        const target = state.agents[agentId];
+                        if (target) {
+                            target.nickname = r.nickname ?? null;
+                            saveState();
+                        }
+                        renderAgents();
+                        renderGroups();
+                        renderChatHeader();
+                        renderChat(true);
+                        showToast(r.nickname ? '备注名已保存' : '备注名已清除', 'success');
+                        openAgentDrawer(agentId);
+                    } catch (e) {
+                        showToast('保存失败：' + (e.message || e), 'error');
+                        btn.disabled = false;
+                    }
+                };
                 // 点击最近任务跳转到对应会话
                 els.drawerBody.querySelectorAll('.drawer-recent').forEach(el => {
                     el.onclick = () => {
@@ -1158,7 +1225,6 @@
                     themeAnimTimer = setTimeout(() => root.classList.remove('theme-anim'), 420);
                 }
                 root.setAttribute('data-theme', theme);
-                els.themeToggle.innerHTML = theme === 'dark' ? ICONS.sun : ICONS.moon;
             }
 
             function applySettings() {
@@ -1201,6 +1267,7 @@
                 getSessionsForAgent(agentId)[s.id] = {
                     id: s.id, agentId,
                     title: s.title,
+                    workdir: s.workdir || null,
                     messages: [],
                     createdAt: s.created_at,
                     updatedAt: s.updated_at,
@@ -1211,6 +1278,39 @@
                 return s.id;
             }
 
+            function mergeRemoteSession(agentId, s, prev) {
+                const existing = prev?.[s.id];
+                return {
+                    id: s.id, agentId,
+                    title: s.title,
+                    workdir: s.workdir ?? null,
+                    messages: existing?.messages || [],
+                    createdAt: s.created_at,
+                    updatedAt: s.updated_at,
+                    messageCount: s.message_count ?? 0,
+                    preview: s.preview || existing?.preview || '',
+                    pinned: existing?.pinned || false,
+                    hasUnread: existing?.hasUnread || false
+                };
+            }
+
+            // 全量同步：所有聊天对象（agent + 群）的会话，供「消息」聚合列表使用
+            async function syncAllSessions() {
+                if (!wsConnected) return;
+                try {
+                    const res = await rpcCall('session.list', {});
+                    const next = {};
+                    (res.sessions || []).forEach(s => {
+                        if (!next[s.agent_id]) next[s.agent_id] = {};
+                        next[s.agent_id][s.id] = mergeRemoteSession(s.agent_id, s, state.sessions[s.agent_id]);
+                    });
+                    state.sessions = next;
+                    saveState();
+                    renderSessions();
+                    renderSessionMenu();
+                } catch (e) { console.warn('syncAllSessions failed', e); }
+            }
+
             async function syncSessions(agentId) {
                 if (!agentId || !wsConnected) return;
                 try {
@@ -1218,19 +1318,12 @@
                     const prev = state.sessions[agentId] || {};
                     const next = {};
                     (res.sessions || []).forEach(s => {
-                        const existing = prev[s.id];
-                        next[s.id] = {
-                            id: s.id, agentId,
-                            title: s.title,
-                            messages: existing?.messages || [],
-                            createdAt: s.created_at,
-                            updatedAt: s.updated_at,
-                            messageCount: s.message_count ?? 0
-                        };
+                        next[s.id] = mergeRemoteSession(agentId, s, prev);
                     });
                     state.sessions[agentId] = next;
                     saveState();
                     renderSessions();
+                    renderSessionMenu();
                     if (state.currentAgentId !== agentId) return;
                     if (!state.currentSessionId || !next[state.currentSessionId]) {
                         state.currentSessionId = Object.keys(next)[0] || null;
@@ -1240,6 +1333,7 @@
                         state.currentSessionId = await createSessionRemote(agentId);
                     }
                     renderSessions();
+                    renderSessionMenu();
                     renderChat();
                     const cur = getCurrentSession();
                     if (cur && !loadedSessions.has(cur.id)) {
@@ -1259,6 +1353,8 @@
                 };
                 if (c.confirm_id) chunk.confirmId = c.confirm_id;
                 if (c.prompt_id) chunk.promptId = c.prompt_id;
+                if (c.answered) { chunk.answered = true; chunk.answer = c.answer; }
+                if (c.cancelled) { chunk.cancelled = true; chunk.reason = c.reason; }
                 if (c.name) chunk.name = c.name;
                 if (c.arguments) chunk.arguments = c.arguments;
                 if (c.options) chunk.options = c.options;
@@ -1308,12 +1404,19 @@
                 els.stopBtn.disabled = !hasActiveTask();
                 if (!hasSession) {
                     els.messageInput.placeholder = '先在左侧选择一个 Agent';
+                    els.inputHint.textContent = '支持粘贴或拖入图片、文件';
                 } else if (!wsConnected) {
                     els.messageInput.placeholder = '连接已断开，等待重连…';
+                } else if (isGroupKey(state.currentAgentId)) {
+                    els.messageInput.placeholder = '输入消息，@成员 或 @全体 触发回复';
+                    els.inputHint.textContent = '@成员 触发回复 · 支持粘贴或拖入图片、文件';
                 } else {
                     els.messageInput.placeholder = state.settings.sendWith === 'cmd-enter'
                         ? '输入消息，⌘Enter 发送，Enter 换行'
                         : '输入消息，Enter 发送，Shift+Enter 换行';
+                    els.inputHint.textContent = state.settings.sendWith === 'cmd-enter'
+                        ? '⌘Enter 发送 / Enter 换行 / 支持粘贴或拖入图片、文件'
+                        : 'Enter 发送 / Shift+Enter 换行 / 支持粘贴或拖入图片、文件';
                 }
             }
 
@@ -1442,7 +1545,10 @@
                 els.agentList.innerHTML = '';
                 const ids = Object.keys(state.agents);
                 if (ids.length === 0) {
-                    els.agentList.innerHTML = '<div class="empty-hint">暂无在线 Agent</div>';
+                    els.agentList.innerHTML =
+                        '<div class="empty-hint">暂无 Agent，接入后会显示在这里</div>' +
+                        '<button class="empty-action" id="agentEmptyGo">前往个人中心接入 Agent</button>';
+                    document.getElementById('agentEmptyGo').onclick = () => { location.href = '/admin'; };
                     return;
                 }
                 ids.forEach(id => {
@@ -1451,14 +1557,23 @@
                     card.className = 'agent-card' + (id === state.currentAgentId ? ' active' : '');
 
                     const statusClass = a.online ? (a.busy ? 'busy' : 'online') : 'offline';
+                    const unread = targetUnreadCount(id);
                     let html = '<div class="agent-card-top">' +
+                        '<span class="card-avatar-wrap">' +
                         '<span class="agent-avatar" style="background:' + avatarColor(a.name || id) + '">' +
                             agentAvatarInner(a) + '</span>' +
-                        '<span class="agent-name">' + escapeHtml(a.name || id) + '</span>' +
+                        (unread ? '<span class="target-unread">' + (unread > 99 ? '99+' : unread) + '</span>' : '') +
+                        '</span>' +
+                        '<span class="agent-name" title="' + escapeAttr(agentDisplayName(a)) + '">' + escapeHtml(agentDisplayName(a)) + '</span>' +
                         '<button class="icon-btn agent-info-btn" title="查看详情">' + ICONS.info + '</button>' +
                         '<span class="status-dot ' + statusClass + '" title="' +
                             (a.online ? (a.busy ? '忙碌' : '在线') : '离线') + '"></span></div>';
-                    if ((a.name || id) !== id) {
+                    const displayName = agentDisplayName(a);
+                    if (a.nickname && a.nickname.trim() && a.name && a.name !== id) {
+                        html += '<div class="agent-id">' + escapeHtml(a.name) + ' · ' + escapeHtml(id) + '</div>';
+                    } else if (a.nickname && a.nickname.trim()) {
+                        html += '<div class="agent-id">' + escapeHtml(id) + '</div>';
+                    } else if ((a.name || id) !== id) {
                         html += '<div class="agent-id">' + escapeHtml(id) + '</div>';
                     }
 
@@ -1489,58 +1604,362 @@
                             openAgentDrawer(id);
                             return;
                         }
+                        switchSidebarSection('sessions');
                         selectAgent(id);
                     });
                     els.agentList.appendChild(card);
                 });
             }
 
-            function renderSessions() {
-                els.sessionList.innerHTML = '';
-                if (!state.currentAgentId) {
-                    els.sessionList.innerHTML = '<div class="empty-hint">先选择一个 Agent</div>';
+            /* ---------- 群组（多 agent 会话） ---------- */
+
+            const GROUP_KEY_PREFIX = 'group:';
+
+            function groupKeyOf(gid) { return GROUP_KEY_PREFIX + gid; }
+            function groupFromKey(key) {
+                if (typeof key !== 'string' || !key.startsWith(GROUP_KEY_PREFIX)) return null;
+                return state.groups[key.slice(GROUP_KEY_PREFIX.length)] || null;
+            }
+            function isGroupKey(key) {
+                return typeof key === 'string' && key.startsWith(GROUP_KEY_PREFIX);
+            }
+            function groupMemberName(agentId) {
+                const a = state.agents[agentId];
+                return agentDisplayName(a) || agentId;
+            }
+
+            async function syncGroups() {
+                if (!wsConnected) return;
+                try {
+                    const res = await rpcCall('group.list', {});
+                    const next = {};
+                    (res.groups || []).forEach(g => {
+                        next[g.id] = {
+                            id: g.id,
+                            name: g.name,
+                            managerAgentId: g.manager_agent_id || null,
+                            agentIds: g.agent_ids || [],
+                            createdAt: g.created_at
+                        };
+                    });
+                    state.groups = next;
+                    saveState();
+                    renderGroups();
+                    // 当前选中的群被删掉时退回第一个在线 agent
+                    if (isGroupKey(state.currentAgentId) && !groupFromKey(state.currentAgentId)) {
+                        const first = Object.values(state.agents).find(a => a.online) || Object.keys(state.agents)[0];
+                        state.currentAgentId = null;
+                        if (first) selectAgent(typeof first === 'string' ? first : first.id);
+                    } else if (isGroupKey(state.currentAgentId)) {
+                        renderChatHeader();
+                    }
+                } catch (e) { console.warn('syncGroups failed', e); }
+            }
+
+            function renderGroups() {
+                els.groupList.innerHTML = '';
+                const groups = Object.values(state.groups || {});
+                if (groups.length === 0) {
+                    const btn = document.createElement('button');
+                    btn.className = 'empty-action';
+                    btn.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" width="14" height="14"><path d="M8 3v10M3 8h10"/></svg> 新建群组（多 Agent 沟通）';
+                    btn.onclick = () => openGroupModal(null);
+                    els.groupList.appendChild(btn);
                     return;
                 }
-                const sessions = getSessionsForAgent(state.currentAgentId);
-                let sorted = Object.values(sessions).sort((a, b) => {
+                groups.forEach(g => {
+                    const key = groupKeyOf(g.id);
+                    const online = g.agentIds.filter(id => state.agents[id]?.online).length;
+                    const unread = targetUnreadCount(key);
+                    const card = document.createElement('div');
+                    card.className = 'agent-card' + (key === state.currentAgentId ? ' active' : '');
+                    card.innerHTML =
+                        '<div class="agent-card-top">' +
+                            '<span class="card-avatar-wrap">' +
+                            '<span class="agent-avatar" style="background:' + avatarColor(g.name) + '">' +
+                                escapeHtml((g.name || '群')[0]) + '</span>' +
+                            (unread ? '<span class="target-unread">' + (unread > 99 ? '99+' : unread) + '</span>' : '') +
+                            '</span>' +
+                            '<span class="agent-name" title="' + escapeAttr(g.name) + '">' + escapeHtml(g.name) + '</span>' +
+                            '<span style="flex:1"></span>' +
+                            '<button class="icon-btn group-card-btn" data-act="edit" title="编辑群组（改名 / 成员 / 管理者）">' + ICONS.edit + '</button>' +
+                            '<button class="icon-btn group-card-btn" data-act="disband" title="解散群组">' + ICONS.trash + '</button>' +
+                        '</div>' +
+                        '<div class="agent-meta"><span class="agent-status-text ' + (online > 0 ? 'online' : 'offline') + '">' +
+                            online + ' / ' + g.agentIds.length + ' 在线</span>' +
+                            (g.managerAgentId
+                                ? '<span title="管理者 agent：@它 可调度群内其他 agent" style="color:var(--warning)">★ ' + escapeHtml(groupMemberName(g.managerAgentId)) + '</span>'
+                                : '') + '</div>' +
+                        '<div class="chip-row">' + g.agentIds.slice(0, 5).map(id =>
+                            '<span class="chip' + (state.agents[id]?.online ? '' : ' chip-off') + '" title="' + escapeAttr(id) + '">' +
+                            escapeHtml(groupMemberName(id)) + '</span>').join('') +
+                            (g.agentIds.length > 5 ? '<span class="chip">+' + (g.agentIds.length - 5) + '</span>' : '') + '</div>';
+                    card.addEventListener('click', (e) => {
+                        const act = e.target.closest('button')?.dataset.act;
+                        if (act === 'edit') { openGroupModal(g); return; }
+                        if (act === 'disband') { disbandGroup(g); return; }
+                        switchSidebarSection('sessions');
+                        selectAgent(key);
+                    });
+                    els.groupList.appendChild(card);
+                });
+            }
+
+            /* 建群/编辑群弹窗：groupEditing 为 null 时是新建，否则为正在编辑的群 */
+            let groupEditing = null;
+            function openGroupModal(group) {
+                const agents = Object.values(state.agents);
+                if (group && !group.agentIds) group = null; // 防御：非 group 对象（如事件）按新建处理
+                if (!group && agents.length < 1) {
+                    showToast('暂无可用 Agent，先接入至少一个', 'warning');
+                    return;
+                }
+                groupEditing = group || null;
+                els.groupModalTitle.textContent = group ? '编辑群组' : '新建群组';
+                els.groupCreate.textContent = group ? '保存' : '创建';
+                els.groupNameInput.value = group ? group.name : '';
+                els.groupMemberList.innerHTML = agents.map(a =>
+                    '<label style="display:flex;align-items:center;gap:8px;padding:6px 4px;cursor:pointer">' +
+                        '<input type="checkbox" value="' + escapeAttr(a.id) + '"' +
+                            (group && group.agentIds.includes(a.id) ? ' checked' : '') + '>' +
+                        '<span class="agent-avatar" style="width:22px;height:22px;background:' + avatarColor(a.name || a.id) + ';font-size:11px">' +
+                            escapeHtml((a.name || a.id)[0]) + '</span>' +
+                        '<span>' + escapeHtml(agentDisplayName(a)) + '</span>' +
+                        '<span style="flex:1"></span>' +
+                        '<span class="agent-status-text ' + (a.online ? 'online' : 'offline') + '" style="font-size:12px">' + (a.online ? '在线' : '离线') + '</span>' +
+                    '</label>').join('');
+                els.groupManagerSelect.innerHTML = '';
+                if (group) {
+                    // 先按当前勾选重建管理者候选并回填原值
+                    refreshGroupManagerOptions();
+                    els.groupManagerSelect.value = group.managerAgentId || '';
+                }
+                els.groupOverlay.classList.add('open');
+                els.groupNameInput.focus();
+            }
+
+            async function disbandGroup(g) {
+                const ok = await confirmModal('解散群组', '解散群组「' + g.name + '」？群会话的历史消息会保留，但群本身不可恢复。', '解散');
+                if (!ok) return;
+                try {
+                    await rpcCall('group.delete', { group_id: g.id });
+                    showToast('群组已解散', 'success');
+                    await syncGroups();
+                } catch (e) {
+                    showToast('解散失败：' + (e.message || e), 'error');
+                }
+            }
+
+            function closeGroupModal() {
+                els.groupOverlay.classList.remove('open');
+            }
+
+            function refreshGroupManagerOptions() {
+                const checked = [...els.groupMemberList.querySelectorAll('input:checked')].map(i => i.value);
+                const prev = els.groupManagerSelect.value;
+                els.groupManagerSelect.innerHTML = '<option value="">（不设管理者）</option>' + checked.map(id =>
+                    '<option value="' + escapeAttr(id) + '">' + escapeHtml(groupMemberName(id)) + '</option>').join('');
+                if (checked.includes(prev)) els.groupManagerSelect.value = prev;
+            }
+
+            async function saveGroupFromModal() {
+                const name = els.groupNameInput.value.trim();
+                const agentIds = [...els.groupMemberList.querySelectorAll('input:checked')].map(i => i.value);
+                if (!name) { showToast('请输入群组名称', 'warning'); return; }
+                if (agentIds.length === 0) { showToast('请至少勾选一个 Agent', 'warning'); return; }
+                try {
+                    if (groupEditing) {
+                        const gid = groupEditing.id;
+                        const prevIds = groupEditing.agentIds || [];
+                        if (name !== groupEditing.name) {
+                            await rpcCall('group.rename', { group_id: gid, name });
+                        }
+                        for (const id of agentIds) {
+                            if (!prevIds.includes(id)) await rpcCall('group.add', { group_id: gid, agent_id: id });
+                        }
+                        for (const id of prevIds) {
+                            if (!agentIds.includes(id)) await rpcCall('group.remove', { group_id: gid, agent_id: id });
+                        }
+                        const manager = els.groupManagerSelect.value || null;
+                        if (manager !== (groupEditing.managerAgentId || null)) {
+                            await rpcCall('group.set_manager', { group_id: gid, manager_agent_id: manager });
+                        }
+                        closeGroupModal();
+                        await syncGroups();
+                        renderChatHeader();
+                        showToast('群组已更新', 'success');
+                    } else {
+                        const res = await rpcCall('group.create', {
+                            name,
+                            agent_ids: agentIds,
+                            manager_agent_id: els.groupManagerSelect.value || null
+                        });
+                        closeGroupModal();
+                        await syncGroups();
+                        selectAgent(groupKeyOf(res.group_id));
+                        showToast('群组「' + name + '」已创建', 'success');
+                    }
+                } catch (e) {
+                    showToast((groupEditing ? '保存失败：' : '创建失败：') + (e.message || e), 'error');
+                }
+            }
+
+            /* 群消息 @mentions 解析：@全体/@all → "all"，@name/@id → 成员 id */
+            function parseGroupMentions(text, group) {
+                const tokens = (text.match(/@([^\s@，。,]+)/g) || []).map(t => t.slice(1));
+                if (tokens.length === 0) return [];
+                const ids = new Set();
+                for (const tok of tokens) {
+                    const lower = tok.toLowerCase();
+                    if (lower === '全体' || lower === 'all') return ['all'];
+                    const hit = group.agentIds.find(id =>
+                        id.toLowerCase() === lower || groupMemberName(id).toLowerCase() === lower);
+                    if (hit) ids.add(hit);
+                }
+                return [...ids];
+            }
+
+            function updateRailUnreadBadge() {
+                const badge = els.railUnreadBadge;
+                if (!badge) return;
+                let n = 0;
+                Object.values(state.sessions).forEach(byAgent =>
+                    Object.values(byAgent).forEach(s => { if (s.hasUnread) n++; }));
+                badge.textContent = n > 99 ? '99+' : String(n);
+                badge.classList.toggle('visible', n > 0);
+            }
+
+            function targetDisplayName(key) {
+                if (isGroupKey(key)) {
+                    const g = groupFromKey(key);
+                    return g ? g.name : '已解散的群';
+                }
+                return agentDisplayName(state.agents[key]) || key;
+            }
+
+            function targetUnreadCount(key) {
+                return Object.values(state.sessions[key] || {}).filter(s => s.hasUnread).length;
+            }
+
+            function targetAvatarHtml(key) {
+                if (isGroupKey(key)) {
+                    const g = groupFromKey(key);
+                    const name = g ? g.name : '群';
+                    return '<span class="agent-avatar" style="background:' + avatarColor(name) + '">' +
+                        escapeHtml((name || '群')[0]) + '</span>';
+                }
+                const a = state.agents[key];
+                return '<span class="agent-avatar" style="background:' + avatarColor(a?.name || key) + '">' +
+                    agentAvatarInner(a) + '</span>';
+            }
+
+            // 「消息」面板：微信式按聊天对象聚合，每行一个对象（预览取最新会话）
+            function renderSessions() {
+                updateRailUnreadBadge();
+                els.sessionList.innerHTML = '';
+                const targets = [];
+                Object.keys(state.sessions).forEach(key => {
+                    if (isGroupKey(key) && !groupFromKey(key)) return; // 已解散的群不在列表展示
+                    const list = Object.values(state.sessions[key] || {});
+                    if (!list.length) return;
+                    targets.push({ key, sessions: list });
+                });
+
+                if (sessionQuery) {
+                    // 搜索模式：下沉到会话级，匹配 会话标题 / 对象名 / 预览
+                    const q = sessionQuery.toLowerCase();
+                    const hits = [];
+                    targets.forEach(t => t.sessions.forEach(s => {
+                        const hay = (s.title + ' ' + targetDisplayName(t.key) + ' ' + (s.preview || '')).toLowerCase();
+                        if (hay.includes(q)) hits.push({ key: t.key, session: s });
+                    }));
+                    hits.sort((a, b) => b.session.updatedAt - a.session.updatedAt);
+                    if (!hits.length) {
+                        els.sessionList.innerHTML = '<div class="empty-hint">没有匹配的会话</div>';
+                        return;
+                    }
+                    hits.forEach(h => els.sessionList.appendChild(renderTargetSessionRow(h.key, h.session)));
+                    return;
+                }
+
+                targets.sort((a, b) => latestOf(b.sessions).updatedAt - latestOf(a.sessions).updatedAt);
+                if (!targets.length) {
+                    const btn = document.createElement('button');
+                    btn.className = 'empty-action';
+                    btn.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" width="14" height="14"><path d="M8 3v10M3 8h10"/></svg> 选择一个 Agent 开始对话';
+                    btn.onclick = () => switchSidebarSection('agents');
+                    els.sessionList.appendChild(btn);
+                    return;
+                }
+                targets.forEach(t => {
+                    els.sessionList.appendChild(renderTargetRow(t.key, latestOf(t.sessions)));
+                    // 只剩 1 条会话时箭头已隐藏，展开标记若残留会留下一个收不起来的列表
+                    if (Object.keys(state.sessions[t.key] || {}).length <= 1) expandedTargets.delete(t.key);
+                    if (expandedTargets.has(t.key)) els.sessionList.appendChild(renderTargetSessions(t.key));
+                });
+            }
+
+            // 展开的对象行下挂会话列表（置顶优先，操作按钮 hover 出现）
+            function renderTargetSessions(key) {
+                const wrap = document.createElement('div');
+                wrap.className = 'target-session-list';
+                const list = Object.values(state.sessions[key] || {}).sort((a, b) => {
                     if (!!a.pinned !== !!b.pinned) return a.pinned ? -1 : 1;
                     return b.updatedAt - a.updatedAt;
                 });
-                if (sessionQuery) {
-                    const q = sessionQuery.toLowerCase();
-                    sorted = sorted.filter(s => s.title.toLowerCase().includes(q));
-                }
-                if (sorted.length === 0) {
-                    els.sessionList.innerHTML = '<div class="empty-hint">' +
-                        (sessionQuery ? '没有匹配的会话' : '点击 + 新建会话') + '</div>';
-                    return;
-                }
+                list.forEach(s => wrap.appendChild(renderSessionItem(s)));
+                return wrap;
+            }
 
-                if (sessionQuery) {
-                    sorted.forEach(s => els.sessionList.appendChild(renderSessionItem(s)));
-                    return;
-                }
+            function latestOf(sessions) {
+                return sessions.reduce((a, b) => (b.updatedAt > a.updatedAt ? b : a));
+            }
 
-                const now = new Date();
-                const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-                const groups = [
-                    ['今天', s => s.updatedAt >= todayStart],
-                    ['昨天', s => s.updatedAt >= todayStart - 86400_000],
-                    ['最近 7 天', s => s.updatedAt >= todayStart - 7 * 86400_000],
-                    ['更早', () => true]
-                ];
-
-                let rest = sorted;
-                groups.forEach(([label, match]) => {
-                    const inGroup = rest.filter(match);
-                    rest = rest.filter(s => !inGroup.includes(s));
-                    if (inGroup.length === 0) return;
-                    const labelEl = document.createElement('div');
-                    labelEl.className = 'session-group-label';
-                    labelEl.textContent = label;
-                    els.sessionList.appendChild(labelEl);
-                    inGroup.forEach(s => els.sessionList.appendChild(renderSessionItem(s)));
+            function renderTargetRow(key, latest) {
+                const item = document.createElement('div');
+                item.className = 'target-row' + (key === state.currentAgentId ? ' active' : '');
+                const unread = targetUnreadCount(key);
+                const expanded = expandedTargets.has(key);
+                const multi = Object.keys(state.sessions[key] || {}).length > 1;
+                item.innerHTML =
+                    targetAvatarHtml(key) +
+                    '<div class="session-body">' +
+                        '<div class="session-title">' + escapeHtml(targetDisplayName(key)) + '</div>' +
+                        (latest.preview ? '<div class="session-preview">' + escapeHtml(latest.preview) + '</div>' : '') +
+                        '<div class="session-meta">' + relativeTime(latest.updatedAt) + '</div>' +
+                    '</div>' +
+                    (unread ? '<span class="target-unread">' + (unread > 99 ? '99+' : unread) + '</span>' : '') +
+                    (multi
+                        ? '<button class="icon-btn row-chevron' + (expanded ? ' open' : '') + '" title="' + (expanded ? '收起会话列表' : '展开会话列表') + '">' +
+                            '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 6.5L8 10l3.5-3.5"/></svg></button>'
+                        : '');
+                item.addEventListener('click', (e) => {
+                    if (e.target.closest('.row-chevron')) {
+                        if (expanded) expandedTargets.delete(key); else expandedTargets.add(key);
+                        renderSessions();
+                        return;
+                    }
+                    selectAgent(key);
                 });
+                return item;
+            }
+
+            function renderTargetSessionRow(key, s) {
+                const item = document.createElement('div');
+                item.className = 'target-row target-row-session' +
+                    (key === state.currentAgentId && s.id === state.currentSessionId ? ' active' : '');
+                item.innerHTML =
+                    targetAvatarHtml(key) +
+                    '<div class="session-body">' +
+                        '<div class="session-title">' + escapeHtml(s.title) + '</div>' +
+                        '<div class="session-meta">' + escapeHtml(targetDisplayName(key)) + ' · ' + relativeTime(s.updatedAt) +
+                            ' · ' + (s.messageCount ?? 0) + ' 条</div>' +
+                    '</div>';
+                item.addEventListener('click', () => {
+                    selectAgent(key);
+                    if (state.sessions[key]?.[s.id]) selectSession(s.id);
+                });
+                return item;
             }
 
             function sessionPreview(s) {
@@ -1570,7 +1989,8 @@
                     '<div class="session-body">' +
                         '<div class="session-title">' + escapeHtml(s.title) +
                             (s.hasUnread ? '<span class="unread-dot"></span>' : '') + '</div>' +
-                        '<div class="session-meta">' + relativeTime(s.updatedAt) + ' · ' + (s.messageCount ?? s.messages.length) + ' 条</div>' +
+                        '<div class="session-meta">' + relativeTime(s.updatedAt) + ' · ' + (s.messageCount ?? s.messages.length) + ' 条' +
+                            (s.workdir ? ' · <span title="工作目录：' + escapeAttr(s.workdir) + '">📂 ' + escapeHtml(s.workdir.split('/').filter(Boolean).pop() || s.workdir) + '</span>' : '') + '</div>' +
                         (preview ? '<div class="session-preview">' + escapeHtml(preview) + '</div>' : '') +
                     '</div>' +
                     '<div class="session-actions">' +
@@ -1589,10 +2009,88 @@
                         renderSessions();
                         return;
                     }
+                    if (state.currentAgentId !== s.agentId) selectAgent(s.agentId);
                     selectSession(s.id);
                 });
                 item.addEventListener('dblclick', () => startRenameSession(item, s));
                 return item;
+            }
+
+            /* header 会话下拉：搜索 + 新话题 + 当前对象的历史会话 */
+            let sessionMenuQuery = '';
+
+            function renderSessionMenu() {
+                if (!els.sessionMenuList) return;
+                els.sessionMenuList.innerHTML = '';
+                if (!state.currentAgentId) return;
+                let list = Object.values(getSessionsForAgent(state.currentAgentId)).sort((a, b) => {
+                    if (!!a.pinned !== !!b.pinned) return a.pinned ? -1 : 1;
+                    return b.updatedAt - a.updatedAt;
+                });
+                if (sessionMenuQuery) {
+                    const q = sessionMenuQuery.toLowerCase();
+                    list = list.filter(s => s.title.toLowerCase().includes(q));
+                }
+                if (!list.length) {
+                    els.sessionMenuList.innerHTML = '<div class="empty-hint">没有匹配的会话</div>';
+                    return;
+                }
+                list.forEach(s => els.sessionMenuList.appendChild(renderSessionItem(s)));
+            }
+
+            function toggleSessionMenu(open) {
+                if (!els.sessionMenu) return;
+                const willOpen = open ?? !els.sessionMenu.classList.contains('open');
+                if (willOpen && !getCurrentSession()) return;
+                els.sessionMenu.classList.toggle('open', willOpen);
+                els.sessionMenuBtn.classList.toggle('active', willOpen);
+                if (willOpen) {
+                    sessionMenuQuery = '';
+                    els.sessionMenuSearch.value = '';
+                    renderSessionMenu();
+                    setTimeout(() => els.sessionMenuSearch.focus(), 60);
+                }
+            }
+
+            /* ---------- 会话工作目录（metadata.workdir） ---------- */
+
+            function openWorkdirModal() {
+                const session = getCurrentSession();
+                if (!session) return;
+                els.workdirInput.value = session.workdir || '';
+                els.workdirOverlay.classList.add('open');
+                setTimeout(() => els.workdirInput.focus(), 60);
+            }
+
+            function closeWorkdirModal() {
+                els.workdirOverlay.classList.remove('open');
+            }
+
+            async function saveSessionWorkdir(clear) {
+                const session = getCurrentSession();
+                if (!session) return;
+                const workdir = clear ? '' : els.workdirInput.value.trim();
+                try {
+                    await rpcCall('session.set_workdir', { id: session.id, workdir });
+                } catch (e) {
+                    showToast('设置工作目录失败：' + (e.message || e), 'error');
+                    return;
+                }
+                session.workdir = workdir || null;
+                closeWorkdirModal();
+                renderChatHeader();
+                showToast(workdir ? '工作目录已绑定：' + workdir : '已清除工作目录绑定', 'success');
+            }
+
+            function workdirChipHtml(session) {
+                if (session.workdir) {
+                    return '<span class="chip chip-workdir" id="workdirChip" title="会话工作目录，点击修改：' + escapeAttr(session.workdir) + '">📂 <span class="cw-path">' + escapeHtml(session.workdir) + '</span></span>';
+                }
+                return '<span class="chip chip-workdir" id="workdirChip" style="color:var(--text-tertiary)" title="绑定会话工作目录（Agent 在该目录下干活）">📂 目录</span>';
+            }
+
+            function bindWorkdirChip() {
+                els.headerChips?.querySelector('#workdirChip')?.addEventListener('click', openWorkdirModal);
             }
 
             function startRenameSession(item, session) {
@@ -1617,6 +2115,7 @@
                     }
                     renderSessions();
                     renderChatHeader();
+                    renderSessionMenu();
                 };
                 input.addEventListener('keydown', (e) => {
                     if (e.key === 'Enter') finish(true);
@@ -1645,6 +2144,7 @@
                 }
                 saveState();
                 renderSessions();
+                renderSessionMenu();
                 renderChat();
             }
 
@@ -1652,15 +2152,36 @@
 
             function renderChatHeader() {
                 const session = getCurrentSession();
+                if (els.sessionMenuBtn) {
+                    els.sessionMenuBtn.style.display = session ? '' : 'none';
+                }
                 if (!session) {
                     els.chatTitle.textContent = '选择一个 Agent 开始对话';
                     els.chatSubtitle.textContent = '';
                     els.headerChips.innerHTML = '';
                     return;
                 }
+                const countText = (session.messageCount ?? session.messages.length) + ' 条';
+                const group = groupFromKey(session.agentId);
+                if (group) {
+                    els.chatTitle.textContent = group.name;
+                    els.chatSubtitle.textContent = session.title + ' · ' + countText;
+                    els.typingAvatar.textContent = (group.name || '群')[0];
+                    els.typingAvatar.style.background = avatarColor(group.name);
+                    els.typingAvatar.style.color = '#fff';
+                    const chips = [];
+                    if (group.managerAgentId) {
+                        chips.push('<span class="chip" style="color:var(--warning)" title="管理者 agent：@它 可调度群内其他 agent">★ ' + escapeHtml(groupMemberName(group.managerAgentId)) + '</span>');
+                    }
+                    chips.push('<span class="chip" title="@成员 或 @全体 发消息">' + group.agentIds.length + ' 个成员</span>');
+                    chips.push(workdirChipHtml(session));
+                    els.headerChips.innerHTML = chips.join('');
+                    bindWorkdirChip();
+                    return;
+                }
                 const agent = state.agents[session.agentId];
-                els.chatTitle.textContent = agent?.name || session.agentId;
-                els.chatSubtitle.textContent = session.title;
+                els.chatTitle.textContent = agentDisplayName(agent) || session.agentId;
+                els.chatSubtitle.textContent = session.title + ' · ' + countText;
                 els.typingAvatar.innerHTML = agentAvatarInner(agent);
                 els.typingAvatar.style.background = avatarColor(agent?.name || session.agentId);
                 const chips = [];
@@ -1684,7 +2205,9 @@
                 (agent?.capabilities || []).filter(c => c.type !== 'command').slice(0, 5).forEach(c => {
                     chips.push('<span class="chip" title="' + escapeAttr(c.description || '') + '">' + escapeHtml(c.name || c.type) + '</span>');
                 });
+                chips.push(workdirChipHtml(session));
                 els.headerChips.innerHTML = chips.join('');
+                bindWorkdirChip();
             }
 
             const MSG_PAGE = 50;
@@ -1720,14 +2243,14 @@
                     .sort((a, b) => (b.online ? 1 : 0) - (a.online ? 1 : 0) || (b.lastHeartbeat || 0) - (a.lastHeartbeat || 0))
                     .slice(0, 4);
                 if (recent.length === 0) {
-                    els.dashRecent.innerHTML = '<div class="dash-recent-empty">暂无 Agent，请联系管理员或启动终端 Client</div>';
+                    els.dashRecent.innerHTML = '<div class="dash-recent-empty">暂无 Agent，可前往个人中心接入，或用配对码连接 AgentClient</div>';
                 } else {
                     els.dashRecent.innerHTML = recent.map(a => {
                         const status = a.online ? (a.busy ? 'busy' : 'online') : 'offline';
-                        return '<button class="dash-mini-agent" data-agent="' + escapeAttr(a.id) + '" title="' + escapeAttr(a.name || a.id) + '">' +
+                        return '<button class="dash-mini-agent" data-agent="' + escapeAttr(a.id) + '" title="' + escapeAttr(agentDisplayName(a)) + '">' +
                             '<div class="dma-top"><span class="agent-avatar" style="background:' + avatarColor(a.name || a.id) + '">' + agentAvatarInner(a) + '</span>' +
                             '<span class="status-dot ' + status + '"></span></div>' +
-                            '<div class="dma-name">' + escapeHtml(a.name || a.id) + '</div>' +
+                            '<div class="dma-name">' + escapeHtml(agentDisplayName(a)) + '</div>' +
                             '<div class="dma-meta">' + (a.platform?.os ? escapeHtml(a.platform.os) : '—') + '</div>' +
                             '</button>';
                     }).join('');
@@ -1842,7 +2365,7 @@
                 const wrap = document.createElement('div');
                 wrap.className = 'suggestions-wrap';
                 wrap.innerHTML = '<div class="suggestions-hint">向 ' +
-                    escapeHtml(agent?.name || session.agentId) + ' 提问，或试试：</div>' +
+                    escapeHtml(agentDisplayName(agent) || session.agentId) + ' 提问，或试试：</div>' +
                     '<div class="suggestions">' +
                     uniq.map(p => '<button class="suggestion-chip">' + escapeHtml(p) + '</button>').join('') +
                     '</div>';
@@ -1885,7 +2408,8 @@
 
                 const meta = document.createElement('div');
                 meta.className = 'message-meta';
-                meta.innerHTML = '<span class="message-author">' + (msg.role === 'user' ? '我' : 'Agent') + '</span>' +
+                meta.innerHTML = '<span class="message-author">' + (msg.role === 'user' ? '我'
+                    : escapeHtml(agentDisplayName(state.agents[msg.agentId]) || msg.agentId || 'Agent')) + '</span>' +
                     '<span class="message-time" title="' + new Date(msg.createdAt).toLocaleString() + '">' + formatTime(msg.createdAt) + '</span>' +
                     (msg.durationMs !== undefined
                         ? '<span class="message-duration">耗时 ' + formatDuration(msg.durationMs) + '</span>'
@@ -2122,15 +2646,19 @@
                         '.interaction-card[data-task-id="' + card.dataset.taskId + '"]:not(.answered)'
                     ).length > 0;
                 }
+                const answerText = '已回复：' + respondAnswerText(response);
                 const answer = document.createElement('div');
                 answer.className = 'ic-answer';
-                answer.textContent = '已回复：' + (
-                    response && typeof response === 'object' && response.decision
-                        ? ({ allow: '确认', deny: '拒绝', cancel: '取消' }[response.decision] || response.decision)
-                        : (response === true ? '确认' : response === false ? '拒绝' : String(response))
-                );
+                answer.textContent = answerText;
                 card.appendChild(answer);
+                collapseAnsweredCard(card, answerText);
                 message.answered = true;
+                // 本地 chunk 同步标记：网关落库前刷新页面也有已答状态兜底
+                const ansChunk = (message.chunks || []).find(c =>
+                    (card.dataset.confirmId && c.confirmId === card.dataset.confirmId) ||
+                    (card.dataset.promptId && c.promptId === card.dataset.promptId) ||
+                    (card.dataset.blockId && c.blockId === card.dataset.blockId));
+                if (ansChunk) { ansChunk.answered = true; ansChunk.answer = response; }
                 saveState();
                 send({
                     jsonrpc: '2.0',
@@ -2160,7 +2688,74 @@
                         merged.push({ ...c });
                     }
                 }
-                return merged.map(c => renderChunk(c, msg)).join('');
+                // action 与其 result 合并为一行工具条目；中间隔着确认框时按 name/顺序归位
+                const tokens = [];
+                const rows = [];
+                for (const c of merged) {
+                    if (c.type === 'action') {
+                        const row = { action: c, results: [] };
+                        rows.push(row); tokens.push(row);
+                    } else if (c.type === 'result') {
+                        let host = null;
+                        for (let i = rows.length - 1; i >= 0; i--) {
+                            const r = rows[i];
+                            if (r.results.length > 0) continue;
+                            if (host === null) host = r;
+                            if (r.action?.name && c.name && r.action.name === c.name) { host = r; break; }
+                        }
+                        if (host) host.results.push(c);
+                        else { const row = { action: null, results: [c] }; rows.push(row); tokens.push(row); }
+                    } else {
+                        tokens.push(renderChunk(c, msg));
+                    }
+                }
+                return tokens.map(t => typeof t === 'string' ? t : toolRowHtml(t.action, t.results)).join('');
+            }
+
+            // 工具调用一行摘要：action + result 合并，默认折叠，点击展开参数与完整结果
+            function firstLine(text) {
+                if (!text) return '';
+                const t = String(text).replace(/\s+/g, ' ').trim();
+                return t.length > 120 ? t.slice(0, 120) + '…' : t;
+            }
+
+            function toolArgsText(action) {
+                if (action.text && action.text.trim()) return action.text.trim();
+                if (action.arguments) {
+                    return typeof action.arguments === 'string'
+                        ? action.arguments : JSON.stringify(action.arguments);
+                }
+                return '';
+            }
+
+            function toolResultText(r) {
+                const items = r.items || [];
+                const t = items.find(it => it.type === 'text')?.text || r.text || '';
+                return stripMarkdown(t || '').trim();
+            }
+
+            function toolRowHtml(action, results) {
+                const name = action?.name || results[0]?.name || 'Tool';
+                const args = action ? toolArgsText(action) : '';
+                let res = '';
+                let hasImage = false;
+                for (const r of results) {
+                    if (!res) res = toolResultText(r);
+                    if ((r.items || []).some(it => it.type === 'image')) hasImage = true;
+                }
+                let summary = args ? firstLine(args) : '';
+                if (res) summary = summary ? summary + ' → ' + firstLine(res) : firstLine(res);
+                if (hasImage) summary += '（含图片）';
+                let body = '';
+                if (args) body += '<pre class="tool-pre">' + escapeHtml(args) + '</pre>';
+                for (const r of results) {
+                    const items = (r.items && r.items.length) ? r.items : [{ type: 'text', text: r.text || '' }];
+                    body += items.map(renderResultItem).join('');
+                }
+                return '<div class="chunk tool"><div class="chunk-head">' + ICONS.play +
+                    '<span class="tool-name">' + escapeHtml(name) + '</span>' +
+                    '<span class="tool-summary">' + escapeHtml(summary) + '</span>' +
+                    '</div><div class="chunk-body"><div class="chunk-inner"><div class="chunk-pad">' + body + '</div></div></div></div>';
             }
 
             function renderChunk(chunk, msg) {
@@ -2173,17 +2768,9 @@
                     case 'thinking':
                         return chunkBox('thinking', 'Thinking', escapeHtml(chunk.text || ''), keepOpen(chunk.text), ICONS.think);
                     case 'action':
-                        return chunkBox('action', 'Action · ' + escapeHtml(chunk.name || ''), escapeHtml(chunk.text || ''), keepOpen(chunk.text), ICONS.play);
+                        return toolRowHtml(chunk, []);
                     case 'result': {
-                        const items = chunk.items || [];
-                        const richItems = items.filter(it => it.type !== 'text');
-                        const label = chunk.name ? 'Result · ' + escapeHtml(chunk.name) : 'Result';
-                        // Read/Bash 等工具结果默认折叠，避免刷屏；点击标题展开
-                        if (richItems.length > 0) {
-                            const body = items.map(renderResultItem).join('');
-                            return chunkBox('result', label, body, false, ICONS.checkCircle);
-                        }
-                        return chunkBox('result', label, escapeHtml(chunk.text || ''), false, ICONS.checkCircle);
+                        return toolRowHtml(null, [chunk]);
                     }
                     case 'image':
                         // 顶层 image chunk 罕见但兼容：包成单元素 result 处理
@@ -2311,65 +2898,127 @@
                     '<div class="chunk-body"><div class="chunk-inner"><div class="chunk-pad">' + bodyHtml + '</div></div></div></div>';
             }
 
+            // 已回复/已撤销的交互卡片折叠为一行摘要，点击展开查看原始问题与回复记录
+            function answeredCardShell(classes, attrs, label, snippet, answerText, inner) {
+                return '<div class="' + classes + ' answered"' + attrs + '>' +
+                    '<div class="chunk-head">' + ICONS.checkCircle +
+                    '<span class="ic-sum-label">' + escapeHtml(label) + '</span>' +
+                    '<span class="ic-sum-answer">' + escapeHtml(answerText) + '</span>' +
+                    '<span class="ic-sum-text">' + escapeHtml(firstLine(stripMarkdown(snippet || ''))) + '</span>' +
+                    '</div><div class="chunk-body"><div class="chunk-inner"><div class="chunk-pad">' + inner + '</div></div></div></div>';
+            }
+
+            function collapseAnsweredCard(card, answerText) {
+                const label = card.querySelector('.ic-label')?.textContent || '交互';
+                const src = card.querySelector('.ic-text') || card.querySelector('.ic-block-section');
+                const original = card.innerHTML;
+                card.innerHTML = '<div class="chunk-head">' + ICONS.checkCircle +
+                    '<span class="ic-sum-label">' + escapeHtml(label) + '</span>' +
+                    '<span class="ic-sum-answer">' + escapeHtml(answerText) + '</span>' +
+                    '<span class="ic-sum-text">' + escapeHtml(firstLine(stripMarkdown(src?.textContent || ''))) + '</span>' +
+                    '</div><div class="chunk-body"><div class="chunk-inner"><div class="chunk-pad">' + original + '</div></div></div>';
+                card.querySelector('.chunk-head').onclick = () => card.classList.toggle('open');
+            }
+
+            // 应答文本归一：decision → 确认/拒绝/取消；数组 → 顿号连接；对象 → JSON
+            function respondAnswerText(response) {
+                if (response && typeof response === 'object') {
+                    if (response.decision) {
+                        return ({ allow: '确认', deny: '拒绝', cancel: '取消' }[response.decision] || response.decision);
+                    }
+                    if (Array.isArray(response)) return response.join('、');
+                    try { return JSON.stringify(response); } catch { return String(response); }
+                }
+                return response === true ? '确认' : response === false ? '拒绝' : String(response);
+            }
+
+            // 交互卡片终态：chunk 级 answered/cancelled（网关随任务落库）优先，
+            // message.answered 仅兼容旧 localStorage 数据
+            const CANCEL_REASON_TEXT = {
+                task_cancelled: '任务取消', interrupted: '被中断', agent_exited: 'Agent 退出', 'task ended': '任务结束'
+            };
+            function chunkResolveState(chunk, msg) {
+                if (chunk.cancelled) {
+                    const reason = CANCEL_REASON_TEXT[chunk.reason] || chunk.reason || '任务结束';
+                    return { answered: true, cancelled: true, text: '已撤销：' + reason };
+                }
+                // 旧数据兜底：任务已终结却无任何标记的交互 chunk（本次持久化上线前落库的），按撤销渲染
+                if (msg && msg.done && !chunk.answered
+                    && (chunk.type === 'confirm_required' || chunk.type === 'prompt_required' || chunk.type === 'block_required')) {
+                    return { answered: true, cancelled: true, text: '已撤销：任务结束' };
+                }
+                if (chunk.answered || (msg && msg.answered)) {
+                    return { answered: true, cancelled: false, text: chunk.answer === undefined ? '已回复' : '已回复：' + respondAnswerText(chunk.answer) };
+                }
+                return { answered: false, cancelled: false, text: '' };
+            }
+
             function interactionCard(label, chunk, msg, buttons) {
-                const answered = msg && msg.answered;
-                let html = '<div class="interaction-card' + (answered ? ' answered' : '') + '"' +
+                const state = chunkResolveState(chunk, msg);
+                const attrs =
                     ' data-message-id="' + (msg?.id || '') + '"' +
                     ' data-agent-id="' + escapeAttr(msg?.agentId || '') + '"' +
                     ' data-task-id="' + escapeAttr(msg?.taskId || '') + '"' +
                     (chunk.confirmId ? ' data-confirm-id="' + escapeAttr(chunk.confirmId) + '"' : '') +
-                    (chunk.promptId ? ' data-prompt-id="' + escapeAttr(chunk.promptId) + '"' : '') + '>' +
-                    '<div class="ic-label">' + label + '</div>' +
+                    (chunk.promptId ? ' data-prompt-id="' + escapeAttr(chunk.promptId) + '"' : '');
+                let inner = '<div class="ic-label">' + label + '</div>' +
                     '<div class="ic-text">' + escapeHtml(chunk.text || '') + '</div>';
                 if (buttons) {
-                    html += '<div class="ic-actions">' + buttons.map(([t, v, cls]) =>
+                    inner += '<div class="ic-actions">' + buttons.map(([t, v, cls]) =>
                         '<button class="btn ' + cls + '" data-respond=\'' + JSON.stringify(v) + '\'>' + t + '</button>'
                     ).join('') + '</div>';
                 } else {
-                    html += '<input class="ic-input" placeholder="输入内容后回车提交">';
+                    inner += '<input class="ic-input" placeholder="输入内容后回车提交">';
                 }
-                if (answered) html += '<div class="ic-answer">已回复</div>';
-                return html + '</div>';
+                if (state.answered) {
+                    return answeredCardShell('interaction-card' + (state.cancelled ? ' cancelled' : ''), attrs, label, chunk.text, state.text,
+                        inner + '<div class="ic-answer">' + escapeHtml(state.text) + '</div>');
+                }
+                return '<div class="interaction-card"' + attrs + '>' + inner + '</div>';
             }
 
             // prompt_required：options 存在时给可选按钮（点击即提交）；
             // allowFreeText 或无 options 时给输入框 + 提交按钮。
             function renderPromptCard(chunk, msg) {
-                const answered = msg && msg.answered;
+                const state = chunkResolveState(chunk, msg);
                 const hasOptions = chunk.options && chunk.options.length > 0;
                 const allowFree = !!chunk.allowFreeText;
                 const showInput = allowFree || !hasOptions;
-                let html = '<div class="interaction-card prompt-card' + (answered ? ' answered' : '') + '"' +
+                const attrs =
                     ' data-message-id="' + (msg?.id || '') + '"' +
                     ' data-agent-id="' + escapeAttr(msg?.agentId || '') + '"' +
                     ' data-task-id="' + escapeAttr(msg?.taskId || '') + '"' +
                     ' data-prompt-id="' + escapeAttr(chunk.promptId || '') + '"' +
                     ' data-allow-free="' + (allowFree ? '1' : '') + '"' +
-                    ' data-multi="' + (chunk.multi ? '1' : '') + '">';
-                html += '<div class="ic-label">需要输入' + (chunk.multi ? '（可多选）' : '') + '</div>';
-                html += '<div class="ic-text">' + renderMarkdown(chunk.text || '') + '</div>';
+                    ' data-multi="' + (chunk.multi ? '1' : '') + '"';
+                const label = '需要输入' + (chunk.multi ? '（可多选）' : '');
+                let inner = '<div class="ic-label">' + label + '</div>';
+                inner += '<div class="ic-text">' + renderMarkdown(chunk.text || '') + '</div>';
                 if (hasOptions) {
-                    html += '<div class="ic-options">';
+                    inner += '<div class="ic-options">';
                     chunk.options.forEach((opt, i) => {
-                        html += '<button class="ic-option btn btn-ghost" data-opt-idx="' + i + '">' +
+                        inner += '<button class="ic-option btn btn-ghost" data-opt-idx="' + i + '">' +
                             escapeHtml(String(opt)) + '</button>';
                     });
-                    html += '</div>';
+                    inner += '</div>';
                     if (chunk.multi) {
-                        html += '<button class="btn btn-primary ic-submit" disabled>请先选择</button>';
+                        inner += '<button class="btn btn-primary ic-submit" disabled>请先选择</button>';
                     }
                 }
                 if (showInput) {
-                    html += '<div class="ic-input-row">';
-                    html += '<input class="ic-input" placeholder="' +
+                    inner += '<div class="ic-input-row">';
+                    inner += '<input class="ic-input" placeholder="' +
                         (hasOptions ? '或输入自定义内容…' : '输入内容后回车提交') + '">';
                     if (!hasOptions || allowFree) {
-                        html += '<button class="btn btn-primary ic-submit">提交</button>';
+                        inner += '<button class="btn btn-primary ic-submit">提交</button>';
                     }
-                    html += '</div>';
+                    inner += '</div>';
                 }
-                if (answered) html += '<div class="ic-answer">已回复</div>';
-                return html + '</div>';
+                if (state.answered) {
+                    return answeredCardShell('interaction-card prompt-card' + (state.cancelled ? ' cancelled' : ''), attrs, label, chunk.text, state.text,
+                        inner + '<div class="ic-answer">' + escapeHtml(state.text) + '</div>');
+                }
+                return '<div class="interaction-card prompt-card"' + attrs + '>' + inner + '</div>';
             }
 
             // block_required：精简版 Block Kit。支持的 block 类型：
@@ -2378,13 +3027,13 @@
             // - actions: button 列表（点击即提交，携带 action_id + 各 input 的值）
             // 没有 actions 时末尾补一个「提交」按钮，action_id = "submit"。
             function renderBlockCard(chunk, msg) {
-                const answered = msg && msg.answered;
-                let html = '<div class="interaction-card block-card' + (answered ? ' answered' : '') + '"' +
+                const state = chunkResolveState(chunk, msg);
+                const attrs =
                     ' data-message-id="' + (msg?.id || '') + '"' +
                     ' data-agent-id="' + escapeAttr(msg?.agentId || '') + '"' +
                     ' data-task-id="' + escapeAttr(msg?.taskId || '') + '"' +
-                    ' data-block-id="' + escapeAttr(chunk.blockId || '') + '">';
-                html += '<div class="ic-label">需要填写</div>';
+                    ' data-block-id="' + escapeAttr(chunk.blockId || '') + '"';
+                let html = '<div class="ic-label">需要填写</div>';
                 const hasActions = chunk.blocks.some(b => b.type === 'actions');
                 for (const b of chunk.blocks) {
                     if (b.type === 'section') {
@@ -2433,8 +3082,13 @@
                 if (!hasActions) {
                     html += '<button class="btn btn-primary ic-block-submit" data-block-action="submit">提交</button>';
                 }
-                if (answered) html += '<div class="ic-answer">已回复</div>';
-                return html + '</div>';
+                const firstSection = chunk.blocks.find(b => b.type === 'section');
+                if (state.answered) {
+                    return answeredCardShell('interaction-card block-card' + (state.cancelled ? ' cancelled' : ''), attrs, '需要填写',
+                        firstSection?.text?.text || '', state.text,
+                        html + '<div class="ic-answer">' + escapeHtml(state.text) + '</div>');
+                }
+                return '<div class="interaction-card block-card"' + attrs + '>' + html + '</div>';
             }
 
             // 收集 block 表单中所有 input 的值，组装成 { block_id: { action_id: value } }
@@ -2461,8 +3115,14 @@
                 answer.className = 'ic-answer';
                 answer.textContent = '已提交：' + (actionId || 'submit');
                 card.appendChild(answer);
+                collapseAnsweredCard(card, '已提交：' + (actionId || 'submit'));
                 const message = findMessageById(card.dataset.messageId);
-                if (message) { message.answered = true; saveState(); }
+                if (message) {
+                    message.answered = true;
+                    const ansChunk = (message.chunks || []).find(c => c.blockId === card.dataset.blockId);
+                    if (ansChunk) { ansChunk.answered = true; ansChunk.answer = response; }
+                    saveState();
+                }
                 send({
                     jsonrpc: '2.0',
                     method: 'task.respond',
@@ -2629,8 +3289,14 @@
                 if (!el) { renderChat(); return; }
                 if (msg.done || (msg.chunks && msg.chunks.length > 0)) el.classList.remove('msg-pending');
                 const content = el.querySelector('.message-content');
+                // 流式重渲染会整体替换 innerHTML，先记录手动展开的折叠块再恢复
+                const openStates = [...el.querySelectorAll('.chunk, .interaction-card')]
+                    .map(b => b.classList.contains('open'));
                 content.innerHTML = renderChunks(msg.chunks, msg) +
                     (msg.done ? '' : '<span class="stream-cursor"></span>');
+                el.querySelectorAll('.chunk, .interaction-card').forEach((b, i) => {
+                    if (openStates[i]) b.classList.add('open');
+                });
                 if (msg.done && msg.durationMs !== undefined) {
                     const meta = el.querySelector('.message-meta');
                     if (meta && !meta.querySelector('.message-duration')) {
@@ -2693,10 +3359,7 @@
                         );
                         cards.forEach(card => {
                             card.classList.add('answered', 'cancelled');
-                            const note = document.createElement('div');
-                            note.className = 'ic-answer ic-cancel';
-                            note.textContent = '已撤销：任务结束';
-                            card.appendChild(note);
+                            collapseAnsweredCard(card, '已撤销：任务结束');
                         });
                     }
                     if (session.agentId === state.currentAgentId && session.id === state.currentSessionId) {
@@ -2745,6 +3408,8 @@
                 saveState();
                 renderSessions();
                 renderChat();
+                renderSessionMenu();
+                toggleSessionMenu(false);
                 toggleChatSearch(false);
                 syncChatChrome();
                 const session = getCurrentSession();
@@ -2766,7 +3431,9 @@
                 }
                 saveState();
                 renderSessions();
+                renderSessionMenu();
                 renderChat();
+                toggleSessionMenu(false);
                 els.messageInput.focus();
             }
 
@@ -2802,7 +3469,7 @@
                 els.loginOverlay.classList.remove('open');
                 setConnectionStatus('connecting', '连接中…');
                 wsEverOpened = false;
-                ws = new WebSocket(WS_URL + '?token=' + encodeURIComponent(state.token));
+                ws = new WebSocket(WS_URL + '?token=' + encodeURIComponent(state.token) + '&scope=own');
 
                 ws.onopen = () => {
                     const wasOffline = !!wsWasOnline;
@@ -2814,7 +3481,10 @@
                     reconnectDelay = RECONNECT_MIN;
                     updateInputState();
                     if (wasOffline) showToast('已重新连接', 'success');
+                    syncGroups();
+                    syncAllSessions();
                     if (state.currentAgentId) {
+                        // 当前对象补一次定向同步（含"无会话自动建一个"的兜底）
                         syncSessions(state.currentAgentId);
                         // 重连后重新拉当前 session 的消息：断线期间可能漏 chunk，
                         // 服务端持久化的 done 状态比 UI 当前状态可信
@@ -2864,6 +3534,23 @@
                     connect();
                     reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX);
                 }, reconnectDelay);
+            }
+
+            function logout() {
+                closeSettings();
+                state.token = '';
+                saveState();
+                if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+                if (ws) {
+                    ws.onclose = null; // 主动退出不触发重连逻辑
+                    ws.close();
+                    ws = null;
+                }
+                wsConnected = false;
+                failAllPending('已退出登录');
+                setConnectionStatus('disconnected', '未登录');
+                updateInputState();
+                els.loginOverlay.classList.add('open');
             }
 
             function send(obj) {
@@ -2932,6 +3619,7 @@
                 return {
                     id: a.id,
                     name: a.name || a.id,
+                    nickname: a.nickname ?? base.nickname ?? null,
                     online: a.status === 'online' || a.status === 'busy',
                     busy: a.status === 'busy',
                     status: a.status || '',
@@ -2946,6 +3634,11 @@
                 };
             }
 
+            function agentDisplayName(a) {
+                if (!a) return '';
+                return (a.nickname && a.nickname.trim()) || a.name || a.id;
+            }
+
             function handleAgentList(params) {
                 const list = params.agents || [];
                 const next = {};
@@ -2953,6 +3646,7 @@
                 state.agents = next;
                 saveState();
                 renderAgents();
+                renderGroups(); // 群卡片成员名/在线数依赖 agent 列表
                 if (!state.currentAgentId && list.length > 0) {
                     selectAgent(list[0].id);
                 } else if (state.currentAgentId && !next[state.currentAgentId]) {
@@ -2971,16 +3665,17 @@
                     agent.online = true;
                     agent.busy = false;
                     state.agents[agentId] = agent;
-                    showToast('Agent 上线：' + (agent.name || agentId), 'success');
+                    showToast('Agent 上线：' + agentDisplayName(agent), 'success');
                 } else if (params.event === 'unregister' || params.event === 'offline') {
                     if (state.agents[agentId]) {
                         state.agents[agentId].online = false;
                         state.agents[agentId].busy = false;
-                        showToast('Agent 离线：' + (state.agents[agentId].name || agentId), 'warning');
+                        showToast('Agent 离线：' + agentDisplayName(state.agents[agentId]), 'warning');
                     }
                 }
                 saveState();
                 renderAgents();
+                renderGroups();
             }
 
             function handleTaskProgress(params) {
@@ -2990,6 +3685,17 @@
                 const session = state.sessions[task.agentId]?.[task.sessionId];
                 if (!session) return;
                 task.lastActivity = Date.now();
+
+                // 群聊归因：占位气泡首次收到某 agent 的进度时落归因（头像/名称渲染用）
+                if (task.groupId && params.agent_id) {
+                    const placeholder = session.messages.find(m => m.id === task.messageId);
+                    if (placeholder && !placeholder.agentId) {
+                        placeholder.agentId = params.agent_id;
+                        if (state.currentAgentId === task.agentId && state.currentSessionId === task.sessionId) {
+                            renderChat();
+                        }
+                    }
+                }
 
                 // 等待用户裁决（确认/输入/富交互）期间不算"无响应"：看门狗跳过这类任务
                 if (params.type === 'confirm_required' || params.type === 'prompt_required' || params.type === 'block_required') {
@@ -3005,10 +3711,7 @@
                         );
                         if (card && !card.classList.contains('answered')) {
                             card.classList.add('answered', 'cancelled');
-                            const note = document.createElement('div');
-                            note.className = 'ic-answer ic-cancel';
-                            note.textContent = '已撤销：' + (params.reason || 'task_cancelled');
-                            card.appendChild(note);
+                            collapseAnsweredCard(card, '已撤销：' + (params.reason || 'task_cancelled'));
                         }
                     }
                     return;
@@ -3114,10 +3817,11 @@
                     };
                 }
                 if (Array.isArray(params.content) && params.content.length > 0) {
-                    return { type, text: params.content.map(item => item.text || '').join('') };
+                    return { type, text: params.content.map(item => item.text || '').join(''),
+                        name: params.name || '', arguments: params.arguments };
                 }
                 if (typeof params.content === 'string' && params.content) {
-                    return { type, text: params.content };
+                    return { type, text: params.content, name: params.name || '', arguments: params.arguments };
                 }
                 return null;
             }
@@ -3232,6 +3936,37 @@
             function updateCmdMenu() {
                 const v = els.messageInput.value;
                 const session = getCurrentSession();
+                // 群聊 @ 补全：光标前是未完成的 @token 时列成员 + @全体
+                const group = session && groupFromKey(session.agentId);
+                if (group) {
+                    const m = v.match(/@([^\s@，。,]*)$/);
+                    if (m && !v.slice(0, v.length - m[0].length).includes('\n')) {
+                        const prefix = m[1].toLowerCase();
+                        const cands = [];
+                        if (!prefix || '全体'.includes(prefix) || 'all'.startsWith(prefix)) {
+                            cands.push({ id: 'all', label: '@全体', desc: '通知群内所有成员', applyText: '@全体 ' });
+                        }
+                        for (const aid of group.agentIds) {
+                            if (!state.agents[aid]?.online) continue; // 离线成员不可 @，网关派发时也会跳过
+                            const name = groupMemberName(aid);
+                            if (prefix && !aid.toLowerCase().includes(prefix) && !name.toLowerCase().includes(prefix)) continue;
+                            cands.push({ id: aid, label: '@' + name, desc: aid, applyText: '@' + name + ' ' });
+                        }
+                        if (cands.length) {
+                            cmdMenu.items = cands.map(c => ({
+                                label: c.label, desc: c.desc, kind: 'mention',
+                                apply: () => {
+                                    els.messageInput.value = v.slice(0, v.length - m[0].length) + c.applyText;
+                                }
+                            }));
+                            cmdMenu.active = 0;
+                            cmdMenu.open = true;
+                            renderCmdMenu();
+                            return;
+                        }
+                    }
+                    if (!v.startsWith('/')) { closeCmdMenu(); return; }
+                }
                 const cmds = agentCommands(session && state.agents[session.agentId]);
                 if (!v.startsWith('/') || v.includes('\n') || cmds.length === 0) { closeCmdMenu(); return; }
                 const spIdx = v.search(/\s/);
@@ -3340,6 +4075,74 @@
                 els.messageInput.style.height = 'auto';
                 closeCmdMenu();
 
+                const metadata = {};
+                const slashCmd = parseSlashCommand(text, agent);
+                if (slashCmd) metadata.command = slashCmd;
+                if (msgAttachments.length) {
+                    metadata.attachments = msgAttachments.map((a, i) =>
+                        a.url ? { ...a } : { ...a, data: files[i].dataUrl });
+                }
+                if (history.length) metadata.history = history;
+
+                // ---- 群聊路径：@mentions 路由，网关立即返回 fan-out 出的 task_ids ----
+                const group = groupFromKey(session.agentId);
+                if (group) {
+                    const mentions = parseGroupMentions(text, group);
+                    if (mentions.length === 0) {
+                        session.messages = session.messages.filter(m => m.id !== userMsgId);
+                        renderChat();
+                        showToast('群聊请 @成员 或 @全体 后发送', 'warning');
+                        return;
+                    }
+                    const baseTaskId = generateId();
+                    let taskIds;
+                    try {
+                        const res = await rpcCall('task.create', {
+                            group_id: group.id,
+                            task_id: baseTaskId,
+                            session_id: session.id,
+                            type: 'chat',
+                            content: text,
+                            mentions,
+                            metadata: Object.keys(metadata).length ? metadata : undefined
+                        });
+                        taskIds = (res.task_ids && res.task_ids.length) ? res.task_ids : [baseTaskId];
+                        if (res.skipped_offline && res.skipped_offline.length) {
+                            const names = res.skipped_offline.map(id => {
+                                const a = state.agents[id];
+                                return a ? agentDisplayName(a) : id;
+                            }).join('、');
+                            showToast('已跳过离线成员：' + names, 'warning');
+                        }
+                    } catch (e) {
+                        appendMessage(session, {
+                            id: generateId(), role: 'assistant', agentId: null, taskId: baseTaskId,
+                            chunks: [], done: true, errorText: e.message || String(e), createdAt: Date.now()
+                        });
+                        renderChat();
+                        showToast('发送失败：' + (e.message || e), 'error');
+                        return;
+                    }
+                    session.messageCount = (session.messageCount ?? 0) + (taskIds.length - 1);
+                    taskIds.forEach(tid => {
+                        const mid = generateId();
+                        appendMessage(session, {
+                            id: mid, role: 'assistant', taskId: tid, agentId: null,
+                            chunks: [], done: false, createdAt: Date.now()
+                        });
+                        pendingTasks.set(tid, {
+                            taskId: tid, messageId: mid,
+                            agentId: session.agentId, sessionId: session.id,
+                            groupId: group.id, baseTaskId,
+                            done: false, startTime: Date.now(), lastActivity: Date.now()
+                        });
+                    });
+                    showTyping();
+                    setProgress(0);
+                    syncChatChrome();
+                    return;
+                }
+
                 const taskId = generateId();
                 const assistantMsgId = generateId();
                 appendMessage(session, {
@@ -3362,14 +4165,6 @@
 
                 const requestId = generateId();
                 pendingRequests.set(requestId, taskId);
-                const metadata = {};
-                const slashCmd = parseSlashCommand(text, agent);
-                if (slashCmd) metadata.command = slashCmd;
-                if (msgAttachments.length) {
-                    metadata.attachments = msgAttachments.map((a, i) =>
-                        a.url ? { ...a } : { ...a, data: files[i].dataUrl });
-                }
-                if (history.length) metadata.history = history;
                 send({
                     jsonrpc: '2.0',
                     method: 'task.create',
@@ -3387,23 +4182,35 @@
 
             function stopCurrentTask() {
                 let changed = false;
+                const cancelledGroups = new Set();
                 for (const [taskId, task] of pendingTasks) {
-                    if (!task.done) {
+                    if (task.done) continue;
+                    if (task.groupId) {
+                        // 群任务按家族取消：同 baseTaskId 只发一次群级 task.cancel
+                        if (cancelledGroups.has(task.baseTaskId)) continue;
+                        cancelledGroups.add(task.baseTaskId);
+                        send({
+                            jsonrpc: '2.0',
+                            method: 'task.cancel',
+                            params: { group_id: task.groupId, task_id: task.baseTaskId, session_id: task.sessionId },
+                            id: generateId()
+                        });
+                    } else {
                         send({
                             jsonrpc: '2.0',
                             method: 'task.cancel',
                             params: { agent_id: task.agentId, task_id: taskId, session_id: task.sessionId },
                             id: generateId()
                         });
-                        const session = state.sessions[task.agentId]?.[task.sessionId];
-                        if (session) {
-                            updateAssistantMessage(session, task.messageId, { type: 'error', text: '已取消' }, true,
-                                Date.now() - (task.startTime || task.lastActivity));
-                        }
-                        task.done = true;
-                        pendingTasks.delete(taskId);
-                        changed = true;
                     }
+                    const session = state.sessions[task.agentId]?.[task.sessionId];
+                    if (session) {
+                        updateAssistantMessage(session, task.messageId, { type: 'error', text: '已取消' }, true,
+                            Date.now() - (task.startTime || task.lastActivity));
+                    }
+                    task.done = true;
+                    pendingTasks.delete(taskId);
+                    changed = true;
                 }
                 if (changed) syncChatChrome();
             }
@@ -3452,40 +4259,32 @@
                 els.nameInput.addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
                 els.passwordInput.addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
 
-                els.themeToggle.addEventListener('click', () => {
-                    state.settings.themeMode = resolveTheme() === 'dark' ? 'light' : 'dark';
-                    applySettings();
-                    saveState();
-                });
-
                 els.settingsBtn.addEventListener('click', openSettings);
+                els.logoutBtn.addEventListener('click', logout);
                 els.settingsClose.addEventListener('click', () => { closeSettings(); saveState(); });
+                els.changePwdOpenBtn.addEventListener('click', () => {
+                    els.oldPwdInput.value = els.newPwdInput.value = '';
+                    els.pwdOverlay.classList.add('open');
+                    setTimeout(() => els.oldPwdInput.focus(), 50);
+                });
+                els.pwdCancel.addEventListener('click', () => els.pwdOverlay.classList.remove('open'));
+                els.pwdOverlay.addEventListener('click', (e) => {
+                    if (e.target === els.pwdOverlay) els.pwdOverlay.classList.remove('open');
+                });
+                els.newPwdInput.addEventListener('keydown', e => { if (e.key === 'Enter') els.changePwdBtn.click(); });
                 els.changePwdBtn.addEventListener('click', async () => {
                     const oldPwd = els.oldPwdInput.value, newPwd = els.newPwdInput.value;
                     if (!oldPwd || !newPwd) { showToast('请填写当前密码和新密码', 'warning'); return; }
                     try {
                         await rpcCall('user.change_password', { old_password: oldPwd, new_password: newPwd });
                         els.oldPwdInput.value = els.newPwdInput.value = '';
+                        els.pwdOverlay.classList.remove('open');
                         showToast('密码已修改', 'success');
                     } catch (e) {
                         showToast('修改失败：' + (e.message || e), 'error');
                     }
                 });
                 els.adminBtn.addEventListener('click', () => { location.href = '/admin'; });
-                els.myCreateKeyBtn.addEventListener('click', () => {
-                    const name = els.myNewKeyName.value.trim();
-                    createDeviceKeyFlow(name, undefined, () => {
-                        els.myNewKeyName.value = '';
-                        loadMyKeys();
-                    });
-                });
-                els.keyCreatedOk.addEventListener('click', () => els.keyCreatedOverlay.classList.remove('open'));
-                els.keyCopyBtn.addEventListener('click', async () => {
-                    try {
-                        await navigator.clipboard.writeText(els.keyCreatedValue.textContent);
-                        showToast('已复制', 'success');
-                    } catch { showToast('复制失败，请手动选择复制', 'warning'); }
-                });
                 els.settingsOverlay.addEventListener('click', (e) => {
                     if (e.target === els.settingsOverlay) { closeSettings(); saveState(); }
                 });
@@ -3531,7 +4330,39 @@
                 });
 
                 els.menuToggle.addEventListener('click', () => els.sidebar.classList.toggle('open'));
-                els.newSessionBtn.addEventListener('click', newSession);
+                document.querySelectorAll('#sideRail .rail-item[data-section]').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        switchSidebarSection(btn.dataset.section);
+                        // 桌面折叠态下选分区：自动展开面板列，避免点了没反应
+                        if (state.sidebarCollapsed) {
+                            state.sidebarCollapsed = false;
+                            applySidebarCollapsed();
+                            saveState();
+                        }
+                        // 移动端：选分区后自动展开面板抽屉
+                        if (window.matchMedia('(max-width: 768px)').matches) els.sidebar.classList.add('open');
+                    });
+                });
+                els.newGroupBtn.addEventListener('click', () => openGroupModal(null));
+                els.groupCancel.addEventListener('click', closeGroupModal);
+                els.groupCreate.addEventListener('click', saveGroupFromModal);
+                els.groupOverlay.addEventListener('click', (e) => {
+                    if (e.target === els.groupOverlay) closeGroupModal();
+                });
+                els.groupMemberList.addEventListener('change', refreshGroupManagerOptions);
+                els.workdirCancel.addEventListener('click', closeWorkdirModal);
+                els.workdirClear.addEventListener('click', () => saveSessionWorkdir(true));
+                els.workdirSave.addEventListener('click', () => saveSessionWorkdir(false));
+                els.workdirOverlay.addEventListener('click', (e) => {
+                    if (e.target === els.workdirOverlay) closeWorkdirModal();
+                });
+                els.workdirInput.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter') { e.preventDefault(); saveSessionWorkdir(false); }
+                    if (e.key === 'Escape') closeWorkdirModal();
+                });
+                els.groupNameInput.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter') { e.preventDefault(); saveGroupFromModal(); }
+                });
                 els.clearChatBtn.addEventListener('click', clearCurrentSession);
                 els.deleteSessionBtn.addEventListener('click', deleteCurrentSession);
                 els.searchChatBtn.addEventListener('click', () => toggleChatSearch());
@@ -3653,6 +4484,23 @@
                     renderSessions();
                 });
 
+                els.sessionMenuBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    toggleSessionMenu();
+                });
+                els.sessionMenu.addEventListener('click', (e) => e.stopPropagation());
+                els.sessionMenuSearch.addEventListener('input', () => {
+                    sessionMenuQuery = els.sessionMenuSearch.value.trim();
+                    renderSessionMenu();
+                });
+                els.sessionMenuNew.addEventListener('click', () => newSession());
+                document.addEventListener('click', (e) => {
+                    if (els.sessionMenu.classList.contains('open') &&
+                        !e.target.closest('#sessionMenu, #sessionMenuBtn')) {
+                        toggleSessionMenu(false);
+                    }
+                });
+
                 window.addEventListener('keydown', (e) => {
                     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
                         e.preventDefault();
@@ -3670,8 +4518,10 @@
                     }
                     if (e.key === 'Escape') {
                         els.lightbox.classList.remove('open');
+                        toggleSessionMenu(false);
                         closeDrawer();
-                        els.keyCreatedOverlay.classList.remove('open');
+                        els.pwdOverlay.classList.remove('open');
+                        els.workdirOverlay.classList.remove('open');
                         if (els.settingsOverlay.classList.contains('open')) { closeSettings(); saveState(); }
                     }
                     if (els.lightbox.classList.contains('open')) {
@@ -3718,7 +4568,28 @@
             }
 
             function applySidebarCollapsed() {
-                document.getElementById('app').classList.toggle('sidebar-collapsed', !!state.sidebarCollapsed);
+                const collapsed = !!state.sidebarCollapsed;
+                document.getElementById('app').classList.toggle('sidebar-collapsed', collapsed);
+                if (els.sidebarToggle) {
+                    els.sidebarToggle.innerHTML = collapsed
+                        ? '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M6.8 6.2l2.4 1.8-2.4 1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+                        : '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M6.2 2.5v11"/></svg>';
+                    els.sidebarToggle.title = collapsed ? '展开侧栏' : '折叠侧栏';
+                }
+            }
+
+            // 飞书式一级导航：rail 图标 ↔ 侧栏分区面板互斥切换
+            function switchSidebarSection(section) {
+                if (!['sessions', 'agents', 'groups'].includes(section)) section = 'sessions';
+                state.sidebarSection = section;
+                saveState();
+                document.querySelectorAll('#sideRail .rail-item[data-section]').forEach(b =>
+                    b.classList.toggle('active', b.dataset.section === section));
+                const panels = { sessions: 'panelSessions', agents: 'panelAgents', groups: 'panelGroups' };
+                Object.values(panels).forEach(id => {
+                    const el = document.getElementById(id);
+                    if (el) el.classList.toggle('active', id === panels[section]);
+                });
             }
 
             function init() {
@@ -3748,12 +4619,14 @@
                         })));
                 applySettings();
                 applySidebarCollapsed();
+                switchSidebarSection(state.sidebarSection);
                 // 旧版 user:xxx token 已失效，强制重新登录
                 if (state.token && !state.user) state.token = '';
                 els.nameInput.value = state.user?.name || '';
                 updateAdminBtn();
                 setupEvents();
                 renderAgents();
+                renderGroups();
                 renderSessions();
                 renderChat();
                 updateInputState();

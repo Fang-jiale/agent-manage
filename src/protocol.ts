@@ -17,6 +17,7 @@ export const ERR_TASK_CANCELLED = -32002;
 export const ERR_LOCAL_AGENT_ERROR = -32003;
 export const ERR_UNAUTHORIZED = -32004;
 export const ERR_RATE_LIMITED = -32005;
+export const ERR_ORCHESTRATION_VIOLATION = -32006; // 管理者编排违规（越权/递归/超限）
 
 // Method names.
 export const METHOD_LIFECYCLE_INITIALIZE = "lifecycle.initialize";
@@ -44,12 +45,29 @@ export const METHOD_PROGRESS = "$/progress";
 export const METHOD_TASK_CREATE = "task.create";
 export const METHOD_TASK_CANCEL = "task.cancel";
 export const METHOD_TASK_RESPOND = "task.respond";
+export const METHOD_TASK_INVOKE = "task.invoke";                // 本地 Agent → AgentClient：管理者编排发起
+export const METHOD_TASK_SUBTASK_RESULT = "task.subtask_result"; // AgentClient → 本地 Agent：子任务结果回推
 
 export const METHOD_SESSION_LIST = "session.list";
 export const METHOD_SESSION_CREATE = "session.create";
 export const METHOD_SESSION_RENAME = "session.rename";
 export const METHOD_SESSION_DELETE = "session.delete";
+export const METHOD_SESSION_SET_WORKDIR = "session.set_workdir";
 export const METHOD_MESSAGE_LIST = "message.list";
+
+// 群组：一个会话内与多个 agent 沟通，@提及 路由
+export const METHOD_GROUP_CREATE = "group.create";
+export const METHOD_GROUP_LIST = "group.list";
+export const METHOD_GROUP_DETAIL = "group.detail";
+export const METHOD_GROUP_ADD = "group.add";
+export const METHOD_GROUP_REMOVE = "group.remove";
+export const METHOD_GROUP_RENAME = "group.rename";
+export const METHOD_GROUP_SET_MANAGER = "group.set_manager";
+export const METHOD_GROUP_DELETE = "group.delete";
+
+// 管理者 agent 编排（A2A）：管理者 agent 经 agent 通道调用群内其他 agent
+export const METHOD_AGENT_TASK_INVOKE = "agent.task.invoke";  // manager agent → gateway
+export const METHOD_AGENT_TASK_RESULT = "agent.task.result";  // gateway → manager agent（notification）
 
 export const METHOD_USER_LIST = "user.list";
 export const METHOD_USER_CREATE = "user.create";
@@ -57,6 +75,7 @@ export const METHOD_USER_DISABLE = "user.disable";
 export const METHOD_USER_RESET_PASSWORD = "user.reset_password";
 export const METHOD_USER_CHANGE_PASSWORD = "user.change_password";
 export const METHOD_USER_SET_ROLE = "user.set_role";
+export const METHOD_USER_DELETE = "user.delete";
 
 // 管理后台（均要求 admin 角色）
 export const METHOD_AGENT_LIST = "agent.list";
@@ -78,6 +97,9 @@ export const METHOD_CONNECTOR_LIST = "connector.list";   // admin RPC
 export const METHOD_CONNECTOR_SYNC = "connector.sync";   // gateway → client，全量目标 agent 集
 export const METHOD_AGENT_ASSIGN = "agent.assign";       // 页面分配 agent 实例
 export const METHOD_AGENT_REMOVE = "agent.remove";       // 页面移除 agent 实例
+export const METHOD_AGENT_RESTART = "agent.restart";     // 页面重启 connector 托管实例（agent_id 不变）
+export const METHOD_CONNECTOR_RESTART = "connector.restart"; // gateway → client，重建指定实例子进程
+export const METHOD_AGENT_SET_NICKNAME = "agent.set_nickname"; // 用户给自有 agent 设备注名（空=清除）
 
 // 配对接入：配对码（owner 生成时绑定）→ connector.pair → 审批 → 下发设备密钥
 export const METHOD_PAIRING_CREATE = "pairing.create";     // 用户 RPC：生成一次性接入码
@@ -286,6 +308,8 @@ export interface AgentInfo {
   brand_name?: string | null;
   logo_url?: string | null;
   approval_status?: string; // approved | pending | rejected（开放模式下恒 approved）
+  // 用户对自有 agent 的备注名（按 owner 私有；推送时普通用户帧带本人昵称，admin 共享帧不含）
+  nickname?: string | null;
 }
 
 export interface AgentListParams {
@@ -299,10 +323,12 @@ export interface AgentEventParams {
 }
 
 export interface TaskCreateParams {
-  agent_id: string;
+  agent_id?: string; // 群聊路径（group_id 存在）可省略
   task_id: string;
   session_id?: string;
   context_id?: string;
+  group_id?: string; // 群聊：消息路由到群内被 @ 的成员
+  mentions?: string[]; // 目标 agent id 列表；"all" 表示 @全体
   type: string;
   content: string;
   metadata?: Record<string, unknown>;
@@ -314,9 +340,10 @@ export interface TaskAcceptResult {
 }
 
 export interface TaskCancelParams {
-  agent_id: string;
+  agent_id?: string; // 群聊路径（group_id 存在）可省略
   task_id: string;
   session_id?: string;
+  group_id?: string; // 群聊任务：批量取消 fan-out 派生任务与编排子任务
 }
 
 export interface TaskCancelResult {
@@ -417,6 +444,8 @@ export interface AdminProgressParams {
   agent_id: string;
   session_id?: string;
   context_id?: string;
+  group_id?: string; // 群聊任务：归属群
+  parent_task_id?: string; // 管理者编排：发起 invoke 的父任务
   content?: ContentItem[];
   name?: string;
   arguments?: Record<string, unknown>;
@@ -440,9 +469,11 @@ export interface SessionInfo {
   id: string;
   agent_id: string;
   title: string;
+  workdir?: string | null; // 会话绑定的工作目录（task.create 时注入 metadata.workdir）
   created_at: number;
   updated_at: number;
   message_count?: number;
+  preview?: string; // 最后一条消息摘要（session.list 下发）
 }
 
 export interface SessionListParams {
@@ -457,6 +488,12 @@ export interface SessionCreateParams {
   id?: string;
   agent_id: string;
   title?: string;
+  workdir?: string;
+}
+
+export interface SessionSetWorkdirParams {
+  id: string;
+  workdir: string; // 空串 = 解绑
 }
 
 export interface SessionRenameParams {
@@ -587,11 +624,16 @@ export interface UserCreateParams {
   name: string;
   password: string;
   role?: string; // "admin" | "user"，默认 user
+  id?: string; // 手动指定用户 ID；缺省自动生成 UUID。须匹配 /^[A-Za-z0-9._-]{1,64}$/
 }
 
 export interface UserDisableParams {
   id: string;
   disabled: boolean;
+}
+
+export interface UserDeleteParams {
+  id: string;
 }
 
 export interface UserResetPasswordParams {
@@ -705,6 +747,24 @@ export interface AgentRemoveParams {
   agent_id: string;
 }
 
+export interface AgentRestartParams {
+  agent_id: string;
+}
+
+export interface ConnectorRestartParams {
+  agent_id: string; // 重建该实例的本地子进程，agent_id 不变
+}
+
+export interface AgentSetNicknameParams {
+  agent_id: string;
+  nickname?: string; // 空 = 清除，回退 name
+}
+
+export interface AgentSetNicknameResult {
+  status: "ok";
+  nickname: string | null;
+}
+
 // ---- 配对接入 ----
 
 export interface PairingCodeCreateParams {
@@ -809,4 +869,87 @@ export interface LocalAgentChunk {
 
 export function rfc3339Now(): string {
   return new Date().toISOString();
+}
+
+// ---- 群组（多 agent 会话）与管理者编排 ----
+
+export interface GroupInfo {
+  id: string;
+  name: string;
+  manager_agent_id: string | null;
+  agent_ids: string[];
+  created_at: number;
+}
+
+export interface GroupCreateParams {
+  name: string;
+  agent_ids: string[];
+  manager_agent_id?: string | null;
+}
+
+export interface GroupCreateResult {
+  group_id: string;
+}
+
+export interface GroupListResult {
+  groups: GroupInfo[];
+}
+
+export interface GroupDetailParams {
+  group_id: string;
+}
+
+export interface GroupDetailResult {
+  group: GroupInfo;
+}
+
+export interface GroupAddParams {
+  group_id: string;
+  agent_id: string;
+}
+
+export interface GroupRemoveParams {
+  group_id: string;
+  agent_id: string;
+}
+
+export interface GroupRenameParams {
+  group_id: string;
+  name: string;
+}
+
+export interface GroupSetManagerParams {
+  group_id: string;
+  manager_agent_id: string | null; // null = 取消管理者
+}
+
+export interface GroupDeleteParams {
+  group_id: string;
+}
+
+// 管理者 agent → 网关：调用群内另一个 agent（子任务）
+export interface AgentTaskInvokeParams {
+  parent_task_id: string; // 管理者自己正在处理的任务 id
+  group_id: string;
+  target_agent_id: string;
+  type: string;
+  content: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface AgentTaskInvokeResult {
+  task_id: string;
+  status: "dispatched";
+}
+
+// 网关 → 管理者 agent：子任务结果（notification，id:null）
+export interface AgentTaskResultParams {
+  agent_id?: string; // 接收方管理者 agent id（connector 多实例托管时 client 按此路由）
+  task_id: string;
+  parent_task_id: string;
+  group_id: string;
+  target_agent_id: string;
+  status: "completed" | "failed";
+  chunks?: LocalAgentChunk[]; // 子任务全量 chunks（失败时缺省/为空）
+  error?: string;
 }

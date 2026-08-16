@@ -56,6 +56,11 @@ test("user/session/message roundtrip", async (t) => {
     assert.equal(sessions.length, 1);
     assert.equal(Number(sessions[0].message_count), 5);
 
+    const lastMsgs = await db.listLastMessages(uid);
+    const last = lastMsgs.find((m) => m.session_id === sid);
+    assert.equal(last?.role, "user");
+    assert.ok(JSON.parse(last!.content).text.includes("m4"));
+
     assert.equal(await db.deleteSession(uid, sid), true);
     assert.equal((await db.listMessages(uid, sid, 10)).length, 0);
     assert.equal(await db.deleteSession(uid, sid), false);

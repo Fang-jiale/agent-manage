@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>管理后台 · YwMatrix</title>
-    <link rel="icon" href="/static/logo.jpg" type="image/jpeg">
+    <link rel="icon" href="/static/logo.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/static/shared.css">
     <link rel="stylesheet" href="/static/admin.css">
 </head>
@@ -12,7 +12,7 @@
     <div id="app">
         <header class="topbar">
             <a class="logo" href="/" title="返回对话">
-                <img class="logo-svg" src="/static/logo.jpg" alt="">
+                <img class="logo-svg" src="/static/logo.svg" alt="">
                 <span class="logo-word">Yw<span>Matrix</span></span>
             </a>
             <span class="topbar-divider"></span>
@@ -23,6 +23,9 @@
             <a class="icon-btn" href="/" title="返回对话">
                 <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M6 3L2.5 8 6 13M2.5 8h11"/></svg>
             </a>
+            <button class="icon-btn" id="logoutBtn" title="退出登录">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M9.5 2.5H4a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h5.5M6.5 8h7M11 5.5L13.5 8 11 10.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
         </header>
         <div class="admin-body">
             <aside class="admin-nav">
@@ -55,6 +58,7 @@
                     <div class="admin-toolbar">
                         <input type="text" id="adminUserSearch" placeholder="搜索用户名…" autocomplete="off">
                         <span class="spacer"></span>
+                        <input type="text" id="adminNewUserId" placeholder="用户ID（可选）" style="width:130px" autocomplete="off">
                         <input type="text" id="adminNewUserName" placeholder="用户名" style="width:130px" autocomplete="off">
                         <input type="password" id="adminNewUserPwd" placeholder="初始密码" style="width:130px" autocomplete="new-password">
                         <select id="adminNewUserRole" style="width:110px">
@@ -244,7 +248,7 @@
             </div>
             <div class="form-field" id="brandLaunchCmdField">
                 <label>启动命令（可选）</label>
-                <input type="text" id="brandFormLaunchCmd" placeholder="如：node package/dist/ywmatrix-shim.mjs --workdir /path --permission-mode default" autocomplete="off">
+                <textarea id="brandFormLaunchCmd" rows="2" placeholder="如：node package/dist/ywmatrix-shim.mjs --workdir /path --permission-mode default"></textarea>
             </div>
             <div class="form-field" id="brandEndpointField" style="display:none">
                 <label>服务地址</label>
@@ -297,10 +301,12 @@
             try { stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); } catch (e) { /* 忽略 */ }
             const token = stored.token || '';
             const me = stored.user || null;
-            if (!token || !me || me.role !== 'admin') {
+            if (!token || !me) {
                 location.replace('/');
                 return;
             }
+            // 普通用户可用：我的 Agent / 品牌目录（只读）/ 设备密钥 / 配对码；概览、用户管理、审批类仅 admin
+            const isAdmin = me.role === 'admin';
 
             const themeMode = stored.settings?.themeMode || 'auto';
             const prefersDark = window.matchMedia('(prefers-color-scheme: dark)');
@@ -361,7 +367,8 @@
 
             const els = {};
             ['connectionDot', 'connectionStatus', 'toastContainer', 'modalOverlay', 'modalTitle', 'modalText',
-             'modalOk', 'modalCancel', 'overviewCards', 'adminUserSearch', 'adminNewUserName', 'adminNewUserPwd',
+             'logoutBtn',
+             'modalOk', 'modalCancel', 'overviewCards', 'adminUserSearch', 'adminNewUserId', 'adminNewUserName', 'adminNewUserPwd',
              'adminNewUserRole', 'adminCreateUserBtn', 'adminUserRows', 'adminUserEmpty', 'adminUserPagerInfo',
              'adminUserPrev', 'adminUserNext', 'adminAgentOwner', 'adminAgentStatus', 'adminAgentSearch',
              'adminAgentRows', 'adminAgentEmpty', 'adminAgentPagerInfo', 'adminAgentPrev', 'adminAgentNext',
@@ -499,10 +506,11 @@
 
             /* ---------- 页面切换 ---------- */
 
-            let currentTab = 'overview';
+            let currentTab = isAdmin ? 'overview' : 'agents';
             let overviewTimer = null;
 
             function switchTab(tab) {
+                if (!isAdmin && (tab === 'overview' || tab === 'users')) tab = 'agents';
                 currentTab = tab;
                 document.querySelectorAll('.admin-nav-item').forEach(b =>
                     b.classList.toggle('active', b.dataset.tab === tab));
@@ -519,11 +527,13 @@
                 } else if (tab === 'users') {
                     ensureOwnerOptions(); loadUsers();
                 } else if (tab === 'agents') {
-                    ensureOwnerOptions(); loadAgents(); loadPendingConnectors();
+                    if (isAdmin) { ensureOwnerOptions(); loadPendingConnectors(); }
+                    loadAgents();
                 } else if (tab === 'brands') {
                     loadBrands();
                 } else if (tab === 'keys') {
-                    ensureOwnerOptions(); loadKeys(); loadPairingCodes();
+                    if (isAdmin) ensureOwnerOptions();
+                    loadKeys(); loadPairingCodes();
                 }
             }
 
@@ -611,7 +621,8 @@
                             (u.role === 'admin' ? '降为用户' : '设为管理员') + '</button>' +
                             '<button data-act="reset" data-id="' + u.id + '">重置密码</button>' +
                             '<button data-act="toggle" data-id="' + u.id + '" data-disabled="' + (u.disabled ? '1' : '0') + '" class="' + (u.disabled ? '' : 'danger') + '">' +
-                            (u.disabled ? '启用' : '禁用') + '</button>') +
+                            (u.disabled ? '启用' : '禁用') + '</button>' +
+                            '<button data-act="delete" data-id="' + escapeAttr(u.id) + '" data-name="' + escapeAttr(u.name) + '" class="danger">删除</button>') +
                         '</div></td></tr>';
                 }).join('');
                 els.adminUserRows.querySelectorAll('button').forEach(btn => {
@@ -630,6 +641,13 @@
                                 const disabling = btn.dataset.disabled !== '1';
                                 await rpcCall('user.disable', { id, disabled: disabling });
                                 showToast(disabling ? '已禁用' : '已启用', 'success');
+                            } else if (btn.dataset.act === 'delete') {
+                                const ok = await confirmModal('删除用户',
+                                    '删除用户「' + btn.dataset.name + '」？其名下 Agent、会话、消息、设备密钥、配对码、群组、备注名将一并清除，在线连接立即踢线。此操作不可恢复。',
+                                    '删除');
+                                if (!ok) return;
+                                await rpcCall('user.delete', { id });
+                                showToast('用户已删除', 'success');
                             } else {
                                 const pwd = prompt('为该用户设置新密码（至少 6 位）：');
                                 if (!pwd) return;
@@ -686,7 +704,7 @@
                     '<div><div class="cell-main">' + escapeHtml(a.name || a.id) + '</div>' +
                     (a.brand_name ? '<div class="cell-sub">' + escapeHtml(a.brand_name) + '</div>' : '') +
                     '<div class="cell-sub">' + escapeHtml(a.id) + '</div></div></div></td>' +
-                    '<td>' + escapeHtml(userNameOf(a.owner_id)) + '</td>' +
+                    '<td>' + (isAdmin ? escapeHtml(userNameOf(a.owner_id)) : '我') + '</td>' +
                     '<td>' + agentStatusChip(a) + '</td>' +
                     '<td>' + (a.platform && a.platform.os
                         ? '<span class="platform-cell"><span class="platform-ico">' + platformIcon(a.platform.os) + '</span>' + escapeHtml(a.platform.os + '/' + (a.platform.arch || '?')) + '</span>'
@@ -694,13 +712,14 @@
                     '<td><span class="cell-sub">' + escapeHtml(a.last_ip || '—') + '</span></td>' +
                     '<td>' + relativeTime(a.last_seen) + '</td>' +
                     '<td><div class="row-actions">' +
-                    (a.approval_status === 'pending'
+                    (isAdmin && a.approval_status === 'pending'
                         ? '<button data-act="approve" data-id="' + escapeAttr(a.id) + '">批准</button>' +
                           '<button data-act="reject" data-id="' + escapeAttr(a.id) + '" class="danger">拒绝</button>'
                         : '') +
-                    (a.connector_id ? '<button data-act="remove" data-id="' + escapeAttr(a.id) + '" class="danger">移除</button>' : '') +
-                    '<button data-act="reassign" data-id="' + escapeAttr(a.id) + '">转移归属</button>' +
-                    (a.online ? '<button data-act="disconnect" data-id="' + escapeAttr(a.id) + '" class="danger">断开连接</button>' : '') +
+                    (a.connector_id ? '<button data-act="restart" data-id="' + escapeAttr(a.id) + '">重启</button>' +
+                      '<button data-act="remove" data-id="' + escapeAttr(a.id) + '" class="danger">移除</button>' : '') +
+                    (isAdmin ? '<button data-act="reassign" data-id="' + escapeAttr(a.id) + '">转移归属</button>' : '') +
+                    (isAdmin && a.online ? '<button data-act="disconnect" data-id="' + escapeAttr(a.id) + '" class="danger">断开连接</button>' : '') +
                     '</div></td></tr>').join('');
                 els.adminAgentRows.querySelectorAll('button').forEach(btn => {
                     btn.onclick = async () => {
@@ -733,6 +752,15 @@
                                 loadAgents();
                             } catch (e) {
                                 showToast('拒绝失败：' + (e.message || e), 'error');
+                            }
+                        } else if (act === 'restart') {
+                            const ok = await confirmModal('重启 Agent', '重启 Agent ' + id + ' 的本地服务进程？agent_id 与会话历史保留。', '重启');
+                            if (!ok) return;
+                            try {
+                                await rpcCall('agent.restart', { agent_id: id });
+                                showToast('重启指令已下发', 'success');
+                            } catch (e) {
+                                showToast('重启失败：' + (e.message || e), 'error');
                             }
                         } else if (act === 'remove') {
                             const ok = await confirmModal('移除 Agent', '将 Agent ' + id + ' 从 Connector 上移除？移除后需重新注册。', '移除');
@@ -873,11 +901,13 @@
                         '<td>' + (b.description ? escapeHtml(b.description) : '<span class="cell-sub">—</span>') + '</td>' +
                         '<td><div class="cap-chips">' + (caps || '<span class="cell-sub">—</span>') + '</div></td>' +
                         '<td>' + (b.disabled ? '<span class="chip red">已禁用</span>' : '<span class="chip green">启用</span>') + '</td>' +
-                        '<td><div class="row-actions">' +
-                        '<button data-act="edit" data-id="' + escapeAttr(b.id) + '">编辑</button>' +
-                        '<button data-act="toggle" data-id="' + escapeAttr(b.id) + '">' + (b.disabled ? '启用' : '禁用') + '</button>' +
-                        '<button data-act="delete" data-id="' + escapeAttr(b.id) + '" class="danger">删除</button>' +
-                        '</div></td></tr>';
+                        '<td>' + (isAdmin
+                            ? '<div class="row-actions">' +
+                              '<button data-act="edit" data-id="' + escapeAttr(b.id) + '">编辑</button>' +
+                              '<button data-act="toggle" data-id="' + escapeAttr(b.id) + '">' + (b.disabled ? '启用' : '禁用') + '</button>' +
+                              '<button data-act="delete" data-id="' + escapeAttr(b.id) + '" class="danger">删除</button>' +
+                              '</div>'
+                            : '<span class="cell-sub">—</span>') + '</td></tr>';
                 }).join('');
                 els.adminBrandRows.querySelectorAll('button').forEach(btn => {
                     btn.onclick = async () => {
@@ -1060,6 +1090,15 @@
 
             /* ---------- 事件 ---------- */
 
+            els.logoutBtn.addEventListener('click', () => {
+                try {
+                    const s = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+                    delete s.token;
+                    localStorage.setItem(STORAGE_KEY, JSON.stringify(s));
+                } catch (e) { /* 忽略 */ }
+                location.replace('/');
+            });
+
             document.querySelectorAll('.admin-nav-item').forEach(btn => {
                 btn.addEventListener('click', () => switchTab(btn.dataset.tab));
             });
@@ -1077,11 +1116,17 @@
             els.adminUserNext.addEventListener('click', () => { usersState.page++; loadUsers(); });
             els.adminCreateUserBtn.addEventListener('click', async () => {
                 const name = els.adminNewUserName.value.trim(), pwd = els.adminNewUserPwd.value;
+                const uid = els.adminNewUserId.value.trim();
                 if (!name || !pwd) { showToast('请填写用户名和初始密码', 'warning'); return; }
                 if (pwd.length < 6) { showToast('密码至少 6 位', 'warning'); return; }
+                if (uid && !/^[A-Za-z0-9._-]{1,64}$/.test(uid)) {
+                    showToast('用户 ID 只能含字母、数字、点、下划线、短横线（≤64 位）', 'warning'); return;
+                }
                 try {
-                    await rpcCall('user.create', { name, password: pwd, role: els.adminNewUserRole.value });
-                    els.adminNewUserName.value = els.adminNewUserPwd.value = '';
+                    const params = { name, password: pwd, role: els.adminNewUserRole.value };
+                    if (uid) params.id = uid;
+                    await rpcCall('user.create', params);
+                    els.adminNewUserId.value = els.adminNewUserName.value = els.adminNewUserPwd.value = '';
                     showToast('用户已创建', 'success');
                     ensureOwnerOptions();
                     loadUsers();
@@ -1266,7 +1311,29 @@
                 }
             });
 
-            switchTab('overview');
+            if (!isAdmin) {
+                // 普通用户视图：隐藏 admin-only 分区与操作，重命名文案
+                document.querySelector('[data-tab="overview"]').style.display = 'none';
+                document.querySelector('[data-tab="users"]').style.display = 'none';
+                document.querySelector('.admin-nav-title').textContent = '控制台';
+                document.querySelector('[data-tab="agents"]').childNodes.forEach(n => {
+                    if (n.nodeType === 3 && n.textContent.trim() === 'Agent 管理') n.textContent = ' 我的 Agent ';
+                });
+                document.querySelector('[data-tab="brands"]').lastChild.textContent = '品牌目录';
+                els.adminPageAgents.querySelector('h2').textContent = '我的 Agent';
+                els.adminPageAgents.querySelector('.admin-page-desc').textContent = '我名下的 Agent（含离线历史），实时状态优先';
+                els.adminAgentOwner.style.display = 'none';
+                els.adminRegisterAgentBtn.style.display = 'none';
+                els.pendingConnBlock.style.display = 'none';
+                els.adminPageBrands.querySelector('h2').textContent = '品牌目录';
+                els.adminPageBrands.querySelector('.admin-page-desc').textContent = '可接入的 Agent 品牌（只读；维护请联系管理员）';
+                els.adminCreateBrandBtn.style.display = 'none';
+                els.adminKeyOwner.style.display = 'none';
+                els.adminPageKeys.querySelector('.admin-page-desc').insertAdjacentHTML('afterend',
+                    '<p style="font-size:13px;color:var(--text-tertiary);margin:2px 0 10px">配对完成后需管理员审批接入，审批通过后 Agent 才会上线</p>');
+            }
+
+            switchTab(currentTab);
             connect();
         })();
     </script>

@@ -121,7 +121,7 @@
 | 命名空间 | 用途 |
 |---------|------|
 | `lifecycle.*` | 注册、心跳、状态、能力更新 |
-| `task.*` | 任务创建、回复、取消、完成 |
+| `task.*` | 任务创建、回复、取消、完成、编排发起（`task.invoke`，见 §6.6） |
 | `stream.*` | 流式输出块（含 text/thinking/action/result/confirm_required/prompt_required/block_required） |
 | `event.*` | Agent 主动事件 |
 
@@ -332,6 +332,46 @@ Agent 在运行中能力发生变化时主动通知。等价于 MCP 的 `notific
 >
 > Agent 不应自行生成并回填 `session_id`——AgentClient 不消费 ack 里的该字段，Agent 自行回填只会造成「真相分裂」（AgentClient 与被控子进程各持一套 id）。
 
+#### 6.1.2 会话工作目录（`metadata.workdir`）
+
+会话可绑定一个工作目录（用户在页面上设置，`session.set_workdir`）。绑定后，该会话的每条消息（含群聊 fan-out 与管理者编排的子任务）网关都会在 `metadata.workdir` 注入目录路径：
+
+```json
+"metadata": {
+  "workdir": "/Users/zhangsan/project/foo"
+}
+```
+
+- 目录绑定在**会话**上而非 Agent 实例上：同一 Agent 的不同会话可以在不同目录下干活。
+- Agent 应在每个任务开始时读取该字段并在对应目录下执行（stdio 子进程自身 cwd 是 spawn 时定死的，Agent 需在内部把目录传给被控工具/进程）。
+- 未绑定的会话没有该字段，Agent 行为不变（跟随实例启动目录）。
+- 与实例级配置的关系：品牌 `launch_cmd` / 本机 override 里的目录写法（一目录一实例）仍然有效；`metadata.workdir` 优先级由 Agent 自行决定。
+
+#### 6.1.1 群聊上下文（`metadata.group`）
+
+消息来自群聊时，网关会在 `metadata.group` 注入群上下文（单 Agent 会话没有该字段；AgentClient 原样透传）：
+
+```json
+"metadata": {
+  "group": {
+    "group_id": "g-xxx",
+    "group_name": "调研群",
+    "manager_agent_id": "leader-1",
+    "members": [
+      {"agent_id": "leader-1", "name": "张三的 MacBook"},
+      {"agent_id": "worker-a", "name": "Mac mini"}
+    ],
+    "mentions": ["leader-1"]
+  }
+}
+```
+
+- `manager_agent_id`：群管理者（leader）。等于自身 agent_id 时，本 Agent 可通过 AgentClient 发起 `agent.task.invoke` 调度群内其他成员（见网关协议 §10.6）。
+- `members`：全部成员及显示名（含离线成员），即群的规模与花名册。
+- `mentions`：本条消息实际命中的目标（用户 `@全体` 时已展开为成员列表；管理者编排子任务时为被派发的目标）。
+
+建议 Agent 实现把该结构写进 system prompt（如「你在群聊 X 中，成员有 N 人：…；你是/不是管理者」），即可自主判断是否需要分工协作。不识别该字段的 Agent 行为不变。
+
 ### 6.2 用户回复
 
 当 Agent 输出 `confirm_required`、`prompt_required` 或 `block_required` 后，AgentClient 将用户回复转发给 Agent。
@@ -486,6 +526,61 @@ Agent 主动通知任务完成。
 - 未在 capabilities 中声明的 `/xxx` 文本也会原样送达，Agent 可自行决定是否识别。
 
 **执行语义由 Agent 自定**：本地命令（如切模型）通常不调用 LLM，直接生效后输出一条 text chunk（如「已切换模型：kimi-k2 → kimi-k2-thinking」）并正常结束任务；模型、技能等状态按 `session_id` 维护，切换只影响当前会话。
+
+### 6.6 管理者编排（task.invoke / task.subtask_result）
+
+群聊中若 `metadata.group.manager_agent_id`（§6.1.1）等于自身 agent id，Agent 是本群**管理者**，可以把群内其他成员作为子任务调度。发起与结果回收都经 AgentClient 桥接到网关（鉴权、归因、防递归在网关完成，见网关协议 §10.6）。
+
+**发起（Agent → AgentClient，请求）**：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "inv-local-1",
+  "method": "task.invoke",
+  "params": {
+    "parent_task_id": "task-001",
+    "group_id": "g-xxx",
+    "target_agent_id": "worker-a",
+    "type": "chat",
+    "content": "查一下数据",
+    "metadata": {}
+  }
+}
+```
+
+- `parent_task_id`：自己正在处理的任务 id（子任务挂在父任务下，群里可见）。
+- `target_agent_id`：群内成员（不能是自己）。
+- AgentClient 转成网关 `agent.task.invoke`，把网关的 result / error（如 `-32006` 非管理者、嵌套编排）**原样透传**回来：
+
+```json
+{ "jsonrpc": "2.0", "id": "inv-local-1", "result": { "task_id": "task-001@ab12cd34", "status": "dispatched" } }
+```
+
+**结果回推（AgentClient → Agent，notification）**——子任务终结（completed/failed/timeout）时：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "task.subtask_result",
+  "params": {
+    "task_id": "task-001@ab12cd34",
+    "parent_task_id": "task-001",
+    "group_id": "g-xxx",
+    "target_agent_id": "worker-a",
+    "status": "completed",
+    "chunks": [{ "type": "text", "text": "调研结果…" }],
+    "error": null
+  }
+}
+```
+
+约束：
+
+- 仅 **stdio / ws 适配器**支持（需要 AgentClient → Agent 的下行通道）；HTTP 适配器下 `task.invoke` 不可用。
+- 编排深度硬限 1 层：子任务处理中再 invoke 会得到 `-32006`。
+- 子任务与父任务必须同在一条 AgentClient 连接上（多实例部署时网关拒绝跨实例编排）。
+- 网关断线期间未决的 `task.invoke` 会收到 `-32603 gateway connection lost` 错误响应。
 
 ## 7. 流式输出消息
 
@@ -928,6 +1023,8 @@ Agent 主动通知非任务相关事件。
 | `stream.artifact` | `admin.task.progress`（type=artifact）或 `admin.task.artifact` |
 | `task.respond` | `agent.respond` |
 | `task.completed` | `admin.task.progress` (done=true) + 可选 `result` |
+| `task.invoke`（§6.6，编排发起） | `agent.task.invoke`（result/error 原样透传回 Agent） |
+| `agent.task.result`（网关 → AgentClient） | `task.subtask_result`（AgentClient → Agent 通知） |
 | `event.error` | `admin.task.progress` (error) 或 JSON-RPC error |
 
 AgentClient 是这两套协议之间的翻译层。

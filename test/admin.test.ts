@@ -155,6 +155,10 @@ async function setup(t: import("node:test").TestContext): Promise<Fixture | unde
   await db.createUser({ id: aliceID, name: aliceID, password_hash: hashPassword("pw") });
   await db.createUser({ id: bobID, name: bobID, password_hash: hashPassword("pw") });
 
+  // 品牌目录非空会开启治理模式导致注册被拒：快照后清空（开放模式），结束后恢复
+  const savedBrands = await db.listBrands();
+  for (const b of savedBrands) await db.deleteBrand(b.id).catch(() => {});
+
   const { server } = await createGatewayServer(testConfig(), STATIC_FILE, db);
   await new Promise<void>((resolve) => server.listen(0, resolve));
   const port = (server.address() as AddressInfo).port;
@@ -166,6 +170,12 @@ async function setup(t: import("node:test").TestContext): Promise<Fixture | unde
         server.closeAllConnections();
         server.close(() => resolve());
       });
+      for (const b of savedBrands) {
+        await db.createBrand({
+          id: b.id, name: b.name, description: b.description, logo_url: b.logo_url,
+          capabilities: b.capabilities, launch_cmd: b.launch_cmd, conn_type: b.conn_type, endpoint: b.endpoint,
+        }).catch(() => {});
+      }
       await db.deleteUser(adminID).catch(() => {});
       await db.deleteUser(aliceID).catch(() => {});
       await db.deleteUser(bobID).catch(() => {});
@@ -222,7 +232,6 @@ test("admin sees all agents; non-admin rejected from admin RPCs", async (t) => {
 
     // 非 admin 调 admin RPC → ERR_UNAUTHORIZED
     for (const [id, method, params] of [
-      ["r1", proto.METHOD_AGENT_LIST, {}],
       ["r2", proto.METHOD_AGENT_DISCONNECT, { agent_id: "agent-shared" }],
       ["r3", proto.METHOD_AGENT_REASSIGN, { agent_id: "agent-shared", owner_id: fx.bobID }],
       ["r4", proto.METHOD_ADMIN_OVERVIEW, {}],
@@ -231,6 +240,13 @@ test("admin sees all agents; non-admin rejected from admin RPCs", async (t) => {
       const resp = await aliceConn.rpc(id, method, params);
       assert.equal(resp.error?.code, proto.ERR_UNAUTHORIZED, method);
     }
+
+    // agent.list 非 admin 已开放（owner-scoped）：只见自己的 agent
+    const scoped = await aliceConn.rpc("r6", proto.METHOD_AGENT_LIST, {} satisfies proto.AdminAgentListParams);
+    assert.equal(scoped.error, undefined);
+    const scopedList = scoped.result as proto.AdminAgentListResult;
+    assert.ok(scopedList.agents.some((a) => a.id === "agent-shared"));
+    assert.ok(!scopedList.agents.some((a) => a.id === "agent-bob"));
   } finally {
     for (const c of conns) c.close();
     await fx.close();
@@ -484,6 +500,72 @@ test("admin can create key for another user; non-admin cannot", async (t) => {
       name: "sneaky", owner_id: fx.aliceID,
     } satisfies proto.DeviceKeyCreateParams);
     assert.equal(denied.error?.code, proto.ERR_UNAUTHORIZED);
+  } finally {
+    for (const c of conns) c.close();
+    await fx.close();
+  }
+});
+
+test("user.create manual id and user.delete cascade", async (t) => {
+  const fx = await setup(t);
+  if (!fx) return;
+  const conns: Conn[] = [];
+  try {
+    const adminConn = await Conn.dial(`${fx.base}/ws/admin?token=${jwtFor(fx.adminID)}`);
+    conns.push(adminConn);
+    await adminConn.next(proto.METHOD_ADMIN_AGENT_LIST);
+
+    // 手动录入用户 ID：成功 + 重复 ID / 非法格式拒绝
+    const victimID = "victim-" + crypto.randomUUID().slice(0, 8);
+    let r = await adminConn.rpc("uc-1", proto.METHOD_USER_CREATE, {
+      id: victimID, name: victimID, password: "pw123456",
+    } satisfies proto.UserCreateParams);
+    assert.equal(r.error, undefined, JSON.stringify(r.error));
+    assert.equal((r.result as proto.UserInfo).id, victimID);
+
+    r = await adminConn.rpc("uc-2", proto.METHOD_USER_CREATE, {
+      id: victimID, name: "dup-" + victimID, password: "pw123456",
+    } satisfies proto.UserCreateParams);
+    assert.equal(r.error?.code, proto.ERR_INVALID_PARAMS);
+
+    r = await adminConn.rpc("uc-3", proto.METHOD_USER_CREATE, {
+      id: "bad id!", name: "bad-" + victimID, password: "pw123456",
+    } satisfies proto.UserCreateParams);
+    assert.equal(r.error?.code, proto.ERR_INVALID_PARAMS);
+
+    // 给 victim 铺数据：agent 行、会话+消息、设备密钥、备注名、群组
+    const agentID = "del-agent-" + victimID;
+    await fx.db.upsertAgent({
+      id: agentID, owner_id: victimID, name: agentID,
+      platform: null, capabilities: JSON.stringify([{ type: "chat", name: "general" }]), status: "offline",
+    });
+    const session = await fx.db.createSession({ id: "del-sess-" + victimID, owner_id: victimID, agent_id: agentID, title: "s" });
+    await fx.db.createDeviceKey({ id: "del-key-" + victimID, owner_id: victimID, name: "k", key_hash: "hash-" + victimID });
+    await fx.db.setNickname(victimID, agentID, "备注");
+    await fx.db.createGroup({ id: "del-grp-" + victimID, owner_id: victimID, name: "g", manager_agent_id: null });
+    await fx.db.addGroupMember("del-grp-" + victimID, agentID);
+
+    // 非 admin 删除 → 拒绝；admin 删自己 → 拒绝
+    const aliceConn = await Conn.dial(`${fx.base}/ws/admin?token=${jwtFor(fx.aliceID)}`);
+    conns.push(aliceConn);
+    await aliceConn.next(proto.METHOD_ADMIN_AGENT_LIST);
+    let d = await aliceConn.rpc("ud-0", proto.METHOD_USER_DELETE, { id: victimID } satisfies proto.UserDeleteParams);
+    assert.equal(d.error?.code, proto.ERR_UNAUTHORIZED);
+    d = await adminConn.rpc("ud-self", proto.METHOD_USER_DELETE, { id: fx.adminID } satisfies proto.UserDeleteParams);
+    assert.equal(d.error?.code, proto.ERR_INVALID_PARAMS);
+
+    // admin 删除 → 连带清理
+    d = await adminConn.rpc("ud-1", proto.METHOD_USER_DELETE, { id: victimID } satisfies proto.UserDeleteParams);
+    assert.equal(d.error, undefined, JSON.stringify(d.error));
+
+    assert.equal(await fx.db.getUserById(victimID), undefined);
+    assert.equal((await fx.db.listAgentsPaged({ ownerID: victimID, limit: 10, offset: 0 })).agents.length, 0);
+    assert.equal((await fx.db.listSessions(victimID)).length, 0);
+    assert.equal((await fx.db.listDeviceKeys(victimID)).length, 0);
+    assert.equal((await fx.db.listGroups(victimID)).length, 0);
+    const nicks = await fx.db.listNicknamesForOwner(victimID);
+    assert.equal(nicks.size, 0);
+    assert.equal(session.id, "del-sess-" + victimID); // 使用返回值避免未消费告警
   } finally {
     for (const c of conns) c.close();
     await fx.close();

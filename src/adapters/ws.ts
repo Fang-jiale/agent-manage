@@ -127,6 +127,14 @@ export class WSAdapter implements LocalAgentAdapter {
       case "task.completed":
         this.eventsQueue.push({ method: msg.method, params: msg.params });
         break;
+      case proto.METHOD_TASK_INVOKE:
+        // 管理者编排请求：带 id 上抛，client 桥接到网关后须回响应
+        this.eventsQueue.push({
+          method: msg.method,
+          params: msg.params,
+          id: msg.id !== undefined && msg.id !== null ? String(msg.id) : undefined,
+        });
+        break;
       default:
         // 响应（init/task.create 的 ack 等）与未知方法忽略
     }
@@ -184,6 +192,16 @@ export class WSAdapter implements LocalAgentAdapter {
 
   getCapabilities(): proto.Capability[] {
     return this.capabilities;
+  }
+
+  sendToAgent(msg: proto.Message): boolean {
+    if (this.closed || this.ws.readyState !== WebSocket.OPEN) return false;
+    try {
+      this.writeMessage(msg);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   events(): AsyncIterable<LocalAgentEvent> {

@@ -1,9 +1,11 @@
-import type { Capability, LocalAgentChunk, LocalAgentRequest } from "../protocol.ts";
+import type { Capability, LocalAgentChunk, LocalAgentRequest, Message } from "../protocol.ts";
 
 // LocalAgentEvent is a lifecycle or event notification emitted by a local agent.
+// id 非空表示这是一条请求（如 task.invoke），AgentClient 需回 JSON-RPC 响应。
 export interface LocalAgentEvent {
   method: string;
   params: unknown;
+  id?: string;
 }
 
 // LocalAgentAdapter abstracts how AgentClient talks to a local agent.
@@ -27,6 +29,11 @@ export interface LocalAgentAdapter {
   // Events returns a stream of lifecycle / event notifications from the local
   // agent, or null when the adapter does not support proactive events (HTTP).
   events(): AsyncIterable<LocalAgentEvent> | null;
+
+  // sendToAgent 向本地 Agent 写一条下行消息（task.subtask_result 通知、
+  // task.invoke 的响应）。仅 stdio/ws 适配器实现；HTTP 无下行通道，返回
+  // false/未实现——编排能力只在支持主动下行的适配器上可用。
+  sendToAgent?(msg: Message): boolean;
 
   // Close releases any resources held by the adapter.
   close(): void | Promise<void>;

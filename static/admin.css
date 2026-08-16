@@ -130,12 +130,17 @@
     color: var(--text-secondary); margin-bottom: 6px;
 }
 .modal .form-field .form-req { color: var(--danger); }
-.modal .form-field input[type="text"] {
+.modal .form-field input[type="text"],
+.modal .form-field textarea {
     width: 100%; padding: 7px 10px;
     border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
     background: var(--bg); outline: none; font-size: 13.5px;
 }
-.modal .form-field input[type="text"]:focus { border-color: var(--accent); }
+.modal .form-field textarea {
+    resize: vertical; font-family: var(--mono); font-size: 12.5px; line-height: 1.5;
+}
+.modal .form-field input[type="text"]:focus,
+.modal .form-field textarea:focus { border-color: var(--accent); }
 .modal .form-field select { margin-top: 0; }
 .modal .form-field input[type="file"] { font-size: 12.5px; color: var(--text-secondary); }
 

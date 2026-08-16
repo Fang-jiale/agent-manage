@@ -136,6 +136,9 @@ test("two instances route tasks via redis bus", async (t) => {
   await db.createUser({ id: uid, name: uid, password_hash: hashPassword("pw") });
   const token = signJwt({ sub: uid, name: uid }, JWT_SECRET, 60_000);
   const taskID = "mi-task-" + crypto.randomUUID().slice(0, 8);
+  // 品牌目录非空会开启治理模式导致注册被拒：快照后清空（开放模式），结束后恢复
+  const savedBrands = await db.listBrands();
+  for (const b of savedBrands) await db.deleteBrand(b.id).catch(() => {});
 
   let gw1: Running | undefined;
   let gw2: Running | undefined;
@@ -216,6 +219,12 @@ test("two instances route tasks via redis bus", async (t) => {
     for (const c of conns) c.close();
     await gw1?.close();
     await gw2?.close();
+    for (const b of savedBrands) {
+      await db.createBrand({
+        id: b.id, name: b.name, description: b.description, logo_url: b.logo_url,
+        capabilities: b.capabilities, launch_cmd: b.launch_cmd, conn_type: b.conn_type, endpoint: b.endpoint,
+      }).catch(() => {});
+    }
     await db.deleteUser(uid).catch(() => {});
     await db.close();
   }
