@@ -114,6 +114,8 @@
         .chip.green { background: color-mix(in srgb, var(--success) 14%, transparent); color: var(--success); }
         .chip.amber { background: color-mix(in srgb, var(--warning) 14%, transparent); color: var(--warning); }
         .chip.accent { background: var(--accent-soft); color: var(--accent); }
+        .chip.red { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
+        .cell-sub.err { color: var(--danger); word-break: break-all; margin-top: 3px; }
 
         .table-wrap {
             border: 1px solid var(--border); border-radius: var(--radius);
@@ -399,6 +401,22 @@
 
             let agentsCache = [];
 
+            function retryHint(a) {
+                if (!a.retry_at) return '';
+                const s = Math.max(0, Math.round((a.retry_at - Date.now()) / 1000));
+                return '<div class="cell-sub">' + (s > 0 ? s + 's 后自动重试' : '自动重试中…') + '</div>';
+            }
+            function stateCell(a) {
+                if (a.state === 'running') return '<span class="chip green">运行中</span>';
+                if (a.state === 'starting') return '<span class="chip amber">启动中…</span>';
+                if (a.state === 'failed') {
+                    return '<span class="chip red">启动失败</span>' +
+                        (a.error ? '<div class="cell-sub err" title="' + escapeAttr(a.error) + '">' + escapeHtml(a.error) + '</div>' : '') +
+                        retryHint(a);
+                }
+                return '<span class="chip">未运行</span>';
+            }
+
             function renderAgents(agents) {
                 agentsCache = agents;
                 els.agentEmpty.style.display = agents.length ? 'none' : '';
@@ -407,20 +425,31 @@
                     '<td><div class="cell-main">' + escapeHtml(a.name || a.agent_id) + '</div>' +
                     '<div class="cell-sub">' + escapeHtml(a.agent_id) + '</div></td>' +
                     '<td><span class="cell-sub">' + escapeHtml(a.brand_id || '—') + '</span></td>' +
-                    '<td>' + (a.running ? '<span class="chip green">运行中</span>' : '<span class="chip">未运行</span>') +
-                    ' <span class="chip">' + connTypeOf(a) + '</span></td>' +
+                    '<td><div>' + stateCell(a) + ' <span class="chip">' + connTypeOf(a) + '</span></div></td>' +
                     '<td><div class="cell-sub">' + escapeHtml(a.launch_cmd || '—') + '</div>' +
                     (SOURCE_CHIPS[a.launch_cmd_source] || '') + '</td>' +
                     '<td><div class="row-actions">' +
+                    (a.state !== 'running' ? '<button data-act="retry" data-id="' + escapeAttr(a.agent_id) + '">重试</button>' : '') +
                     '<button data-act="edit" data-id="' + escapeAttr(a.agent_id) + '" data-cmd="' + escapeAttr(a.launch_cmd_source === 'override' ? a.launch_cmd : '') + '">编辑启动命令</button>' +
                     '<button data-act="remove" data-id="' + escapeAttr(a.agent_id) + '" data-name="' + escapeAttr(a.name || a.agent_id) + '" class="danger">移除</button>' +
                     '</div></td></tr>').join('');
                 els.agentRows.querySelectorAll('button').forEach(btn => {
                     btn.onclick = () => {
                         if (btn.dataset.act === 'edit') openCmdForm(btn.dataset.id, btn.dataset.cmd);
+                        else if (btn.dataset.act === 'retry') retryAgent(btn.dataset.id);
                         else removeAgent(btn.dataset.id, btn.dataset.name);
                     };
                 });
+            }
+
+            async function retryAgent(id) {
+                try {
+                    await api('/api/agents/' + encodeURIComponent(id) + '/retry', { method: 'POST' });
+                    showToast('已重新拉起', 'success');
+                } catch (e) {
+                    showToast('重试失败：' + (e.message || e), 'error', 6000);
+                }
+                loadState(); // 行状态里会带最新错误信息
             }
 
             async function removeAgent(id, name) {

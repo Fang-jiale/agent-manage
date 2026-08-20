@@ -232,10 +232,18 @@ export interface ClientServerInfo {
   version: string;
 }
 
+// C3：网关认可的本 Agent 实例 ID，随 lifecycle.initialize 下发给本地 Agent。
+// shim 做群管理者受信判断（metadata.group.manager_agent_id === agent_id）时以此为准，
+// 不能用 lifecycle.register 中的自报名代替。
+export interface InitializeAgentInfo {
+  agent_id: string;
+}
+
 export interface InitializeParams {
   protocolVersion: string;
   capabilities?: Record<string, unknown>;
   clientInfo: ClientServerInfo;
+  agentInfo?: InitializeAgentInfo;
 }
 
 export interface InitializeResult {
@@ -274,6 +282,9 @@ export interface LifecycleStatusParams {
 }
 
 export interface LifecycleCapabilitiesUpdatedParams {
+  // C1 两级作用域：不带 session_id = Agent 全局能力全量快照；
+  // 带 session_id = 该 session/workdir 的命令与技能全量快照。
+  session_id?: string;
   capabilities: Capability[];
 }
 
@@ -292,6 +303,8 @@ export interface StatusParams {
 
 export interface CapabilitiesUpdatedParams {
   agent_id: string;
+  // C1：来自本地 Agent 的可选 session_id，标记该快照属于哪个 session/workdir
+  session_id?: string;
   capabilities: Capability[];
 }
 

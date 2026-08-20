@@ -199,6 +199,7 @@
         <div class="modal" style="max-width:460px">
             <h3>会话工作目录</h3>
             <p style="color:var(--text-tertiary);font-size:13px;margin:4px 0 10px">绑定后本会话的每条消息都会以 <code>metadata.workdir</code> 带给 Agent，Agent 在该目录下干活；留空则跟随 Agent 实例的启动目录</p>
+            <p id="workdirLockHint" style="display:none;color:var(--warning);font-size:13px;margin:-4px 0 10px">本会话已发出任务，目录已绑定：保存不同目录将自动创建新会话并切换过去</p>
             <input type="text" id="workdirInput" placeholder="/path/to/project" spellcheck="false" style="width:100%;box-sizing:border-box;margin-bottom:12px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-family:var(--mono)">
             <div class="modal-actions">
                 <button class="btn btn-ghost" id="workdirCancel">取消</button>
@@ -1306,6 +1307,7 @@
                     });
                     state.sessions = next;
                     saveState();
+                    pruneSessionCapabilities();
                     renderSessions();
                     renderSessionMenu();
                 } catch (e) { console.warn('syncAllSessions failed', e); }
@@ -1322,6 +1324,7 @@
                     });
                     state.sessions[agentId] = next;
                     saveState();
+                    pruneSessionCapabilities();
                     renderSessions();
                     renderSessionMenu();
                     if (state.currentAgentId !== agentId) return;
@@ -2058,6 +2061,12 @@
                 const session = getCurrentSession();
                 if (!session) return;
                 els.workdirInput.value = session.workdir || '';
+                const lockHint = document.getElementById('workdirLockHint');
+                if (lockHint) {
+                    // C4：首个任务后目录锁定，提示保存将新建会话
+                    const bound = (session.messageCount ?? session.messages.length) > 0;
+                    lockHint.style.display = bound ? '' : 'none';
+                }
                 els.workdirOverlay.classList.add('open');
                 setTimeout(() => els.workdirInput.focus(), 60);
             }
@@ -2070,6 +2079,14 @@
                 const session = getCurrentSession();
                 if (!session) return;
                 const workdir = clear ? '' : els.workdirInput.value.trim();
+                // C4：首个任务发出后 workdir 与会话绑定——不再修改当前会话，换目录自动新建会话并切换
+                const bound = (session.messageCount ?? session.messages.length) > 0;
+                const changed = (workdir || null) !== (session.workdir || null);
+                if (bound && changed) {
+                    closeWorkdirModal();
+                    await createSessionWithWorkdir(session.agentId, workdir);
+                    return;
+                }
                 try {
                     await rpcCall('session.set_workdir', { id: session.id, workdir });
                 } catch (e) {
@@ -2080,6 +2097,36 @@
                 closeWorkdirModal();
                 renderChatHeader();
                 showToast(workdir ? '工作目录已绑定：' + workdir : '已清除工作目录绑定', 'success');
+            }
+
+            // C4：目录切换 → 新会话直接带新目录创建（session.create 支持 workdir 参数）
+            async function createSessionWithWorkdir(agentId, workdir) {
+                try {
+                    const s = await rpcCall('session.create', {
+                        agent_id: agentId,
+                        workdir: workdir || undefined,
+                        title: workdir ? ('📂 ' + (workdir.split('/').filter(Boolean).pop() || workdir)) : undefined
+                    });
+                    getSessionsForAgent(agentId)[s.id] = {
+                        id: s.id, agentId,
+                        title: s.title,
+                        workdir: s.workdir || null,
+                        messages: [],
+                        createdAt: s.created_at,
+                        updatedAt: s.updated_at,
+                        messageCount: 0
+                    };
+                    loadedSessions.add(s.id);
+                    state.currentSessionId = s.id;
+                    saveState();
+                    renderSessions();
+                    renderSessionMenu();
+                    renderChat();
+                    beginSessionCapLoading(getCurrentSession());
+                    showToast(workdir ? ('目录已切换，新会话已创建：' + workdir) : '已新建会话', 'success');
+                } catch (e) {
+                    showToast('新建会话失败：' + (e.message || e), 'error');
+                }
             }
 
             function workdirChipHtml(session) {
@@ -2136,6 +2183,7 @@
                     return;
                 }
                 loadedSessions.delete(session.id);
+                dropSessionCapabilities(session.agentId, session.id);
                 delete state.sessions[session.agentId][session.id];
                 if (state.currentSessionId === session.id) {
                     const remaining = Object.values(state.sessions[session.agentId] || {})
@@ -2201,6 +2249,10 @@
                 const model = currentModelOf(agent);
                 if (model) {
                     chips.push('<span class="chip chip-model" title="当前模型（/model 切换）">' + escapeHtml(model) + '</span>');
+                }
+                // C7：会话级命令/技能（项目技能）尚在加载
+                if (sessionCapLoading && !sessionCapabilities.has(sessionCapKey(session.agentId, session.id))) {
+                    chips.push('<span class="chip" style="color:var(--text-tertiary)" title="Agent 正在加载本目录的项目命令与技能">⟳ 正在加载项目技能</span>');
                 }
                 (agent?.capabilities || []).filter(c => c.type !== 'command').slice(0, 5).forEach(c => {
                     chips.push('<span class="chip" title="' + escapeAttr(c.description || '') + '">' + escapeHtml(c.name || c.type) + '</span>');
@@ -3396,6 +3448,7 @@
                 renderAgents();
                 renderSessions();
                 renderChat();
+                beginSessionCapLoading(getCurrentSession());
                 if (window.innerWidth <= 768) els.sidebar.classList.remove('open');
                 syncSessions(agentId);
                 syncChatChrome();
@@ -3408,6 +3461,7 @@
                 saveState();
                 renderSessions();
                 renderChat();
+                beginSessionCapLoading(getCurrentSession());
                 renderSessionMenu();
                 toggleSessionMenu(false);
                 toggleChatSearch(false);
@@ -3433,6 +3487,7 @@
                 renderSessions();
                 renderSessionMenu();
                 renderChat();
+                beginSessionCapLoading(getCurrentSession());
                 toggleSessionMenu(false);
                 els.messageInput.focus();
             }
@@ -3584,6 +3639,8 @@
                     handleTaskProgress(msg.params);
                 } else if (msg.method === 'admin.agentList') {
                     handleAgentList(msg.params);
+                } else if (msg.method === 'system.capabilities_updated') {
+                    handleCapabilitiesUpdated(msg.params);
                 } else if (!msg.method && msg.id && (msg.error || msg.result !== undefined)) {
                     handleResponse(msg);
                 }
@@ -3748,7 +3805,7 @@
 
             /* 看门狗：长时间没有新 chunk 的任务标记为中断，避免 typing 卡死。
                等待用户确认/输入的任务（waitingForInput）不适用——人等多久都正常。 */
-            const TASK_STALE_MS = 180_000;
+            const TASK_STALE_MS = 900_000;
             setInterval(() => {
                 const now = Date.now();
                 let changed = false;
@@ -3863,9 +3920,76 @@
 
             /* ---------- slash commands ---------- */
 
-            // agent 通过 capabilities 声明的斜杠命令（type:"command"），菜单与解析都从这里来
+            /* C1 会话级 capability 快照：key = agentId + '\n' + sessionId。
+               仅存内存层（session 关闭/删除即清理），同 type/name 与全局层冲突时会话层优先。 */
+            const sessionCapabilities = new Map();
+            // C7：session 打开后等待项目技能加载；15s 未收到会话级快照视为该 Agent 不做分阶段上报
+            let sessionCapLoading = false;
+            let sessionCapTimer = null;
+
+            function sessionCapKey(agentId, sessionId) { return agentId + '\n' + sessionId; }
+
+            function handleCapabilitiesUpdated(p) {
+                if (!p || !p.agent_id) return;
+                if (p.session_id) {
+                    sessionCapabilities.set(sessionCapKey(p.agent_id, p.session_id), p.capabilities || []);
+                    if (sessionCapLoading) {
+                        sessionCapLoading = false;
+                        if (sessionCapTimer) { clearTimeout(sessionCapTimer); sessionCapTimer = null; }
+                    }
+                } else {
+                    // 全局层正常走 admin.agentList 广播刷新；此处兜底直接更新（不动会话层）
+                    const agent = state.agents[p.agent_id];
+                    if (agent && p.capabilities) {
+                        agent.capabilities = p.capabilities;
+                        renderAgents();
+                    }
+                }
+                renderChatHeader();
+            }
+
+            // 会话打开/切换时进入"正在加载项目技能"态；已有快照的会话（恢复）不显示
+            function beginSessionCapLoading(session) {
+                if (sessionCapTimer) { clearTimeout(sessionCapTimer); sessionCapTimer = null; }
+                if (!session) { sessionCapLoading = false; return; }
+                sessionCapLoading = !sessionCapabilities.has(sessionCapKey(session.agentId, session.id));
+                if (sessionCapLoading) {
+                    sessionCapTimer = setTimeout(() => {
+                        sessionCapLoading = false;
+                        sessionCapTimer = null;
+                        renderChatHeader();
+                    }, 15_000);
+                }
+                renderChatHeader();
+            }
+
+            function dropSessionCapabilities(agentId, sessionId) {
+                sessionCapabilities.delete(sessionCapKey(agentId, sessionId));
+            }
+
+            // 同步后清理已不存在的会话快照，防内存累积
+            function pruneSessionCapabilities() {
+                for (const key of [...sessionCapabilities.keys()]) {
+                    const i = key.indexOf('\n');
+                    if (!state.sessions[key.slice(0, i)]?.[key.slice(i + 1)]) sessionCapabilities.delete(key);
+                }
+            }
+
+            // C1 两级合并：会话层快照优先，同 type/name 覆盖全局能力；无会话层即全局
+            function mergedCapabilities(agent) {
+                const global = (agent && agent.capabilities) || [];
+                const session = getCurrentSession();
+                if (!session || !agent || session.agentId !== agent.id) return global;
+                const scoped = sessionCapabilities.get(sessionCapKey(session.agentId, session.id));
+                if (!scoped) return global;
+                const overridden = new Set(scoped.map(c => c.type + '/' + c.name));
+                return scoped.concat(global.filter(c => !overridden.has(c.type + '/' + c.name)));
+            }
+
+            // agent 通过 capabilities 声明的斜杠命令（type:"command"），菜单与解析都从这里来；
+            // 当前会话有会话级快照时按合并结果取（项目技能/命令优先）
             function agentCommands(agent) {
-                return (agent?.capabilities || []).filter(c => c && c.type === 'command' && c.name);
+                return mergedCapabilities(agent).filter(c => c && c.type === 'command' && c.name);
             }
 
             function currentModelOf(agent) {

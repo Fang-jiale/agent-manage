@@ -362,7 +362,7 @@ body.compact .session-preview { display: none; }
     background: var(--accent-gradient); color: #fff;
     box-shadow: 0 2px 8px rgba(16,185,129,.35);
 }
-.message-body { flex: 1; min-width: 0; }
+.message-body { flex: 1; min-width: 0; position: relative; }
 .message-meta {
     display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px;
 }
@@ -828,7 +828,13 @@ body.compact .session-preview { display: none; }
 }
 
 /* ---------- message actions (hover) ---------- */
-.message-actions { display: none; gap: 2px; margin-top: 6px; }
+/* 绝对定位覆盖层：hover 显隐不改变布局高度，避免消息列表跳动 */
+.message-actions {
+    position: absolute; top: -4px; right: 0;
+    display: none; gap: 2px; padding: 2px;
+    background: var(--bg); border-radius: 6px;
+    box-shadow: 0 1px 4px rgba(0,0,0,.12);
+}
 .message:hover .message-actions { display: inline-flex; }
 .message-actions .icon-btn { width: 26px; height: 26px; color: var(--text-tertiary); }
 .message-actions .icon-btn:hover { color: var(--text); }
@@ -1528,7 +1534,7 @@ body.compact .agent-card { padding: 8px 10px; }
 .message.user { flex-direction: row-reverse; }
 .message.user .message-body { display: flex; flex-direction: column; align-items: flex-end; }
 .message.user .message-meta { justify-content: flex-end; }
-.message.user .message-actions { justify-content: flex-end; }
+.message.user .message-actions { right: auto; left: 0; }
 .message.user .message-content { border-radius: 14px 14px 4px 14px; }
 
 /* ---------- 工具调用一行折叠（action + result 合并） ---------- */

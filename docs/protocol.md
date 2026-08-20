@@ -499,6 +499,8 @@ AgentClient 定期发送：
 
 `task_id` 必填，`session_id` 推荐带上。AgentClient 收到 `agent.cancel` 后向本地 Agent 补发取消的约定（stdio 子进程必须收到 `task.cancel` 否则是假停止）详见 [本地 Agent 接口标准 §6.3 / §10.3](local-agent-interface.md)。
 
+**级联取消**：不带 `group_id` 的单 Agent 取消同样按 `parent_task_id` 级联——父任务被取消或超时时，网关对所有未完成子任务逐个下发 `agent.cancel`（语义与群路径一致）；已完成子任务不受影响，迟到/重复的 `task.subtask_result` 幂等忽略。
+
 ### 8.2 网关转发取消（Gateway → AgentClient）
 
 ```json
@@ -557,7 +559,7 @@ AgentClient 收到后必须做两件事：
 }
 ```
 
-> 页面的斜杠命令菜单即来自这里的 `type: "command"` 能力项（含 `metadata.args` 参数规格与 `metadata.current` 当前值）；Agent 运行中通过 `system.capabilities_updated` 推送全量新列表，网关更新注册表并重新广播（广播有 1s 合并窗口）。
+> 页面的斜杠命令菜单即来自这里的 `type: "command"` 能力项（含 `metadata.args` 参数规格与 `metadata.current` 当前值）；Agent 运行中通过 `system.capabilities_updated` 推送全量新列表，网关更新注册表并重新广播（广播有 1s 合并窗口）。`params.session_id` 可选：不带 = Agent 全局能力（走上述广播路径）；带 = 该 session/workdir 的命令与技能快照，网关不改 Agent 全局能力，而是把通知（含 `session_id`）直接推给可见用户，页面做两层合并展示（会话层同 `type/name` 优先）。
 >
 > `AgentInfo.nickname`（备注名）按接收者私有：普通用户的推送帧带自己的昵称；admin 间共享的缓存帧不含昵称（见 3.6）。
 

@@ -43,6 +43,16 @@ function tokenizeCommand(cmd: string): string[] {
   return parts;
 }
 
+// Windows 上 .cmd/.bat（含依赖 PATHEXT 解析的 npm/npx）自 CVE-2024-27980 修复后
+// 不允许被无 shell 的 spawn 直接执行，报 EINVAL——提示用户换 cmd /c 或 bash 包装
+function spawnErrorHint(e: unknown): string {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (process.platform === "win32" && (e as NodeJS.ErrnoException)?.code === "EINVAL") {
+    return `${msg}（Windows 不能直接执行 .cmd/.bat，请改用 "cmd /c <命令>" 包装，或用 git bash / node 直接启动）`;
+  }
+  return msg;
+}
+
 export class StdioAdapter implements LocalAgentAdapter {
   private proc: ChildProcess;
   private capabilities: proto.Capability[] = [];
@@ -63,22 +73,31 @@ export class StdioAdapter implements LocalAgentAdapter {
     this.proc = proc;
   }
 
-  static async create(command: string, args: string[] = []): Promise<StdioAdapter> {
+  static async create(command: string, args: string[] = [], agentID?: string): Promise<StdioAdapter> {
     const parts = tokenizeCommand(command);
     if (parts.length > 0) {
       command = parts[0];
       args = [...parts.slice(1), ...args];
     }
 
-    const proc = spawn(command, args, { stdio: ["pipe", "pipe", "inherit"] });
+    let proc: ChildProcess;
+    try {
+      proc = spawn(command, args, { stdio: ["pipe", "pipe", "inherit"] });
+    } catch (e) {
+      throw new Error(`spawn "${command}" failed: ${spawnErrorHint(e)}`);
+    }
     const adapter = new StdioAdapter(proc);
 
     const rl = readline.createInterface({ input: proc.stdout! });
     rl.on("line", (line) => adapter.dispatchLine(line));
     proc.on("exit", () => adapter.onExit());
     proc.on("error", () => adapter.onExit());
+    // 子进程秒退后再写 stdin 会异步抛 EPIPE/ERR_STREAM_DESTROYED；
+    // 不挂 error 监听会变成 uncaught exception，直接炸掉整个 client 进程
+    proc.stdin?.on("error", () => { /* 关闭由 onExit 兜底 */ });
+    proc.stdout?.on("error", () => { /* 同上 */ });
 
-    await adapter.handshake();
+    await adapter.handshake(agentID);
 
     // Try to read the lifecycle.register notification that the agent should
     // send shortly after initialization. Non-fatal if it doesn't arrive.
@@ -135,7 +154,7 @@ export class StdioAdapter implements LocalAgentAdapter {
     this.proc.stdin!.write(JSON.stringify(msg) + "\n");
   }
 
-  private async handshake(): Promise<void> {
+  private async handshake(agentID?: string): Promise<void> {
     this.writeMessage(proto.newRequest("init-1", proto.METHOD_LIFECYCLE_INITIALIZE, {
       protocolVersion: "1.0.0",
       capabilities: {
@@ -145,6 +164,8 @@ export class StdioAdapter implements LocalAgentAdapter {
         prompts: {},
       },
       clientInfo: { name: "agent-client", version: "1.0.0" },
+      // C3：网关认可的本实例 ID，先于任何任务下发；shim 做受信判断以此为准
+      ...(agentID ? { agentInfo: { agent_id: agentID } } : {}),
     } satisfies proto.InitializeParams));
 
     for (;;) {
@@ -209,11 +230,36 @@ export class StdioAdapter implements LocalAgentAdapter {
       }
       case proto.METHOD_LIFECYCLE_STATUS:
       case proto.METHOD_LIFECYCLE_CAPABILITIES_UPDATED:
-      case "event.notification":
-      case "event.error":
-      case "task.completed":
+      case "event.notification": {
         this.eventsQueue.push({ method: msg.method, params: msg.params });
         break;
+      }
+      case "event.error":
+      case "task.completed": {
+        // 兜底：agent 终结任务时只发 event.error / task.completed、不发
+        // done:true chunk 的实现，队列会挂到超时——这里合成终止 chunk。
+        // 注意 lifecycle.status 不在此列：shim 会在任务开始时发 status:busy
+        // （带 task_id），若也合成 done 会在任务起步瞬间就把它终结掉。
+        {
+          const p = (msg.params ?? {}) as { task_id?: string; message?: string; summary?: string };
+          const q = p.task_id ? this.queues.get(p.task_id) : undefined;
+          if (q) {
+            this.queues.delete(p.task_id!);
+            const failed = msg.method === "event.error";
+            q.push({
+              task_id: p.task_id,
+              type: "text",
+              content: [{ type: "text", text: failed ? `任务失败：${p.message ?? "unknown error"}` : (p.summary ?? "") }],
+              error: failed ? (p.message ?? "unknown error") : undefined,
+              reason: failed ? "error" : undefined,
+              done: true,
+            });
+            q.close();
+          }
+        }
+        this.eventsQueue.push({ method: msg.method, params: msg.params });
+        break;
+      }
       case proto.METHOD_TASK_INVOKE:
         // 管理者编排请求：带 id 上抛，client 桥接到网关后须回响应
         this.eventsQueue.push({

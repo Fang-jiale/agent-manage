@@ -150,6 +150,9 @@
     "clientInfo": {
       "name": "agent-client",
       "version": "1.0.0"
+    },
+    "agentInfo": {
+      "agent_id": "ywcoder-3a8048"
     }
   }
 }
@@ -186,6 +189,8 @@
   "method": "lifecycle.initialized"
 }
 ```
+
+`params.agentInfo.agent_id` 是**网关认可的本 Agent 实例 ID**（connector 模式下为网关注册分配的 ID，本地模式下为 AgentClient 分配的 ID），随 `lifecycle.initialize` 在任何任务之前下发。Agent 做受信判断（如群管理者编排中 `metadata.group.manager_agent_id === 本实例 ID`，§6.6）时必须以此为准，不能用 `lifecycle.register` 中的自报名代替；不参与编排的 Agent 可忽略该字段。
 
 ### 5.2 Agent 注册 (lifecycle.register)
 
@@ -264,7 +269,10 @@ Agent 主动上报当前状态。
 
 Agent 在运行中能力发生变化时主动通知。等价于 MCP 的 `notifications/tools/list_changed` / `notifications/resources/list_changed`。
 
+**两级作用域**：`params.session_id` 为可选字段，区分全局与会话两层快照——
+
 ```json
+// Agent 全局能力全量快照（不带 session_id）
 {
   "jsonrpc": "2.0",
   "id": null,
@@ -276,15 +284,27 @@ Agent 在运行中能力发生变化时主动通知。等价于 MCP 的 `notific
 ```
 
 ```json
+// 指定 session/workdir 的命令与技能全量快照（带 session_id）
 {
   "jsonrpc": "2.0",
   "id": null,
   "method": "lifecycle.capabilities_updated",
   "params": {
+    "session_id": "session-001",
     "capabilities": [ ... ]
   }
 }
 ```
+
+规则：
+
+- **全量替换仅作用于本次消息对应的层级**：不带 `session_id` 替换 Agent 全局快照，带 `session_id` 替换该会话层快照；会话层更新不覆盖全局快照。
+- 页面展示时合并两层：同 `type/name` 的能力由会话层优先。
+- **会话关闭时 Client 清理该会话的快照**；缓存键分别为 `agent_id`（全局）与 `(agent_id, session_id)`（会话）。
+- 不带 `session_id` 的全局更新经网关 `system.capabilities_updated` → `admin.agentList` 广播；带 `session_id` 的会话级更新由网关以 `system.capabilities_updated`（含 `session_id`）推送给页面，不改变 Agent 全局能力。
+- capabilities 为全量替换语义：未变化不要推（全局层每次推送触发一次 agent 列表广播）。
+
+**分阶段发现（推荐）**：`lifecycle.register` 先上报稳定的全局能力；session 建立、对应子进程 initialize 完成后，再以带 `session_id` 的更新上报该 workdir 的命令与技能。子进程 ready 前页面显示"正在加载项目技能"。`/model` 等依赖运行时信息的下拉能力同理可延迟：首个子进程 initialize 返回统一模型列表后，以不带 `session_id` 的全局更新补充。
 
 ## 6. 任务消息
 
@@ -332,21 +352,6 @@ Agent 在运行中能力发生变化时主动通知。等价于 MCP 的 `notific
 >
 > Agent 不应自行生成并回填 `session_id`——AgentClient 不消费 ack 里的该字段，Agent 自行回填只会造成「真相分裂」（AgentClient 与被控子进程各持一套 id）。
 
-#### 6.1.2 会话工作目录（`metadata.workdir`）
-
-会话可绑定一个工作目录（用户在页面上设置，`session.set_workdir`）。绑定后，该会话的每条消息（含群聊 fan-out 与管理者编排的子任务）网关都会在 `metadata.workdir` 注入目录路径：
-
-```json
-"metadata": {
-  "workdir": "/Users/zhangsan/project/foo"
-}
-```
-
-- 目录绑定在**会话**上而非 Agent 实例上：同一 Agent 的不同会话可以在不同目录下干活。
-- Agent 应在每个任务开始时读取该字段并在对应目录下执行（stdio 子进程自身 cwd 是 spawn 时定死的，Agent 需在内部把目录传给被控工具/进程）。
-- 未绑定的会话没有该字段，Agent 行为不变（跟随实例启动目录）。
-- 与实例级配置的关系：品牌 `launch_cmd` / 本机 override 里的目录写法（一目录一实例）仍然有效；`metadata.workdir` 优先级由 Agent 自行决定。
-
 #### 6.1.1 群聊上下文（`metadata.group`）
 
 消息来自群聊时，网关会在 `metadata.group` 注入群上下文（单 Agent 会话没有该字段；AgentClient 原样透传）：
@@ -371,6 +376,25 @@ Agent 在运行中能力发生变化时主动通知。等价于 MCP 的 `notific
 - `mentions`：本条消息实际命中的目标（用户 `@全体` 时已展开为成员列表；管理者编排子任务时为被派发的目标）。
 
 建议 Agent 实现把该结构写进 system prompt（如「你在群聊 X 中，成员有 N 人：…；你是/不是管理者」），即可自主判断是否需要分工协作。不识别该字段的 Agent 行为不变。
+
+#### 6.1.2 会话工作目录（`metadata.workdir`）
+
+会话可绑定一个工作目录（用户在页面上设置，`session.set_workdir`）。绑定后，该会话的每条消息（含群聊 fan-out 与管理者编排的子任务）网关都会在 `metadata.workdir` 注入目录路径：
+
+```json
+"metadata": {
+  "workdir": "/Users/zhangsan/project/foo"
+}
+```
+
+- 目录绑定在**会话**上而非 Agent 实例上：同一 Agent 的不同会话可以在不同目录下干活。
+- **首任务后锁定（C4）**：session 的首个任务发出后 workdir 即与会话绑定，后续不能修改。页面在用户切换目录时自动创建新 session（新会话继承新目录）；若仍向已绑定 session 发送不同 workdir，Agent 返回 `-32602`，不静默切换上下文或 transcript。
+- Agent 应在每个任务开始时读取该字段并在对应目录下执行（stdio 子进程自身 cwd 是 spawn 时定死的，Agent 需在内部把目录传给被控工具/进程）。
+- 未绑定的会话没有该字段，Agent 行为不变（跟随实例启动目录）。
+- Agent 校验：绝对路径、存在性、目录类型，并以 `realpath` 规范化；非法、已删除或不可访问的目录返回 `-32602`。当前内网信任模型下 `metadata.workdir` 只来自用户在 Client 的目录选择并由网关持久化，不设目录 allowlist。
+- 与实例级配置的关系：品牌 `launch_cmd` / 本机 override 里的目录写法（一目录一实例）仍然有效；`metadata.workdir` 优先级由 Agent 自行决定。
+
+工作目录是**会话级**设置（网关持久化并逐条注入）；模型/权限模式（§6.5.1）是 **Agent 实例级全局设置**，由 Agent 侧执行 command 维护——对比见 §6.5.1 末尾的表格。
 
 ### 6.2 用户回复
 
@@ -460,7 +484,7 @@ Agent 在运行中能力发生变化时主动通知。等价于 MCP 的 `notific
 
 若 stdin 已关闭（子进程退出），跳过补发。HTTP 适配器则视本地 Agent 实现是否暴露 cancel 接口而定，建议同样补发。
 
-由于审批不设超时，"用户点停止"是待决任务**唯一**的退出路径——用户不点，子进程会一直等。可另保留一个较长任务超时（默认 30 分钟，可配 `-task-timeout`）作为兜底。
+由于审批不设超时，"用户点停止"是待决任务**唯一**的退出路径——用户不点，子进程会一直等。可另保留一个较长任务超时（默认 2 小时，可配 `-task-timeout`）作为兜底。
 
 ### 6.4 任务完成
 
@@ -525,7 +549,49 @@ Agent 主动通知任务完成。
 - Agent 应优先读 `metadata.command`；不存在时退化为解析 `content` 的 `/` 前缀（用户手输、旧页面都走这条兜底）。
 - 未在 capabilities 中声明的 `/xxx` 文本也会原样送达，Agent 可自行决定是否识别。
 
-**执行语义由 Agent 自定**：本地命令（如切模型）通常不调用 LLM，直接生效后输出一条 text chunk（如「已切换模型：kimi-k2 → kimi-k2-thinking」）并正常结束任务；模型、技能等状态按 `session_id` 维护，切换只影响当前会话。
+**执行语义由 Agent 自定**：本地命令（如切模型）通常不调用 LLM，直接生效后输出一条 text chunk（如「已切换模型：kimi-k2 → kimi-k2-thinking」）并正常结束任务。
+
+#### 6.5.1 实时切换（模型 / 权限模式，Agent 实例全局）
+
+**模型与权限模式按 Agent 实例全局维护，不按 session 隔离**：从任一 session 切换即更新该 Agent 的全局设置；其他 session 不打断执行中的任务，在各自**下一任务前**应用最新设置。切换目录、新建 session、恢复 session 都自动继承当前全局模型与权限。`metadata.current` 通过不带 `session_id` 的全局 `capabilities_updated` 发布（§5.5）。
+
+带 `type: "enum"` 单参数的命令（如 `/model`、`/permission`）页面可以不做成补全菜单，而是**渲染成会话工具栏的下拉框**：选项来自 `metadata.args[].options`（页面直接使用 Agent 动态上报的原生值，不硬编码），当前值来自 `metadata.current`。用户选中即发送一条 command 型 `task.create`（与手输斜杠命令完全同构），全程走正常 chunk 流，有确认回执。
+
+**模型切换（`/model`）**：Agent 在实例内存中记全局 model，回一条确认 text chunk（瞬时，不调 LLM），随后全局 `capabilities_updated` 推送新的 `metadata.current`，各会话下拉框刷新。新模型在**各会话下一个任务**生效，不打断进行中的任务。
+
+**权限模式切换（`/permission`）**：capabilities 声明方式相同：
+
+```json
+{
+  "type": "command",
+  "name": "permission",
+  "description": "切换权限模式",
+  "metadata": {
+    "current": "default",
+    "args": [
+      { "name": "mode", "type": "enum", "options": ["default", "auto", "full_auto"], "required": true }
+    ]
+  }
+}
+```
+
+若被控引擎的权限模式是子进程启动参数（运行中不可变），Agent 应在收到切换命令后**重拉受影响的子进程**（各会话有 transcript，上下文不丢），起来后再回确认 chunk——因此耗时数秒，期间 Agent 处于 busy，页面可在下拉框上显示切换中状态。
+
+交互约定：
+
+- **切换记录进历史但渲染为系统样式**：命令的 `content`（如 `/permission auto`）照常进会话历史（权限变更留痕、可审计），页面渲染为一行灰色系统提示而非聊天气泡。
+- **busy 时建议禁用下拉框**：同会话任务串行，切换命令会排队到当前任务之后；置灰比默默排队对用户更诚实。
+- **切换动作本身不受当前权限模式拦截**：命令是 Agent 本地执行（不调 LLM、不执行工具），不存在「要切权限却被旧权限挡住」的死锁。但切到宽权限模式（如 `full_auto`）时，**页面应自行弹确认框**——这是前端选择，不进协议。
+- **当前值永远以 Agent 上报为准**：页面不自行记忆切换，`metadata.current` 是唯一事实来源，多端打开自然一致。
+- 不声明对应 command 的 Agent，页面不显示该下拉框。
+
+**设置作用域对比**（模型/权限为 Agent 实例全局，工作目录为会话级）：
+
+| 设置 | 通道 | 状态维护 | 生效时机 | 切换耗时 |
+|------|------|---------|---------|---------|
+| 模型 | command（`/model`） | Agent 实例内存（全局） | 各会话下一任务 | 瞬时 |
+| 权限模式 | command（`/permission`） | Agent（子进程启动参数，全局） | 子进程重拉完成 | 数秒 |
+| 工作目录 | 网关 `session.set_workdir` → `metadata.workdir` 注入（§6.1.2） | 网关 DB（持久化，会话级） | 下一消息即带 | 瞬时 |
 
 ### 6.6 管理者编排（task.invoke / task.subtask_result）
 
@@ -581,6 +647,8 @@ Agent 主动通知任务完成。
 - 编排深度硬限 1 层：子任务处理中再 invoke 会得到 `-32006`。
 - 子任务与父任务必须同在一条 AgentClient 连接上（多实例部署时网关拒绝跨实例编排）。
 - 网关断线期间未决的 `task.invoke` 会收到 `-32603 gateway connection lost` 错误响应。
+
+**父任务取消的级联（C6）**：父任务被取消（用户取消或网关超时）时，由**网关按 `parent_task_id` 级联取消所有未完成子任务**（群聊与单 Agent 路径语义一致）。AgentClient 对每个被级联的子任务单独下发一条既有 `task.cancel` 通知（params 含 `task_id`、`session_id`）；Agent（管理者）收到后结束对子任务结果的等待、中止本地委派工具调用并完成父任务收尾。已完成子任务不受影响；迟到或重复的 `task.subtask_result` 由网关幂等忽略。
 
 ## 7. 流式输出消息
 
@@ -1018,7 +1086,7 @@ Agent 主动通知非任务相关事件。
 | `lifecycle.initialize` / `lifecycle.initialized` | 网关层不感知，由 AgentClient 本地处理 |
 | `lifecycle.register` | `system.register` |
 | `lifecycle.status` | `system.status` |
-| `lifecycle.capabilities_updated` | `system.capabilities_updated`（网关广播 `admin.agent.event` / `admin.agentList`） |
+| `lifecycle.capabilities_updated` | `system.capabilities_updated`（`session_id` 透传：全局更新刷 `admin.agentList`，会话级更新直接推页面，§5.5） |
 | `stream.chunk` (text/thinking/action/result/confirm_required/prompt_required/block_required) | `$/progress` |
 | `stream.artifact` | `admin.task.progress`（type=artifact）或 `admin.task.artifact` |
 | `task.respond` | `agent.respond` |

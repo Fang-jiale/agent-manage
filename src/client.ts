@@ -53,7 +53,7 @@ function loadClientConfig(): ClientConfig {
     { name: "config", type: "string" as const, default: envString("AGENT_MANAGE_CONFIG", defaultConfigPath) },
     { name: "ui-addr", type: "string" as const, default: envString("AGENT_MANAGE_UI_ADDR", "127.0.0.1:9321") },
     { name: "log-level", type: "string" as const, default: envString("AGENT_MANAGE_LOG_LEVEL", "info") },
-    { name: "task-timeout", type: "duration" as const, default: String(envDurationMs("AGENT_MANAGE_TASK_TIMEOUT", 1_800_000)) },
+    { name: "task-timeout", type: "duration" as const, default: String(envDurationMs("AGENT_MANAGE_TASK_TIMEOUT", 7_200_000)) },
   ];
   const values = parseFlags(specs);
   if (values["token"] !== "" && values["key"] !== "") {
@@ -88,7 +88,7 @@ function loadClientConfig(): ClientConfig {
   }
   let taskTimeoutMs = Number(values["task-timeout"]);
   if (Number.isNaN(taskTimeoutMs)) {
-    taskTimeoutMs = parseDurationMs(values["task-timeout"]) ?? 1_800_000;
+    taskTimeoutMs = parseDurationMs(values["task-timeout"]) ?? 7_200_000;
   }
   return {
     gateway,
@@ -162,6 +162,8 @@ function translateLifecycleEvent(agentID: string, ev: LocalAgentEvent): proto.Me
       const params = (ev.params ?? {}) as proto.LifecycleCapabilitiesUpdatedParams;
       return proto.newNotification(proto.METHOD_CAPABILITIES_UPDATED, {
         agent_id: agentID,
+        // C1 两级作用域：透传 session_id（存在时表示该 session/workdir 的会话级快照）
+        session_id: params.session_id,
         capabilities: params.capabilities,
       } satisfies proto.CapabilitiesUpdatedParams);
     }
@@ -542,12 +544,14 @@ function resolveLaunch(cfg: ClientConfig, a: proto.ConnectorSyncAgent): { connTy
   return { connType, target };
 }
 
-async function createAdapter(connType: string, target: string): Promise<LocalAgentAdapter> {
+// agentID：网关认可的实例 ID，随 lifecycle.initialize 的 agentInfo 下发（C3），
+// 供 shim 做群管理者受信判断；HTTP 连接方式无 initialize 协商，不适用。
+async function createAdapter(connType: string, target: string, agentID?: string): Promise<LocalAgentAdapter> {
   switch (connType) {
     case "stdio":
-      return StdioAdapter.create(target);
+      return StdioAdapter.create(target, [], agentID);
     case "ws":
-      return WSAdapter.create(target);
+      return WSAdapter.create(target, agentID);
     default:
       return HTTPAdapter.create(target);
   }
@@ -555,13 +559,22 @@ async function createAdapter(connType: string, target: string): Promise<LocalAge
 
 // ---- 本地管理页共享状态：UI HTTP 服务与 connector 主循环经它交互 ----
 
+interface HostState {
+  state: "starting" | "running" | "failed";
+  error?: string; // failed 时的启动/退出原因
+  at: number; // 最近一次状态变迁时间
+  retry_at?: number; // 下次自动重试时间（epoch ms）
+}
+
 interface LocalUIState {
   connected: boolean;
   lastSync: proto.ConnectorSyncAgent[]; // 最近一次全量目标集
   hosted: Map<string, HostedAgent> | undefined;
+  hostStates: Map<string, HostState>; // agent_id → 宿主状态（启动失败原因展示用）
   rpc: (method: string, params: object) => Promise<proto.Message>;
   applyOverride: (agentID: string, override: LaunchOverride | "") => Promise<void>; // 空串 = 清除覆盖
   dropOverride: (agentID: string) => Promise<void>;
+  retry?: (agentID: string) => Promise<void>; // 手动重试拉起（connector 模式才有）
   pairAndConnect?: (gateway: string, code: string, connectorID?: string) => Promise<void>;
 }
 
@@ -570,6 +583,7 @@ function newLocalUIState(): LocalUIState {
     connected: false,
     lastSync: [],
     hosted: undefined,
+    hostStates: new Map(),
     rpc: () => Promise.reject(new Error("connector 未运行")),
     applyOverride: () => Promise.reject(new Error("connector 未运行")),
     dropOverride: () => Promise.reject(new Error("connector 未运行")),
@@ -629,6 +643,42 @@ async function mainConnector(cfg: ClientConfig, connectorID: string, ui: LocalUI
     } satisfies proto.RegisterParams));
   }
 
+  // ---- 宿主状态跟踪 + 失败自动重试（5s 起指数退避，封顶 60s；手动重试清零） ----
+
+  const retryTimers = new Map<string, NodeJS.Timeout>();
+  const retryAttempts = new Map<string, number>();
+
+  function setHostState(agentID: string, state: HostState["state"], error?: string): void {
+    ui.hostStates.set(agentID, { state, error, at: Date.now() });
+  }
+
+  function cancelRetry(agentID: string): void {
+    const t = retryTimers.get(agentID);
+    if (t) {
+      clearTimeout(t);
+      retryTimers.delete(agentID);
+    }
+    retryAttempts.delete(agentID);
+  }
+
+  function scheduleRetry(a: proto.ConnectorSyncAgent, reason: string): void {
+    if (!ui.lastSync.some((x) => x.agent_id === a.agent_id)) return; // 已被 sync 移除，不重试
+    cancelRetry(a.agent_id);
+    const attempt = (retryAttempts.get(a.agent_id) ?? 0) + 1;
+    retryAttempts.set(a.agent_id, attempt);
+    const delay = Math.min(5000 * 2 ** Math.min(attempt - 1, 4), 60_000);
+    const hs = ui.hostStates.get(a.agent_id);
+    if (hs) hs.retry_at = Date.now() + delay;
+    const timer = setTimeout(() => {
+      retryTimers.delete(a.agent_id);
+      const cur = ui.lastSync.find((x) => x.agent_id === a.agent_id);
+      if (cur) void ensureAgent(cur).catch(() => { /* 失败已记录状态并排下次重试 */ });
+    }, delay);
+    timer.unref();
+    retryTimers.set(a.agent_id, timer);
+    logger.warn("agent host failed, retry scheduled", { agent_id: a.agent_id, error: reason, retry_in_ms: delay, attempt });
+  }
+
   async function ensureAgent(a: proto.ConnectorSyncAgent): Promise<void> {
     const { connType, target } = resolveLaunch(cfg, a);
     let h = hosted.get(a.agent_id);
@@ -639,7 +689,17 @@ async function mainConnector(cfg: ClientConfig, connectorID: string, ui: LocalUI
       h = undefined;
     }
     if (!h) {
-      const adapter = await createAdapter(connType, target);
+      setHostState(a.agent_id, "starting");
+      let adapter: LocalAgentAdapter;
+      try {
+        adapter = await createAdapter(connType, target, a.agent_id);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setHostState(a.agent_id, "failed", msg);
+        scheduleRetry(a, msg);
+        throw err;
+      }
+      cancelRetry(a.agent_id);
       h = {
         adapter, tasks: new TaskRegistry(cfg.taskTimeoutMs), brandID: a.brand_id,
         name: a.name, capabilities: a.capabilities, connType, target,
@@ -654,14 +714,28 @@ async function mainConnector(cfg: ClientConfig, connectorID: string, ui: LocalUI
             const m = bridgeAgentEvent(currentWS, a.agent_id, adapter, ev, pendingInvokes);
             if (m && currentWS) safeSend(currentWS, m);
           }
+          // 流结束 = 子进程退出 / 服务连接断开。实例没被主动 drop（还挂在 hosted）
+          // 就是意外死亡：改失败态、通知网关下线、安排重建
+          if (hosted.get(a.agent_id) === h) {
+            const msg = connType === "stdio" ? "本地子进程已退出" : "本地服务连接已断开";
+            logger.error("agent exited unexpectedly", { agent_id: a.agent_id, detail: msg });
+            hosted.delete(a.agent_id);
+            h.tasks.cancelAll();
+            setHostState(a.agent_id, "failed", msg);
+            if (currentWS) sendStatus(currentWS, a.agent_id, proto.AGENT_STATUS_OFFLINE);
+            scheduleRetry(a, msg);
+          }
         })();
       }
+      setHostState(a.agent_id, "running");
       logger.info("agent hosted", { agent_id: a.agent_id, brand_id: a.brand_id, launch: target });
     }
     registerToGateway(a.agent_id, h);
   }
 
   async function dropAgent(agentID: string): Promise<void> {
+    cancelRetry(agentID);
+    ui.hostStates.delete(agentID);
     const h = hosted.get(agentID);
     if (!h) return;
     hosted.delete(agentID);
@@ -669,6 +743,13 @@ async function mainConnector(cfg: ClientConfig, connectorID: string, ui: LocalUI
     h.adapter.close();
     logger.info("agent dropped", { agent_id: agentID });
   }
+
+  ui.retry = async (agentID: string): Promise<void> => {
+    const a = ui.lastSync.find((x) => x.agent_id === agentID);
+    if (!a) throw new Error("agent 不在当前托管目标集中");
+    await dropAgent(agentID); // 清掉残骸与重试计时，退避计数归零后全新拉起
+    await ensureAgent(a);
+  };
 
   // 全量对账：目标集里没有的下线，缺的上起并注册；已有的重注册（重连恢复）
   function applySync(params: proto.ConnectorSyncParams): void {
@@ -925,6 +1006,7 @@ async function handleUIRequest(
   if (req.method === "GET" && p === "/api/state") {
     const agents = ui.lastSync.map((a) => {
       const { connType, target } = resolveLaunch(cfg, a);
+      const hs = ui.hostStates.get(a.agent_id);
       return {
         agent_id: a.agent_id,
         brand_id: a.brand_id,
@@ -934,7 +1016,9 @@ async function handleUIRequest(
         launch_cmd_source: cfg.overrides[a.agent_id] !== undefined
           ? "override"
           : ((a.launch_cmd ?? a.endpoint) ? "brand" : "local"),
-        running: ui.hosted?.has(a.agent_id) ?? false,
+        state: hs?.state ?? (ui.hosted?.has(a.agent_id) ? "running" : "stopped"),
+        error: hs?.error ?? null,
+        retry_at: hs?.retry_at ?? null,
       };
     });
     sendJSON(res, 200, {
@@ -998,6 +1082,20 @@ async function handleUIRequest(
       await ui.applyOverride(agentID, ct !== "" ? { conn_type: ct, target: cmd } : cmd);
     }
     sendJSON(res, 200, { agent_id: agentID });
+    return;
+  }
+  const mr = /^\/api\/agents\/([^/]+)\/retry$/.exec(p);
+  if (mr && req.method === "POST") {
+    if (!ui.retry) {
+      sendJSON(res, 409, { error: "connector 未运行" });
+      return;
+    }
+    try {
+      await ui.retry(mr[1]);
+      sendJSON(res, 200, { status: "ok" });
+    } catch (e) {
+      sendJSON(res, 500, { error: e instanceof Error ? e.message : String(e) });
+    }
     return;
   }
   const m = /^\/api\/agents\/([^/]+)$/.exec(p);
@@ -1119,16 +1217,22 @@ async function main(): Promise<void> {
   }
 
   let adapter: LocalAgentAdapter;
-  switch (cfg.adapterType) {
-    case "stdio":
-      adapter = await StdioAdapter.create(cfg.localURL);
-      break;
-    case "http":
-      adapter = await HTTPAdapter.create(cfg.localURL);
-      break;
-    default:
-      logger.error("unknown adapter", { adapter: cfg.adapterType });
-      process.exit(1);
+  try {
+    switch (cfg.adapterType) {
+      case "stdio":
+        adapter = await StdioAdapter.create(cfg.localURL, [], cfg.agentID);
+        break;
+      case "http":
+        adapter = await HTTPAdapter.create(cfg.localURL);
+        break;
+      default:
+        logger.error("unknown adapter", { adapter: cfg.adapterType });
+        process.exit(1);
+    }
+  } catch (e) {
+    // local 单 Agent 模式没有宿主重试机制：给出可读原因后干净退出，不裸抛堆栈
+    logger.error("local agent 启动失败", { adapter: cfg.adapterType, target: cfg.localURL, error: String(e) });
+    process.exit(1);
   }
 
   const gatewayURL = new URL(cfg.gateway);

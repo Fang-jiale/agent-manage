@@ -19,7 +19,7 @@ export class WSAdapter implements LocalAgentAdapter {
     this.ws = ws;
   }
 
-  static async create(url: string): Promise<WSAdapter> {
+  static async create(url: string, agentID?: string): Promise<WSAdapter> {
     const ws = new WebSocket(url);
     await new Promise<void>((resolve, reject) => {
       ws.once("open", () => resolve());
@@ -30,7 +30,7 @@ export class WSAdapter implements LocalAgentAdapter {
     ws.on("close", () => adapter.onClose());
     ws.on("error", () => adapter.onClose());
 
-    await adapter.handshake();
+    await adapter.handshake(agentID);
     // 等一小段 lifecycle.register（非强制）
     await adapter.waitRegister(5000);
     return adapter;
@@ -49,7 +49,7 @@ export class WSAdapter implements LocalAgentAdapter {
     this.ws.send(JSON.stringify(msg));
   }
 
-  private handshake(): Promise<void> {
+  private handshake(agentID?: string): Promise<void> {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error("no response to lifecycle.initialize")), 10_000);
       const onMessage = (data: WebSocket.RawData): void => {
@@ -78,6 +78,8 @@ export class WSAdapter implements LocalAgentAdapter {
         protocolVersion: "1.0.0",
         capabilities: { chat: {}, streaming: {}, confirmations: {}, prompts: {} },
         clientInfo: { name: "agent-client", version: "1.0.0" },
+        // C3：网关认可的本实例 ID（语义同 StdioAdapter.handshake）
+        ...(agentID ? { agentInfo: { agent_id: agentID } } : {}),
       } satisfies proto.InitializeParams));
     });
   }
@@ -124,9 +126,29 @@ export class WSAdapter implements LocalAgentAdapter {
       case proto.METHOD_LIFECYCLE_CAPABILITIES_UPDATED:
       case "event.notification":
       case "event.error":
-      case "task.completed":
+      case "task.completed": {
+        // 兜底：agent 终结任务时只发 event.error / task.completed、不发
+        // done:true chunk 的实现，队列会挂到超时——这里合成终止 chunk
+        if (msg.method !== "event.notification") {
+          const p = (msg.params ?? {}) as { task_id?: string; message?: string; summary?: string };
+          const q = p.task_id ? this.queues.get(p.task_id) : undefined;
+          if (q) {
+            this.queues.delete(p.task_id!);
+            const failed = msg.method === "event.error";
+            q.push({
+              task_id: p.task_id,
+              type: "text",
+              content: [{ type: "text", text: failed ? `任务失败：${p.message ?? "unknown error"}` : (p.summary ?? "") }],
+              error: failed ? (p.message ?? "unknown error") : undefined,
+              reason: failed ? "error" : undefined,
+              done: true,
+            });
+            q.close();
+          }
+        }
         this.eventsQueue.push({ method: msg.method, params: msg.params });
         break;
+      }
       case proto.METHOD_TASK_INVOKE:
         // 管理者编排请求：带 id 上抛，client 桥接到网关后须回响应
         this.eventsQueue.push({

@@ -136,6 +136,8 @@ export class Hub {
   taskLimiter = new RateLimiter(30, 60_000); // 每用户每分钟 30 个任务
   deviceKeyLimiter = new RateLimiter(10, 60_000); // 每用户每分钟 10 次密钥创建
   draining = false;
+  // 心跳超时探活：ws → ping 发出时刻。pong 处理器据此清标记并续命
+  livenessProbes = new Map<WebSocket, number>();
   // 品牌目录缓存：启动时载入，CRUD 后 reload。空目录 = 开放模式（自由注册免审批）
   brands = new Map<string, DbAgentBrand>();
 
@@ -203,14 +205,31 @@ export class Hub {
   private heartbeatCheck(): void {
     for (const [id, agent] of this.agents) {
       if (Date.now() - agent.lastHeartbeat > this.agentTimeoutMs) {
+        // 唤醒竞态兜底：超时先 ping 探活，pong 会刷新 lastHeartbeat；下一轮仍超时才踢
+        const probed = this.livenessProbes.get(agent.ws);
+        if (probed === undefined) {
+          this.livenessProbes.set(agent.ws, Date.now());
+          try { agent.ws.ping(); } catch { /* socket 已坏，下轮关闭 */ }
+          continue;
+        }
+        if (Date.now() - probed < 10_000) continue;
         logger.warn("agent heartbeat timeout", { agent_id: id });
+        this.livenessProbes.delete(agent.ws);
         this.unregisterAgent(id);
         agent.ws.close();
       }
     }
     for (const [ws, user] of this.users) {
       if (Date.now() - user.lastHeartbeat > this.userTimeoutMs) {
+        const probed = this.livenessProbes.get(ws);
+        if (probed === undefined) {
+          this.livenessProbes.set(ws, Date.now());
+          try { ws.ping(); } catch { /* socket 已坏，下轮关闭 */ }
+          continue;
+        }
+        if (Date.now() - probed < 10_000) continue;
         logger.warn("user heartbeat timeout", { user_id: user.userID });
+        this.livenessProbes.delete(ws);
         this.users.delete(ws);
         this.dropPendingFor(ws);
         ws.close();
@@ -832,6 +851,21 @@ export class Hub {
     } satisfies proto.AgentTaskResultParams));
   }
 
+  // C6 父子任务取消：父任务取消/超时时，按 parentTaskID 级联取消未完成子任务。
+  // tasks 只存未完成任务（done 即 untrack），无需再筛状态；depth 硬限 1，
+  // 子任务不能再派生孙任务，单层匹配即可。任务清理仍由各子任务 done 进度驱动。
+  cascadeCancelSubtasks(parentTaskID: string, allow?: (ts: TaskState) => boolean): void {
+    for (const [tid, ts] of this.tasks) {
+      if (ts.parentTaskID !== parentTaskID) continue;
+      if (allow && !allow(ts)) continue;
+      logger.info("cascade cancel subtask", { task_id: tid, parent_task_id: parentTaskID });
+      this.forwardToAgent(ts.agentID, proto.newNotification(proto.METHOD_AGENT_CANCEL, {
+        task_id: tid,
+        session_id: ts.sessionID || undefined,
+      } satisfies proto.AgentCancelParams));
+    }
+  }
+
   private taskTimeoutCallback(taskID: string): void {
     const ts = this.tasks.get(taskID);
     if (!ts) return;
@@ -845,6 +879,7 @@ export class Hub {
       task_id: taskID,
       session_id: ts.sessionID || undefined,
     } satisfies proto.AgentCancelParams));
+    this.cascadeCancelSubtasks(taskID);
     const notif = proto.newNotification(proto.METHOD_ADMIN_PROGRESS, {
       task_id: taskID,
       agent_id: ts.agentID,
@@ -854,7 +889,7 @@ export class Hub {
     this.forwardToUsers(ts.ownerID, notif);
   }
 
-  private trySend(ws: WebSocket, msg: proto.Message): void {
+  trySend(ws: WebSocket, msg: proto.Message): void {
     if (ws.readyState !== WebSocket.OPEN) return;
     ws.send(JSON.stringify(msg));
   }
@@ -2194,6 +2229,23 @@ export function handleAgentMessage(hub: Hub, agent: AgentConn, raw: string): voi
     case proto.METHOD_CAPABILITIES_UPDATED: {
       const params = proto.decodeParams<proto.CapabilitiesUpdatedParams>(msg);
       const a = hub.agents.get(params.agent_id || agent.id);
+      if (params.session_id) {
+        // C1 两级作用域：带 session_id 的是该 session/workdir 的命令与技能快照，
+        // 不覆盖 Agent 全局能力（admin.agentList 仍反映全局层），仅推给页面做两层合并。
+        // 可见性与 agent 事件一致：属主 + 全量 admin。
+        if (a) {
+          const notif = proto.newNotification(proto.METHOD_CAPABILITIES_UPDATED, {
+            agent_id: a.id,
+            session_id: params.session_id,
+            capabilities: params.capabilities,
+          } satisfies proto.CapabilitiesUpdatedParams);
+          hub.forwardToUsers(a.ownerID, notif);
+          for (const u of hub.users.values()) {
+            if (u.isAdmin && !u.ownOnly && u.userID !== a.ownerID) hub.trySend(u.ws, notif);
+          }
+        }
+        break;
+      }
       if (a) {
         a.capabilities = params.capabilities;
         // capabilities 变化立即刷注册表：多实例下其他实例不等心跳节流（TTL/3）就能看到新命令
@@ -2230,7 +2282,11 @@ export function handleAgentMessage(hub: Hub, agent: AgentConn, raw: string): voi
       agent.lastHeartbeat = Date.now();
       const params = proto.decodeParams<proto.StatusParams>(msg);
       const a = hub.agents.get(params.agent_id || agent.id);
-      if (a && params.status && params.status !== a.status) {
+      if (a && params.status === proto.AGENT_STATUS_OFFLINE) {
+        // Agent 自报下线（本地服务死亡）：注销而非只改状态。connector 连接还活着时
+        // 心跳会给同 ws 的所有 agent 续命，不注销会永远显示在线
+        hub.unregisterAgent(a.id);
+      } else if (a && params.status && params.status !== a.status) {
         a.status = params.status;
         hub.refreshAgentRegistry(a, true);
         hub.touchAgentThrottled(a, true);
@@ -2614,6 +2670,11 @@ export function handleUserMessage(hub: Hub, user: UserConn, raw: string): void {
         handleGroupTaskCancel(hub, user, msg, cancelParams);
         break;
       }
+      // C6：单 agent 任务取消同样按 parentTaskID 级联子任务（群路径在 handleGroupTaskCancel 内收敛）。
+      // 属主判定与群路径一致：本人或 admin 可级联他人任务的子任务。
+      if (cancelParams.task_id) {
+        hub.cascadeCancelSubtasks(cancelParams.task_id, (ts) => ts.ownerID === user.userID || user.isAdmin);
+      }
       void handleTaskForward(hub, user, msg, proto.METHOD_AGENT_CANCEL, cancelParams).catch((e) => {
         logger.error("task.cancel failed", { error: String(e) });
         sendError(user.ws, msg.id, proto.ERR_INTERNAL_ERROR, "internal error");
@@ -2824,19 +2885,30 @@ export function handleUserMessage(hub: Hub, user: UserConn, raw: string): void {
   }
 }
 
-// Watches a connection with periodic pings; terminates if no pong arrives
-// between two pings (mirrors the Go read-deadline behavior).
+// Watches a connection with periodic pings; terminates after consecutive
+// missed pongs. 不再单轮 miss 即杀：系统睡眠唤醒时 ticker 先于对端补 pong 触发，
+// 会把活连接误杀——连续 2 轮未回且距最近 pong 超 75s 才判死。
 function watchPong(ws: WebSocket, conn: { alive: boolean }, onPong?: () => void): NodeJS.Timeout {
+  let lastPongAt = Date.now();
+  let misses = 0;
   ws.on("pong", () => {
     conn.alive = true;
+    misses = 0;
+    lastPongAt = Date.now();
     onPong?.();
   });
   const ticker = setInterval(() => {
-    if (!conn.alive) {
+    if (conn.alive) {
+      conn.alive = false;
+      misses = 0;
+      ws.ping();
+      return;
+    }
+    misses++;
+    if (misses >= 2 && Date.now() - lastPongAt > 75_000) {
       ws.terminate();
       return;
     }
-    conn.alive = false;
     ws.ping();
   }, 30_000);
   ticker.unref();
@@ -2880,7 +2952,7 @@ export function loadGatewayConfig(): GatewayConfig {
     { name: "log-level", type: "string" as const, default: envString("AGENT_MANAGE_LOG_LEVEL", "info") },
     { name: "agent-timeout", type: "duration" as const, default: String(envDurationMs("AGENT_MANAGE_AGENT_TIMEOUT", 90_000)) },
     { name: "user-timeout", type: "duration" as const, default: String(envDurationMs("AGENT_MANAGE_USER_TIMEOUT", 120_000)) },
-    { name: "task-timeout", type: "duration" as const, default: String(envDurationMs("AGENT_MANAGE_TASK_TIMEOUT", 1_800_000)) },
+    { name: "task-timeout", type: "duration" as const, default: String(envDurationMs("AGENT_MANAGE_TASK_TIMEOUT", 7_200_000)) },
     { name: "database-url", type: "string" as const, default: envString("AGENT_MANAGE_DATABASE_URL", "mysql://ywmatrix:ywmatrix_dev@localhost:3306/ywmatrix") },
     { name: "jwt-secret", type: "string" as const, default: envString("AGENT_MANAGE_JWT_SECRET", "") },
     { name: "jwt-ttl", type: "duration" as const, default: String(envDurationMs("AGENT_MANAGE_JWT_TTL", 7 * 86400_000)) },
@@ -2916,7 +2988,7 @@ export function loadGatewayConfig(): GatewayConfig {
     logLevel: values["log-level"],
     agentTimeoutMs: toMs(values["agent-timeout"], 90_000),
     userTimeoutMs: toMs(values["user-timeout"], 120_000),
-    taskTimeoutMs: toMs(values["task-timeout"], 1_800_000),
+    taskTimeoutMs: toMs(values["task-timeout"], 7_200_000),
     databaseURL: values["database-url"],
     jwtSecret: values["jwt-secret"],
     jwtTtlMs: toMs(values["jwt-ttl"], 7 * 86400_000),
@@ -3412,10 +3484,17 @@ location.replace('/');
           ip: clientIp(req.headers, req.socket.remoteAddress, cfg.trustProxy),
           pairing,
         };
-        const ticker = watchPong(ws, agent);
+        const ticker = watchPong(ws, agent, () => {
+          // pong = 连接活着：connector 模式一条 ws 托管多 agent，全部续命
+          hub.livenessProbes.delete(ws);
+          for (const a of hub.agents.values()) {
+            if (a.ws === ws) a.lastHeartbeat = Date.now();
+          }
+        });
         ws.on("message", (data) => handleAgentMessage(hub, agent, data.toString()));
         ws.on("close", () => {
           clearInterval(ticker);
+          hub.livenessProbes.delete(ws);
           // 一条连接可能托管多个 agent（connector 模式）：按 ws 全部注销
           const ids = [...hub.agents.values()].filter((a) => a.ws === ws).map((a) => a.id);
           for (const id of ids) hub.unregisterAgent(id);
@@ -3433,11 +3512,13 @@ location.replace('/');
         };
         hub.registerUser(user);
         const ticker = watchPong(ws, user, () => {
+          hub.livenessProbes.delete(ws);
           user.lastHeartbeat = Date.now();
         });
         ws.on("message", (data) => handleUserMessage(hub, user, data.toString()));
         ws.on("close", () => {
           clearInterval(ticker);
+          hub.livenessProbes.delete(ws);
           hub.unregisterUser(ws);
         });
         ws.on("error", () => ws.close());

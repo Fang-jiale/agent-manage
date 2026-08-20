@@ -468,6 +468,69 @@ test("manager agent orchestration", async (t) => {
   }
 });
 
+// C6：单 agent 路径 task.cancel（不带 group_id）同样按 parent_task_id 级联取消未完成子任务
+test("single-agent task.cancel cascades to orchestration subtask", async (t) => {
+  const fx = await startFixture(t);
+  if (!fx) return;
+  const { db, base } = fx;
+  const conns: Conn[] = [];
+  let groupID = "";
+  const rid = crypto.randomUUID().slice(0, 8);
+  try {
+    const manager = await Conn.dial(`${base}/ws/agent?token=${jwtFor(OWNER)}`);
+    const worker = await Conn.dial(`${base}/ws/agent?token=${jwtFor(OWNER)}`);
+    conns.push(manager, worker);
+    await registerAgent(manager, "casc-mgr");
+    await registerAgent(worker, "casc-wrk");
+    await upsertAgentRow(db, "casc-mgr", OWNER);
+    await upsertAgentRow(db, "casc-wrk", OWNER);
+
+    const userConn = await Conn.dial(`${base}/ws/admin?token=${jwtFor(OWNER)}`);
+    conns.push(userConn);
+    await userConn.next(proto.METHOD_ADMIN_AGENT_LIST);
+
+    userConn.send(proto.newRequest("gc-1", proto.METHOD_GROUP_CREATE, {
+      name: "casc", agent_ids: ["casc-mgr", "casc-wrk"], manager_agent_id: "casc-mgr",
+    } satisfies proto.GroupCreateParams));
+    groupID = ((await userConn.next()).result as proto.GroupCreateResult).group_id;
+
+    userConn.send(proto.newRequest("ot", proto.METHOD_TASK_CREATE, {
+      group_id: groupID, task_id: `${rid}-ct-1`, type: "chat", content: "帮我调研", mentions: ["casc-mgr"],
+    } satisfies proto.TaskCreateParams));
+    await userConn.next();
+    await manager.next(proto.METHOD_AGENT_CHAT);
+
+    manager.send(proto.newRequest("inv-1", proto.METHOD_AGENT_TASK_INVOKE, {
+      parent_task_id: `${rid}-ct-1`, group_id: groupID, target_agent_id: "casc-wrk",
+      type: "chat", content: "查一下数据",
+    } satisfies proto.AgentTaskInvokeParams));
+    const invResp = await manager.next();
+    assert.equal(invResp.error, undefined, JSON.stringify(invResp.error));
+    const childTaskID = (invResp.result as proto.AgentTaskInvokeResult).task_id;
+    await worker.next(proto.METHOD_AGENT_CHAT);
+
+    // 不带 group_id 的单 agent 取消：父任务取消应级联子任务
+    userConn.send(proto.newRequest("cancel-1", proto.METHOD_TASK_CANCEL, {
+      agent_id: "casc-mgr", task_id: `${rid}-ct-1`,
+    } satisfies proto.TaskCancelParams));
+    const cancelResp = await userConn.next();
+    assert.equal(cancelResp.error, undefined, JSON.stringify(cancelResp.error));
+
+    // 管理者收到父任务的 agent.cancel
+    const parentCancel = proto.decodeParams<proto.AgentCancelParams>(
+      await manager.next(proto.METHOD_AGENT_CANCEL));
+    assert.equal(parentCancel.task_id, `${rid}-ct-1`);
+    // worker 收到子任务的 agent.cancel（级联）
+    const childCancel = proto.decodeParams<proto.AgentCancelParams>(
+      await worker.next(proto.METHOD_AGENT_CANCEL));
+    assert.equal(childCancel.task_id, childTaskID);
+  } finally {
+    for (const c of conns) c.close();
+    if (groupID) await db.deleteGroup(OWNER, groupID).catch(() => {});
+    await fx.close();
+  }
+});
+
 // 离线成员：@全体 跳过离线目标（响应带 skipped_offline），全部离线直接拒绝
 test("group fan-out skips offline members", async (t) => {
   const fx = await startFixture(t);
