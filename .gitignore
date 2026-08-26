@@ -42,3 +42,4 @@ dcywzc-ywcoder-*.tgz
 agentmatrix.top_nginx.zip
 # 证书与离线安装包不进库
 *.zip
+package/claude-bridge/ywmatrix-shim.mjs
