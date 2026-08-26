@@ -9,6 +9,7 @@
     <link rel="stylesheet" href="/static/admin.css">
 </head>
 <body>
+    <div id="bootSpinner" style="position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:rgba(248,250,252,.72);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);z-index:9999"><div style="width:34px;height:34px;border:3px solid #d1d5db;border-top-color:#10b981;border-radius:50%;animation:ywmspin .8s linear infinite"></div><div style="font-size:13px;color:#64748b">管理后台加载中…</div></div><style>@keyframes ywmspin{to{transform:rotate(360deg)}}</style>
     <div id="app">
         <header class="topbar">
             <a class="logo" href="/" title="返回对话">
@@ -429,6 +430,7 @@
                 wsEverOpened = false;
                 ws = new WebSocket(WS_URL + '?token=' + encodeURIComponent(token));
                 ws.onopen = () => {
+                    document.getElementById("bootSpinner")?.remove();
                     wsEverOpened = true;
                     wsFailCount = 0;
                     reconnectDelay = 1000;
@@ -1336,6 +1338,8 @@
             switchTab(currentTab);
             connect();
         })();
+        // 兜底:连接迟迟不上来也不把用户困在转圈上
+        setTimeout(() => document.getElementById("bootSpinner")?.remove(), 6000);
     </script>
 </body>
 </html>
