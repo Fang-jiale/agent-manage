@@ -53,15 +53,17 @@ function testConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
 
 interface TestServer {
   base: string;
+  hub: Hub;
   close: () => Promise<void>;
 }
 
 async function startGateway(cfg: GatewayConfig, attachments?: import("../src/storage.ts").AttachmentStore): Promise<TestServer> {
-  const { server } = await createGatewayServer(cfg, STATIC_FILE, undefined, attachments);
+  const { server, hub } = await createGatewayServer(cfg, STATIC_FILE, undefined, attachments);
   await new Promise<void>((resolve) => server.listen(0, resolve));
   const port = (server.address() as AddressInfo).port;
   return {
     base: `ws://localhost:${port}`,
+    hub,
     close: () =>
       new Promise<void>((resolve) => {
         server.closeAllConnections();
@@ -469,5 +471,44 @@ test("delivered pending response cancels the timeout", async () => {
     assert.equal(sent[0].error, undefined);
   } finally {
     hub.shutdown();
+  }
+});
+
+test("agent 拒绝 agent.chat：错误透传给用户且任务不悬挂", async () => {
+  const srv = await startGateway(testConfig());
+  const conns: Conn[] = [];
+  try {
+    const agentConn = await Conn.dial(`${srv.base}/ws/agent?token=${jwtFor("tester")}`);
+    conns.push(agentConn);
+    await registerAgent(agentConn, "agent-reject");
+
+    const userConn = await Conn.dial(`${srv.base}/ws/admin?token=${jwtFor("tester")}`);
+    conns.push(userConn);
+    await userConn.next(proto.METHOD_ADMIN_AGENT_LIST);
+
+    userConn.send(proto.newRequest("req-r", proto.METHOD_TASK_CREATE, {
+      agent_id: "agent-reject",
+      task_id: "task-r",
+      type: "chat",
+      content: "hello",
+    } satisfies proto.TaskCreateParams));
+
+    const chatReq = await agentConn.next(proto.METHOD_AGENT_CHAT);
+    assert.equal(chatReq.id, "req-r");
+
+    // agent 以 JSON-RPC 错误拒绝（如 workdir 校验失败）
+    agentConn.send(proto.newErrorResponse("req-r", -32602, "workdir not found: /no/such/dir"));
+
+    // 用户的 task.create 直接收到原始错误（不再只回 accepted 后悬挂）
+    const errResp = await userConn.next();
+    assert.equal(errResp.id, "req-r");
+    assert.equal(errResp.error?.code, -32602);
+    assert.ok(errResp.error?.message.includes("/no/such/dir"));
+
+    // 网关侧任务条目同步清理，不再等超时兜底
+    assert.equal(srv.hub.tasks.has("task-r"), false);
+  } finally {
+    for (const c of conns) c.close();
+    await srv.close();
   }
 });

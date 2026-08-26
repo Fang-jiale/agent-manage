@@ -6,6 +6,13 @@ import { AsyncQueue, type LocalAgentAdapter, type LocalAgentEvent } from "./type
 // AgentClient 作为 WS 客户端连接，消息为单条 JSON（非 JSONL），其余语义与
 // StdioAdapter 一致——lifecycle.initialize 协商、stream.chunk 按 task_id 路由、
 // abort 时显式补发 task.cancel。
+
+// ack 等待时限，默认 30s（思考型 agent 首包可能较慢）；测试用 YWM_ACK_WAIT_MS 缩短
+function ackWaitMs(): number {
+  const v = Number(process.env.YWM_ACK_WAIT_MS);
+  return Number.isFinite(v) && v > 0 ? v : 30_000;
+}
+
 export class WSAdapter implements LocalAgentAdapter {
   private ws: WebSocket;
   private capabilities: proto.Capability[] = [];
@@ -14,6 +21,12 @@ export class WSAdapter implements LocalAgentAdapter {
   // 每个 task_id 独立 queue，语义同 StdioAdapter（create/respond 共用，done 才关）
   private queues = new Map<string, AsyncQueue<proto.LocalAgentChunk>>();
   private cancelledTasks = new Set<string>();
+  // task.create / task.respond 的应答等待（ack 透传），语义同 StdioAdapter
+  private ackWaiters = new Map<string, {
+    resolve: () => void;
+    reject: (err: Error & { code?: number }) => void;
+    timer: NodeJS.Timeout;
+  }>();
 
   private constructor(ws: WebSocket) {
     this.ws = ws;
@@ -42,6 +55,10 @@ export class WSAdapter implements LocalAgentAdapter {
     this.eventsQueue.close();
     for (const q of this.queues.values()) q.close();
     this.queues.clear();
+    // 等待中的 ack 一并判失败（连接断了）
+    for (const w of [...this.ackWaiters.values()]) {
+      w.reject(Object.assign(new Error("本地 Agent 连接中断"), { code: -32003 }));
+    }
   }
 
   private writeMessage(msg: proto.Message): void {
@@ -134,6 +151,8 @@ export class WSAdapter implements LocalAgentAdapter {
           const q = p.task_id ? this.queues.get(p.task_id) : undefined;
           if (q) {
             this.queues.delete(p.task_id!);
+            // 终结消息同样视为隐式 ack
+            this.ackWaiters.get(p.task_id!)?.resolve();
             const failed = msg.method === "event.error";
             q.push({
               task_id: p.task_id,
@@ -157,14 +176,25 @@ export class WSAdapter implements LocalAgentAdapter {
           id: msg.id !== undefined && msg.id !== null ? String(msg.id) : undefined,
         });
         break;
-      default:
-        // 响应（init/task.create 的 ack 等）与未知方法忽略
+      default: {
+        // JSON-RPC 响应：task.create / task.respond 的 ack 或错误，路由给等待者
+        const waiter = msg.id !== undefined && msg.id !== null ? this.ackWaiters.get(String(msg.id)) : undefined;
+        if (waiter) {
+          if (msg.error) {
+            waiter.reject(Object.assign(new Error(msg.error.message || "agent 拒绝了请求"), { code: msg.error.code }));
+          } else {
+            waiter.resolve();
+          }
+        }
+      }
     }
   }
 
   private routeChunk(chunk: proto.LocalAgentChunk): void {
     const taskID = chunk.task_id;
     if (!taskID) return;
+    // 隐式 ack：不回 task.create 应答的存量 agent，首个 chunk 即接受证据
+    this.ackWaiters.get(taskID)?.resolve();
     const q = this.queues.get(taskID);
     if (!q) return;
     q.push(chunk);
@@ -209,7 +239,44 @@ export class WSAdapter implements LocalAgentAdapter {
       signal.addEventListener("abort", onAbort, { once: true });
     }
 
+    // 等 agent 应答（显式 ack / 错误响应 / 隐式首 chunk），语义同 StdioAdapter
+    await this.waitAck(req.task_id, signal);
     return q;
+  }
+
+  private waitAck(taskID: string, signal: AbortSignal): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const entry: {
+        resolve: () => void;
+        reject: (err: Error & { code?: number }) => void;
+        timer: NodeJS.Timeout;
+      } = {
+        resolve: () => {
+          clearTimeout(entry.timer);
+          if (this.ackWaiters.get(taskID) === entry) this.ackWaiters.delete(taskID);
+          resolve();
+        },
+        reject: (err) => {
+          clearTimeout(entry.timer);
+          if (this.ackWaiters.get(taskID) === entry) this.ackWaiters.delete(taskID);
+          reject(err);
+        },
+        timer: undefined as unknown as NodeJS.Timeout,
+      };
+      entry.timer = setTimeout(() => {
+        entry.reject(Object.assign(
+          new Error(`本地 Agent 无应答（${Math.round(ackWaitMs() / 1000)}s 内无 ack 且无输出）`),
+          { code: -32001 },
+        ));
+      }, ackWaitMs());
+      entry.timer.unref();
+      this.ackWaiters.set(taskID, entry);
+      const onAbort = (): void => {
+        if (this.ackWaiters.get(taskID) === entry) entry.resolve();
+      };
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    });
   }
 
   getCapabilities(): proto.Capability[] {

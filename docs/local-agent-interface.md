@@ -346,6 +346,14 @@ Agent 在运行中能力发生变化时主动通知。等价于 MCP 的 `notific
 }
 ```
 
+> **应答时限与隐式接受**：AgentClient 会等待 `task.create` 的应答并把 ack 时机
+> 延后到本地应答之后——Agent 的错误响应（如 `-32602`）将原样透传回发起方，
+> 任务不再「已接受后悬挂」。若 Agent 未显式应答，**首个 `stream.chunk` 视为
+> 隐式接受**。两者在时限（当前 30s，实现可调）内均未出现时，AgentClient 判定
+> 本地 Agent 无应答，任务以 `-32001` 错误终结。长思考型 Agent 应实现显式 ack，
+> 或尽早推出首 chunk（如 thinking 段）。`event.error` / `task.completed` 终结
+> 通知同样视为隐式接受。
+
 > **`session_id` 产生约定（当前实现）**：由 **AgentClient（网关）** 在 `session.create` 时用 `crypto.randomUUID()` 生成合法 UUID，写入持久化存储；后续 `task.create` 始终携带该值，Agent 透传给被控子进程（如 ywcoder `--resume <uuid>`）即可。
 >
 > 关键要求：到达子进程的 `session_id` 必须是合法 UUID，否则续接能力丢失（被控端退化为「一次性会话」）。当前链路下浏览器永远携带网关生成的 UUID，此约束已满足。

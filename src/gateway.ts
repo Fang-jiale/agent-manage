@@ -80,6 +80,7 @@ const MAX_GROUP_FANOUT = 8;
 interface PendingEntry {
   user: UserConn;
   timer: NodeJS.Timeout; // agent 不应答时兜底，防泄漏
+  taskID?: string; // agent.chat 转发携带：agent 以错误响应拒绝时用于清理任务条目
 }
 
 interface TaskBuffer {
@@ -690,7 +691,7 @@ export class Hub {
     return true;
   }
 
-  trackPendingRequest(id: string, user: UserConn): void {
+  trackPendingRequest(id: string, user: UserConn, taskID?: string): void {
     const old = this.pendingRequests.get(id);
     if (old) clearTimeout(old.timer);
     // agent 不应答时兜底：回错误并删条目，防止 pendingRequests 无限增长
@@ -700,7 +701,18 @@ export class Hub {
       this.trySend(user.ws, proto.newErrorResponse(id, proto.ERR_INTERNAL_ERROR, "request timeout"));
     }, this.pendingTimeoutMs);
     timer.unref();
-    this.pendingRequests.set(id, { user, timer });
+    this.pendingRequests.set(id, { user, timer, taskID });
+  }
+
+  // agent 以 JSON-RPC 错误响应拒绝 agent.chat 时（1:1 路径带请求 id）：
+  // 清理已 trackTask 的条目，否则任务挂到超时。须在 forwardToPendingUser 删除条目前调用。
+  cleanupRejectedTask(requestID: string, reason: string): void {
+    const p = this.pendingRequests.get(requestID);
+    if (!p || !p.taskID) return;
+    const ts = this.tasks.get(p.taskID);
+    if (ts) this.notifySubtaskResult(p.taskID, ts, reason);
+    this.observeTaskEnd(p.taskID, "failed");
+    this.untrackTask(p.taskID);
   }
 
   trackTask(taskID: string, agentID: string, ownerID: string, sessionID = "", extra?: Partial<TaskState>): void {
@@ -2362,6 +2374,8 @@ export function handleAgentMessage(hub: Hub, agent: AgentConn, raw: string): voi
 
     default: {
       if (msg.id) {
+        // agent 以错误响应拒绝 agent.chat：先清理关联任务条目（条目随后即被删除）
+        if (msg.error) hub.cleanupRejectedTask(msg.id, msg.error.message ?? "");
         hub.forwardToPendingUser(msg.id, msg);
       }
     }
@@ -2400,7 +2414,7 @@ async function handleTaskCreate(hub: Hub, user: UserConn, msg: proto.Message): P
     sendError(user.ws, msg.id, proto.ERR_RATE_LIMITED, "too many tasks, please slow down");
     return;
   }
-  if (msg.id) hub.trackPendingRequest(msg.id, user);
+  if (msg.id) hub.trackPendingRequest(msg.id, user, params.task_id);
   const sessionID = params.session_id || `${params.task_id}-session`;
   hub.trackTask(params.task_id, params.agent_id ?? "", user.userID, sessionID);
   hub.persistUserMessage(params, sessionID, user.userID);
@@ -3166,7 +3180,7 @@ export async function createGatewayServer(cfg: GatewayConfig, staticFile: string
     }
     if (url.pathname.startsWith("/static/") && req.method === "GET") {
       // 共享静态资源（如 shared.css）；限制在 static 目录内防路径穿越
-      const STATIC_MIME: Record<string, string> = { ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif", ".ico": "image/x-icon", ".woff": "font/woff", ".woff2": "font/woff2" };
+      const STATIC_MIME: Record<string, string> = { ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webmanifest": "application/manifest+json", ".webp": "image/webp", ".gif": "image/gif", ".ico": "image/x-icon", ".woff": "font/woff", ".woff2": "font/woff2" };
       const name = url.pathname.slice("/static/".length);
       const file = path.resolve(path.dirname(staticFile), name);
       if (name.includes("/") || !file.startsWith(path.dirname(staticFile) + path.sep)) {
@@ -3179,6 +3193,23 @@ export async function createGatewayServer(cfg: GatewayConfig, staticFile: string
           return;
         }
         res.writeHead(200, { "Content-Type": STATIC_MIME[path.extname(file)] ?? "application/octet-stream", "Cache-Control": "no-cache" });
+        res.end(data);
+      });
+      return;
+    }
+    // PWA Service Worker 必须落在根 scope 才能控制整站，所以从根路径服务
+    // static/sw.js，并用 Service-Worker-Allowed 放开 scope
+    if (url.pathname === "/sw.js" && req.method === "GET") {
+      readCached(path.resolve(path.dirname(staticFile), "sw.js"), (data) => {
+        if (!data) {
+          res.writeHead(404).end("not found");
+          return;
+        }
+        res.writeHead(200, {
+          "Content-Type": "text/javascript; charset=utf-8",
+          "Cache-Control": "no-cache",
+          "Service-Worker-Allowed": "/"
+        });
         res.end(data);
       });
       return;
@@ -3328,6 +3359,29 @@ location.replace('/');
         res.end(JSON.stringify({ token, user: { id: user.id, name: user.name, role: user.role } }));
       })().catch((e) => {
         logger.error("login failed", { error: String(e) });
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "internal error" }));
+      });
+      return;
+    }
+    // 轻量 token 校验：前端启动时先验一次，失效 token 直接清掉停在登录页，
+    // 避免乐观进主界面后 WS 三次 401 重试又弹回登录页的闪进闪回
+    if (url.pathname === "/auth/me" && req.method === "GET") {
+      void (async () => {
+        const bearer = req.headers.authorization?.startsWith("Bearer ")
+          ? req.headers.authorization.slice(7)
+          : "";
+        const claims = bearer ? verifyJwt(bearer, cfg.jwtSecret) : undefined;
+        const user = claims && db ? await db.getUserById(claims.sub).catch(() => undefined) : undefined;
+        if (!claims || !user || user.disabled === 1) {
+          res.writeHead(401, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "unauthorized" }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ user: { id: user.id, name: user.name, role: user.role } }));
+      })().catch((e) => {
+        logger.error("auth/me failed", { error: String(e) });
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "internal error" }));
       });

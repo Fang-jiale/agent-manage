@@ -53,6 +53,12 @@ function spawnErrorHint(e: unknown): string {
   return msg;
 }
 
+// ack 等待时限，默认 30s（思考型 agent 首包可能较慢）；测试用 YWM_ACK_WAIT_MS 缩短
+function ackWaitMs(): number {
+  const v = Number(process.env.YWM_ACK_WAIT_MS);
+  return Number.isFinite(v) && v > 0 ? v : 30_000;
+}
+
 export class StdioAdapter implements LocalAgentAdapter {
   private proc: ChildProcess;
   private capabilities: proto.Capability[] = [];
@@ -68,6 +74,14 @@ export class StdioAdapter implements LocalAgentAdapter {
   // 已转发过 task.cancel 的 task_id 集合。多次 send() 复用同一 controller.signal，
   // abort 回调可能注册多份；这里去重避免给 shim 重复发取消通知。
   private cancelledTasks = new Set<string>();
+  // task.create / task.respond 的应答等待（ack 透传）：显式 JSON-RPC 响应或
+  // 首个 stream.chunk（隐式接受）在时限内到达即放行；错误响应携带 code 抛出。
+  // 测试可用 YWM_ACK_WAIT_MS 缩短时限。
+  private ackWaiters = new Map<string, {
+    resolve: () => void;
+    reject: (err: Error & { code?: number }) => void;
+    timer: NodeJS.Timeout;
+  }>();
 
   private constructor(proc: ChildProcess) {
     this.proc = proc;
@@ -129,6 +143,10 @@ export class StdioAdapter implements LocalAgentAdapter {
     // 关掉所有 in-flight queue——消费者会收到 iterator end
     for (const q of this.queues.values()) q.close();
     this.queues.clear();
+    // 等待中的 ack 一并判失败（agent 进程没了）
+    for (const w of [...this.ackWaiters.values()]) {
+      w.reject(Object.assign(new Error("本地 Agent 连接中断"), { code: -32003 }));
+    }
   }
 
   private readLine(timeoutMs: number): Promise<string | undefined> {
@@ -245,6 +263,8 @@ export class StdioAdapter implements LocalAgentAdapter {
           const q = p.task_id ? this.queues.get(p.task_id) : undefined;
           if (q) {
             this.queues.delete(p.task_id!);
+            // 终结消息同样视为隐式 ack（不回 task.create 应答的存量 agent）
+            this.ackWaiters.get(p.task_id!)?.resolve();
             const failed = msg.method === "event.error";
             q.push({
               task_id: p.task_id,
@@ -268,14 +288,26 @@ export class StdioAdapter implements LocalAgentAdapter {
           id: msg.id !== undefined && msg.id !== null ? String(msg.id) : undefined,
         });
         break;
-      default:
-        // Ignore unrecognized messages.
+      default: {
+        // JSON-RPC 响应：task.create / task.respond 的 ack 或错误，路由给等待者；
+        // 无人等待则忽略（生命周期早期或未知来源的消息）
+        const waiter = msg.id !== undefined && msg.id !== null ? this.ackWaiters.get(String(msg.id)) : undefined;
+        if (waiter) {
+          if (msg.error) {
+            waiter.reject(Object.assign(new Error(msg.error.message || "agent 拒绝了请求"), { code: msg.error.code }));
+          } else {
+            waiter.resolve();
+          }
+        }
+      }
     }
   }
 
   private routeChunk(chunk: proto.LocalAgentChunk): void {
     const taskID = chunk.task_id;
     if (!taskID) return; // shim 必须在 chunk 里带 task_id，否则无法路由
+    // 隐式 ack：不回 task.create 应答的存量 agent，首个 chunk 即接受证据
+    this.ackWaiters.get(taskID)?.resolve();
     const q = this.queues.get(taskID);
     if (!q) return; // 未知 task（已结束 / 漏发 create）——丢弃
     q.push(chunk);
@@ -332,7 +364,47 @@ export class StdioAdapter implements LocalAgentAdapter {
       signal.addEventListener("abort", onAbort, { once: true });
     }
 
+    // 等 agent 应答（显式 ack / 错误响应 / 隐式首 chunk）；拒绝与超时在此抛出，
+    // client 得以在任务创建前把错误透传回网关，而不是无声悬挂
+    await this.waitAck(req.task_id, signal);
     return q;
+  }
+
+  // 登记一个 task 的 ack 等待。resolve/reject 自清理；abort 时静默放行
+  // （后续由 task.cancel 兜底流程收尾）。
+  private waitAck(taskID: string, signal: AbortSignal): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const entry: {
+        resolve: () => void;
+        reject: (err: Error & { code?: number }) => void;
+        timer: NodeJS.Timeout;
+      } = {
+        resolve: () => {
+          clearTimeout(entry.timer);
+          if (this.ackWaiters.get(taskID) === entry) this.ackWaiters.delete(taskID);
+          resolve();
+        },
+        reject: (err) => {
+          clearTimeout(entry.timer);
+          if (this.ackWaiters.get(taskID) === entry) this.ackWaiters.delete(taskID);
+          reject(err);
+        },
+        timer: undefined as unknown as NodeJS.Timeout,
+      };
+      entry.timer = setTimeout(() => {
+        entry.reject(Object.assign(
+          new Error(`本地 Agent 无应答（${Math.round(ackWaitMs() / 1000)}s 内无 ack 且无输出）`),
+          { code: -32001 },
+        ));
+      }, ackWaitMs());
+      entry.timer.unref();
+      this.ackWaiters.set(taskID, entry);
+      const onAbort = (): void => {
+        if (this.ackWaiters.get(taskID) === entry) entry.resolve();
+      };
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    });
   }
 
   getCapabilities(): proto.Capability[] {

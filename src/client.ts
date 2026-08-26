@@ -292,14 +292,26 @@ async function handleChat(
 ): Promise<void> {
   const params = proto.decodeParams<proto.AgentChatParams>(msg);
 
-  safeSend(ws, proto.newResponse(msg.id ?? "", {
-    status: "accepted",
-    task_id: params.task_id,
-  } satisfies proto.TaskAcceptResult));
-
   const controller = tasks.add(params.task_id);
-  sendStatus(ws, agentID, proto.AGENT_STATUS_BUSY, params.task_id);
   try {
+    // workdir 在 connector 本机解析：路径不存在时立刻报错并终结任务，
+    // 否则任务交给 agent 后无声失败，前端会永远停在"等待回复"
+    const workdir = (params.metadata?.workdir as string | undefined) ?? "";
+    if (workdir !== "") {
+      let bad: string | null = null;
+      try {
+        if (!(await fsp.stat(workdir)).isDirectory()) bad = "不是目录";
+      } catch {
+        bad = "不存在";
+      }
+      if (bad) {
+        sendProgress(ws, agentID, params.task_id, params.session_id, params.context_id,
+          proto.PROGRESS_KIND_END,
+          { type: proto.CHUNK_TYPE_TEXT, error: `工作目录${bad}：${workdir}`, done: true });
+        return;
+      }
+    }
+
     const req: proto.LocalAgentRequest = {
       task_id: params.task_id,
       session_id: params.session_id,
@@ -311,26 +323,53 @@ async function handleChat(
 
     let chunks: AsyncIterable<proto.LocalAgentChunk>;
     try {
+      // adapter.send 内含等待本地 Agent 应答（显式 ack / 错误 / 隐式首 chunk）
       chunks = await adapter.send(req, controller.signal);
     } catch (err) {
-      const errMsg = controller.signal.aborted && controller.signal.reason === "timeout"
-        ? "timeout"
-        : err instanceof Error ? err.message : String(err);
-      sendProgress(ws, agentID, params.task_id, params.session_id, params.context_id,
-        proto.PROGRESS_KIND_END, { type: proto.CHUNK_TYPE_TEXT, error: errMsg, done: true });
+      if (controller.signal.aborted && controller.signal.reason === "timeout") {
+        sendProgress(ws, agentID, params.task_id, params.session_id, params.context_id,
+          proto.PROGRESS_KIND_END, { type: proto.CHUNK_TYPE_TEXT, error: "timeout", done: true });
+        return;
+      }
+      if (controller.signal.aborted) return;
+      // 本地 Agent 拒绝（code/message 透传）或连接失败：
+      // - 带请求 id（1:1 路径）→ JSON-RPC 错误响应回网关，浏览器 task.create 直接收到
+      // - 空 id（群聊 fan-out 无响应路由）→ 发终态 error chunk，进度路径会清理任务
+      const code = (err as { code?: number }).code ?? proto.ERR_INTERNAL_ERROR;
+      const message = err instanceof Error ? err.message : String(err);
+      if (msg.id) {
+        sendError(ws, msg.id, code, message);
+      } else {
+        sendProgress(ws, agentID, params.task_id, params.session_id, params.context_id,
+          proto.PROGRESS_KIND_END, { type: proto.CHUNK_TYPE_TEXT, error: message, done: true });
+      }
       return;
     }
 
+    // 本地应答成功后才告知网关 accepted——被拒绝的任务从未“被接受”
+    safeSend(ws, proto.newResponse(msg.id ?? "", {
+      status: "accepted",
+      task_id: params.task_id,
+    } satisfies proto.TaskAcceptResult));
+    sendStatus(ws, agentID, proto.AGENT_STATUS_BUSY, params.task_id);
+
     // 跨 task.respond 轮次持续消费同一 queue。confirm_required 不再提前关 queue，
     // 后续 task.respond 触发的 chunk 流回这里继续转发给网关。
+    let sawDone = false;
     for await (const chunk of chunks) {
+      if (chunk.done) sawDone = true;
       const kind = chunk.done ? proto.PROGRESS_KIND_END : proto.PROGRESS_KIND_REPORT;
       sendProgress(ws, agentID, chunk.task_id ?? params.task_id, chunk.session_id ?? params.session_id,
         chunk.context_id ?? params.context_id, kind, chunk);
     }
-    if (controller.signal.aborted && controller.signal.reason === "timeout") {
+    // 流结束却没收到任何 done:true（agent 进程崩溃/秒退时 onExit 只是静默关 queue）：
+    // 必须补一个错误终点，否则前端永远停在"等待回复"
+    if (!sawDone) {
+      const reason = controller.signal.aborted && controller.signal.reason === "timeout"
+        ? "timeout"
+        : "agent 连接中断，未收到结果";
       sendProgress(ws, agentID, params.task_id, params.session_id, params.context_id,
-        proto.PROGRESS_KIND_END, { type: proto.CHUNK_TYPE_TEXT, error: "timeout", done: true });
+        proto.PROGRESS_KIND_END, { type: proto.CHUNK_TYPE_TEXT, error: reason, done: true });
     }
   } finally {
     tasks.remove(params.task_id);
@@ -382,6 +421,18 @@ async function handleRespond(
   try {
     await adapter.send(req, controller.signal);
   } catch (err) {
+    const code = (err as { code?: number }).code;
+    if (code === -32000) {
+      // confirm 已撤销/已回复的正常竞态（local-agent-interface §6.2.2），静默
+      logger.debug("respond race rejected", { task_id: params.task_id, error: String(err) });
+      return;
+    }
+    if (code !== undefined && code !== -32001 && code !== -32003) {
+      // agent 显式拒绝（如 -32602）：记录但不终结任务，流侧状态才是真相
+      logger.warn("respond rejected by agent", { task_id: params.task_id, code, error: String(err) });
+      return;
+    }
+    // 连接级失败/超时：维持原路径，以终态 error chunk 收尾
     const errMsg = controller.signal.aborted && controller.signal.reason === "timeout"
       ? "timeout"
       : err instanceof Error ? err.message : String(err);
