@@ -1,6 +1,6 @@
 :root { --sidebar-w: 292px; --rail-w: 52px; }
 
-#app { display: flex; height: 100vh; }
+#app { display: flex; height: 100vh; height: 100dvh; }
 
 /* ---------- 一级图标导航（飞书式 rail） ---------- */
 .rail-logo {
@@ -229,6 +229,7 @@ body.compact .session-preview { display: none; }
 }
 .chat-search input:focus { border-color: var(--accent); }
 .chat-search-count { font-size: 12.5px; color: var(--text-tertiary); white-space: nowrap; }
+.chat-search-count.can-load { color: var(--accent); cursor: pointer; text-decoration: underline dotted; }
 .message.search-hidden { display: none; }
 .message.search-current {
     outline: 2px solid var(--accent);
@@ -824,7 +825,7 @@ body.compact .session-preview { display: none; }
 @media (max-width: 860px) {
     .login-grid { grid-template-columns: 1fr; min-height: 0; }
     .login-brand { display: none; }
-    .login-form-wrap { min-height: 100vh; }
+    .login-form-wrap { min-height: 100vh; min-height: 100dvh; }
 }
 
 /* ---------- message actions (hover) ---------- */
@@ -1255,19 +1256,109 @@ body.compact .agent-card { padding: 8px 10px; }
 }
 .lightbox .lb-unsupported .lb-mime { margin-top: 6px; font-family: ui-monospace, monospace; font-size: 12px; }
 
+/* ---------- 移动端（≤768px）：底部 tab bar + 单列布局 ---------- */
 @media (max-width: 768px) {
+    /* 左侧竖 rail 改为底部横条 tab bar */
+    .side-rail {
+        position: fixed; left: 0; right: 0; top: auto; bottom: 0; z-index: 99;
+        width: 100%;
+        flex-direction: row;
+        gap: 4px;
+        padding: 6px 12px calc(6px + env(safe-area-inset-bottom));
+        box-sizing: border-box;
+        border-right: none; border-top: 1px solid var(--border);
+        box-shadow: 0 -2px 12px rgba(0, 0, 0, .06);
+    }
+    .rail-logo, .rail-conn { display: none; }
+    .side-rail .rail-item { width: 46px; height: 42px; }
+    .side-rail .rail-spacer { flex: 1; }
+
+    /* 主区满宽，底部给 tab bar 留高度 */
+    .main { padding-left: 0; box-sizing: border-box; }
+    .input-area { padding-bottom: calc(10px + 48px + env(safe-area-inset-bottom)); }
+
+    /* 侧栏改为覆盖式抽屉（不再给 rail 让位） */
     .sidebar {
-        position: fixed; z-index: 100; height: 100%;
-        left: var(--rail-w);
-        margin-left: calc(-1 * var(--sidebar-w));
+        position: fixed; z-index: 100; top: 0; bottom: 0; left: 0; height: 100%;
+        width: min(84vw, 340px);
+        margin-left: calc(-1 * min(84vw, 340px) - 16px);
         box-shadow: var(--shadow-lg);
     }
     .sidebar.open { margin-left: 0; }
-    .side-rail { position: fixed; left: 0; top: 0; bottom: 0; z-index: 99; }
-    .main { padding-left: var(--rail-w); box-sizing: border-box; }
+    /* 抽屉打开时的背景遮罩：点击空白处关闭（否则菜单键被抽屉盖住，收不回去） */
+    body.sidebar-open #app::after {
+        content: '';
+        position: fixed; inset: 0; z-index: 95;
+        background: rgba(15, 23, 42, .35);
+    }
     .menu-toggle { display: inline-flex; }
-    .chat-inner { padding: 20px 16px 12px; }
-    .input-area { padding: 8px 12px 14px; }
+
+    /* 顶栏单行紧凑:低频操作(导出/清空/删除)手机隐藏,删除走历史会话菜单 */
+    .main-header {
+        height: auto; min-height: 52px;
+        padding: 0 8px; gap: 4px;
+        padding-top: env(safe-area-inset-top);
+    }
+    .header-sub { display: none; }
+    .header-info { min-width: 0; }
+    .header-actions { margin-left: auto; gap: 0; }
+    #exportChatBtn, #clearChatBtn, #deleteSessionBtn { display: none; }
+    .main-header .icon-btn { width: 32px; height: 32px; }
+    .header-title { font-size: 14.5px; }
+    /* 工作目录徽片:限宽省略,与标题同行 */
+    .header-chips { min-width: 0; }
+    .chip-workdir { max-width: 96px; }
+    .chip-workdir .cw-path { display: inline-block; max-width: 60px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+    /* Agent 详情按钮:触屏无 hover,窄屏无条件常显并放大到可点(部分国产浏览器 hover 探测不可靠) */
+    .agent-info-btn { opacity: 1 !important; width: 30px; height: 30px; }
+    .agent-info-btn svg { width: 15px; height: 15px; }
+
+    /* 聊天区与输入区去掉桌面级双侧留白 */
+    .chat-inner { padding: 14px 12px 6px; }
+    .input-area { padding-top: 6px; padding-left: 10px; padding-right: 10px; }
+    .input-inner { padding: 0; }
+
+    /* iOS 聚焦 <16px 字号的输入框会整页放大 */
+    input[type="text"], input[type="password"], input[type="search"], textarea {
+        font-size: 16px !important;
+    }
+
+    /* 触控目标放大 */
+    .message-actions .icon-btn { width: 30px; height: 30px; }
+    .send-btn { width: 38px; height: 38px; }
+
+    .message-content { font-size: 15px; }
+    .message { gap: 10px; margin-bottom: 20px; }
+
+    /* 回底按钮避开输入区 + tab bar */
+    .scroll-bottom-btn { bottom: calc(126px + 48px + env(safe-area-inset-bottom)); }
+
+    /* 弹层窄屏不溢出（modal 的 max-width 多为内联样式） */
+    .modal-overlay .modal { max-width: calc(100vw - 28px) !important; }
+
+    .dash-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .empty-state { padding: 16px; }
+
+    /* 二轮适配 */
+    /* 历史会话下拉:桌面是 top:61px/left:90px 的小浮层,手机改通栏面板 */
+    .session-menu {
+        left: 12px; right: 12px; width: auto; max-width: none;
+        top: calc(52px + env(safe-area-inset-top));
+    }
+    /* Agent 详情抽屉:手机上全宽,不再挤 330px 竖条 */
+    .agent-drawer { width: 100vw; max-width: 100vw; border-left: none; }
+    .chat-search { padding: 6px 12px; }
+    /* 输入框下方的桌面快捷键提示,手机无意义 */
+    .input-hint { display: none; }
+    /* 代码块触摸惯性滚动 */
+    .message-content pre, .code-block pre { -webkit-overflow-scrolling: touch; }
+    /* 附件图片在窄屏别占太宽 */
+    .msg-image { max-width: 70vw; }
+}
+
+/* 触屏设备没有 hover:消息操作按钮(复制/重发)常显,否则永远点不到 */
+@media (hover: none) {
+    .message-actions { display: inline-flex; opacity: .85; }
 }
 
 /* ---------- ambience ---------- */
@@ -1377,6 +1468,9 @@ body.compact .agent-card { padding: 8px 10px; }
 .cb-dot.family-py { background: #10b981; }
 .cb-dot.family-go { background: #06b6d4; }
 .cb-dot.family-sh { background: #94a3b8; }
+.cb-dot.family-css { background: #8b5cf6; }
+.cb-dot.family-yaml { background: #64748b; }
+.cb-dot.family-data { background: #a3a3a3; }
 .cb-dot.family-text { background: #cbd5e1; }
 .code-copy {
     display: inline-flex; align-items: center; gap: 4px;
