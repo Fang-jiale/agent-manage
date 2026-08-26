@@ -38,3 +38,7 @@ dcywzc-ywcoder-*.tgz
 # runtime workdirs (connector shim)
 .sessions/
 .ywcoder/
+
+agentmatrix.top_nginx.zip
+# 证书与离线安装包不进库
+*.zip
