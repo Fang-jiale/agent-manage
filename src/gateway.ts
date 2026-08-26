@@ -979,6 +979,20 @@ async function handleSessionCreate(hub: Hub, user: UserConn, msg: proto.Message,
     sendMsg(user.ws, proto.newResponse(msg.id ?? "", sessionInfoOf(existing)));
     return;
   }
+  // 目标归属校验：agent 型需本人可管理（查库，离线 agent 亦可建）；
+  // 群组型需群主本人。否则任何用户都能往别人的 agent 下挂脏会话行。
+  if (params.agent_id.startsWith("group:")) {
+    if (!user.isAdmin && !(await db.getGroup(user.userID, params.agent_id.slice("group:".length)))) {
+      sendError(user.ws, msg.id, proto.ERR_UNAUTHORIZED, "not your group");
+      return;
+    }
+  } else {
+    const row = await db.getAgentRow(params.agent_id);
+    if (!row || !hub.canManage(user, { ownerID: row.owner_id })) {
+      sendError(user.ws, msg.id, proto.ERR_UNAUTHORIZED, "not authorized to create session for this agent");
+      return;
+    }
+  }
   const workdir = params.workdir?.trim() || "";
   if (workdir.length > 512) {
     sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "workdir too long (max 512)");
@@ -3159,13 +3173,35 @@ export async function createGatewayServer(cfg: GatewayConfig, staticFile: string
         cb(err ? null : data);
       });
     };
+    // ETag（内容哈希，同内容跨重启稳定）+ If-None-Match → 304：
+    // no-cache 策略下重复导航不再重传 HTML/CSS，只回"没变"
+    const fileEtags = new Map<string, string>();
+    const etagOf = (file: string, data: Buffer): string => {
+      let et = fileEtags.get(file);
+      if (!et) {
+        et = `"${crypto.createHash("sha1").update(data).digest("base64url").slice(0, 20)}"`;
+        fileEtags.set(file, et);
+      }
+      return et;
+    };
+    const normEtag = (s: string): string => (s.startsWith("W/") ? s.slice(2) : s);
+    const isNotModified = (file: string, data: Buffer): boolean => {
+      const inm = req.headers["if-none-match"];
+      return typeof inm === "string" && normEtag(inm) === normEtag(etagOf(file, data));
+    };
     const serveHtml = (file: string) => {
       readCached(file, (data) => {
         if (!data) {
           res.writeHead(404).end("not found");
           return;
         }
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" });
+        const et = etagOf(file, data);
+        if (isNotModified(file, data)) {
+          res.writeHead(304, { ETag: et });
+          res.end();
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache", ETag: et });
         res.end(data);
       });
     };
@@ -3192,7 +3228,13 @@ export async function createGatewayServer(cfg: GatewayConfig, staticFile: string
           res.writeHead(404).end("not found");
           return;
         }
-        res.writeHead(200, { "Content-Type": STATIC_MIME[path.extname(file)] ?? "application/octet-stream", "Cache-Control": "no-cache" });
+        const et = etagOf(file, data);
+        if (isNotModified(file, data)) {
+          res.writeHead(304, { ETag: et });
+          res.end();
+          return;
+        }
+        res.writeHead(200, { "Content-Type": STATIC_MIME[path.extname(file)] ?? "application/octet-stream", "Cache-Control": "no-cache", ETag: et });
         res.end(data);
       });
       return;
