@@ -75,6 +75,7 @@
                 </button>
                 <div class="header-info">
                     <div class="header-title-row">
+                        <span class="status-dot" id="chatStatusDot" style="display:none"></span>
                         <span class="header-title" id="chatTitle">选择一个 Agent 开始对话</span>
                         <button class="icon-btn session-menu-btn" id="sessionMenuBtn" title="切换历史会话" style="display:none">
                             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 6l4 4 4-4" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -143,11 +144,10 @@
                 </div>
             </div>
 
-            <button class="scroll-bottom-btn" id="scrollBottomBtn" title="回到底部">
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 3v10M3.5 8.5L8 13l4.5-4.5"/></svg>
-            </button>
-
             <div class="input-area">
+                <button class="scroll-bottom-btn" id="scrollBottomBtn" title="回到底部">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 3v10M3.5 8.5L8 13l4.5-4.5"/></svg>
+                </button>
                 <div class="input-inner">
                     <div class="progress-track" id="progressTrack"><div class="progress-fill" id="progressFill"></div></div>
                     <div class="attach-strip" id="attachStrip"></div>
@@ -367,11 +367,11 @@
         </div>
     </div>
 
-            <div id="bootSpinner" style="position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:rgba(248,250,252,.72);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);z-index:9999">
-        <div style="width:34px;height:34px;border:3px solid #d1d5db;border-top-color:#10b981;border-radius:50%;animation:ywmspin .8s linear infinite"></div>
-        <div style="font-size:13px;color:#64748b">YwMatrix 加载中…</div>
+            <div id="bootSpinner" style="position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:color-mix(in srgb, var(--bg) 78%, transparent);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);z-index:9999">
+        <div style="width:34px;height:34px;border:3px solid var(--border-strong);border-top-color:var(--accent);border-radius:50%;animation:ywmspin .8s linear infinite"></div>
+        <div style="font-size:13px;color:var(--text-tertiary)">YwMatrix 加载中…</div>
     </div>
     <style>@keyframes ywmspin{to{transform:rotate(360deg)}}</style>
-    <script src="/static/app.js?v=2026082604"></script>
+    <script src="/static/app.js?v=2026082702"></script>
 </body>
 </html>

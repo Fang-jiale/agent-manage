@@ -211,6 +211,13 @@ body.compact .session-preview { display: none; }
 .header-info { flex: 1; min-width: 0; }
 .header-title { font-size: 15px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .header-sub { font-size: 12px; color: var(--text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 头部标题旁的 agent 实时状态圆点 */
+.header-status-dot { width: 10px; height: 10px; flex-shrink: 0; margin-right: 7px; }
+/* 头部状态 chip：在线绿 / 忙碌黄 / 离线灰 */
+.chip-status .status-dot { width: 7px; height: 7px; }
+.chip-status.online { background: color-mix(in srgb, var(--success) 14%, transparent); color: var(--success); }
+.chip-status.busy { background: color-mix(in srgb, var(--warning) 14%, transparent); color: var(--warning); }
+.chip-status.offline { color: var(--text-tertiary); }
 .header-chips { display: flex; gap: 4px; }
 .header-actions { display: flex; gap: 4px; }
 .header-actions .icon-btn { width: 32px; height: 32px; }
@@ -231,6 +238,14 @@ body.compact .session-preview { display: none; }
 .chat-search-count { font-size: 12.5px; color: var(--text-tertiary); white-space: nowrap; }
 .chat-search-count.can-load { color: var(--accent); cursor: pointer; text-decoration: underline dotted; }
 .message.search-hidden { display: none; }
+/* 会话内搜索命中片段高亮（当前命中消息另有绿色描边） */
+mark.search-hit {
+    background: color-mix(in srgb, var(--warning) 38%, transparent);
+    color: inherit; border-radius: 2px; padding: 0 1px;
+}
+.message.search-current mark.search-hit {
+    background: color-mix(in srgb, var(--warning) 65%, transparent);
+}
 .message.search-current {
     outline: 2px solid var(--accent);
     outline-offset: 4px;
@@ -836,7 +851,8 @@ body.compact .session-preview { display: none; }
     background: var(--bg); border-radius: 6px;
     box-shadow: 0 1px 4px rgba(0,0,0,.12);
 }
-.message:hover .message-actions { display: inline-flex; }
+.message:hover .message-actions,
+.message:focus-within .message-actions { display: inline-flex; } /* focus-within：键盘 Tab 也能展开操作 */
 .message-actions .icon-btn { width: 26px; height: 26px; color: var(--text-tertiary); }
 .message-actions .icon-btn:hover { color: var(--text); }
 .message-actions .icon-btn svg { width: 14px; height: 14px; }
@@ -853,11 +869,12 @@ body.compact .session-preview { display: none; }
 /* 等待首个 chunk 的空 assistant 消息（由 typing 指示器占位） */
 .message.msg-pending { display: none; }
 
-/* scroll to bottom */
-.main { position: relative; }
+/* scroll to bottom：锚定输入区顶部，textarea 撑高/附件条出现都不会被盖住 */
+.main { position: relative; } /* session-menu 等弹层依赖 main 作定位上下文 */
+.input-area { position: relative; }
 .scroll-bottom-btn {
     position: absolute; left: 50%; transform: translateX(-50%);
-    bottom: 126px; z-index: 50;
+    top: -44px; z-index: 50;
     width: 34px; height: 34px; border-radius: 50%;
     background: var(--bg); border: 1px solid var(--border-strong);
     box-shadow: var(--shadow-md); color: var(--text-secondary);
@@ -1307,6 +1324,7 @@ body.compact .agent-card { padding: 8px 10px; }
     .header-title { font-size: 14.5px; }
     /* 工作目录徽片:限宽省略,与标题同行 */
     .header-chips { min-width: 0; }
+    .chip-status { display: none; } /* 状态看标题旁圆点即可，省一行宽度 */
     .chip-workdir { max-width: 96px; }
     .chip-workdir .cw-path { display: inline-block; max-width: 60px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
     /* Agent 详情按钮:触屏无 hover,窄屏无条件常显并放大到可点(部分国产浏览器 hover 探测不可靠) */
@@ -1330,8 +1348,7 @@ body.compact .agent-card { padding: 8px 10px; }
     .message-content { font-size: 15px; }
     .message { gap: 10px; margin-bottom: 20px; }
 
-    /* 回底按钮避开输入区 + tab bar */
-    .scroll-bottom-btn { bottom: calc(126px + 48px + env(safe-area-inset-bottom)); }
+    /* 回底按钮已锚定输入区顶部，自动避开 tab bar/safe-area，无需魔法数 */
 
     /* 弹层窄屏不溢出（modal 的 max-width 多为内联样式） */
     .modal-overlay .modal { max-width: calc(100vw - 28px) !important; }
@@ -1586,11 +1603,24 @@ body.compact .agent-card { padding: 8px 10px; }
     transition: background .15s;
 }
 .target-row:hover { background: var(--bg-hover); }
+/* 键盘导航焦点态（a11yRow 提供 role/tabindex/Enter） */
+.target-row:focus-visible, .session-item:focus-visible,
+.agent-card:focus-visible, .group-card:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: -2px;
+}
 .target-row.active {
     background: var(--bg);
     box-shadow: var(--shadow-sm), inset 2.5px 0 0 var(--accent);
 }
 .target-row .agent-avatar { width: 32px; height: 32px; border-radius: 9px; }
+/* 会话列表头像右下角在线状态角标（微信式） */
+.target-avatar-wrap { position: relative; display: inline-flex; flex-shrink: 0; }
+.target-avatar-wrap .status-dot {
+    position: absolute; right: -2px; bottom: -2px;
+    width: 9px; height: 9px;
+    box-shadow: 0 0 0 2px var(--bg-sidebar);
+}
+.target-row.active .target-avatar-wrap .status-dot { box-shadow: 0 0 0 2px var(--bg); }
 .target-unread {
     flex-shrink: 0; min-width: 18px; height: 18px; padding: 0 5px;
     border-radius: 9px; background: var(--accent); color: #fff;

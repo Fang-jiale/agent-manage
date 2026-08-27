@@ -154,9 +154,17 @@
             let searchHits = [];
             let searchIndex = -1;
 
+            // 输入防抖：连续击键不做过滤/展开；长会话的首键全量展开只发生在停顿后
+            let searchDebounce = null;
+            function scheduleFilterMessages() {
+                clearTimeout(searchDebounce);
+                searchDebounce = setTimeout(() => filterMessages(els.chatSearchInput.value), 200);
+            }
+
             function filterMessages(query) {
                 const q = query.trim().toLowerCase();
                 const session = getCurrentSession();
+                clearSearchMarks();
                 // 搜索必须覆盖全部本地已加载消息：窗口化截断掉的先展开再搜，
                 // 否则老消息明明存在却显示"0 条匹配"
                 if (q && session && chatVisibleLimit < session.messages.length) {
@@ -170,6 +178,7 @@
                     el.classList.toggle('search-hidden', !hit);
                     if (hit && q) searchHits.push(el);
                 });
+                if (q) searchHits.forEach(el => markSearchHits(el, q));
                 if (searchHits.length > 0) {
                     searchIndex = 0;
                     markCurrentHit();
@@ -177,6 +186,40 @@
                     searchIndex = -1;
                     updateSearchCountText(q ? '0 条匹配' : '');
                 }
+            }
+
+            // 命中高亮：把消息内匹配片段包进 <mark>；只动文本节点，不碰元素结构
+            function clearSearchMarks() {
+                els.messages.querySelectorAll('mark.search-hit').forEach(m => {
+                    const parent = m.parentNode;
+                    if (!parent) return;
+                    parent.replaceChild(document.createTextNode(m.textContent), m);
+                    parent.normalize();
+                });
+            }
+            function markSearchHits(root, q) {
+                const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+                    acceptNode: n => (n.nodeValue && n.nodeValue.toLowerCase().includes(q))
+                        ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT
+                });
+                const targets = [];
+                while (walker.nextNode()) targets.push(walker.currentNode);
+                targets.forEach(node => {
+                    const text = node.nodeValue;
+                    const lower = text.toLowerCase();
+                    const frag = document.createDocumentFragment();
+                    let i = 0, idx;
+                    while ((idx = lower.indexOf(q, i)) !== -1) {
+                        if (idx > i) frag.appendChild(document.createTextNode(text.slice(i, idx)));
+                        const mark = document.createElement('mark');
+                        mark.className = 'search-hit';
+                        mark.textContent = text.slice(idx, idx + q.length);
+                        frag.appendChild(mark);
+                        i = idx + q.length;
+                    }
+                    if (i < text.length) frag.appendChild(document.createTextNode(text.slice(i)));
+                    node.parentNode.replaceChild(frag, node);
+                });
             }
 
             // 服务端还有未加载的更早消息时，计数旁给"点击加载并重搜"入口
@@ -397,7 +440,10 @@
                 document.title = BASE_TITLE;
             }
             document.addEventListener('visibilitychange', () => {
-                if (!document.hidden) stopTitleFlash();
+                if (!document.hidden) {
+                    stopTitleFlash();
+                    renderAgents(); renderSessions(); // 后台跳过的定时刷新，回前台补一次
+                }
             });
 
             function renderMsgAttachments(msg) {
@@ -468,6 +514,7 @@
                 agentList: document.getElementById('agentList'),
                 sessionList: document.getElementById('sessionList'),
                 chatTitle: document.getElementById('chatTitle'),
+                chatStatusDot: document.getElementById('chatStatusDot'),
                 chatSubtitle: document.getElementById('chatSubtitle'),
                 headerChips: document.getElementById('headerChips'),
                 messages: document.getElementById('messages'),
@@ -814,6 +861,43 @@
                     toast.style.transform = 'translateX(20px)';
                     setTimeout(() => toast.remove(), 300);
                 }, duration);
+            }
+
+            // 复制统一入口：HTTP 环境 navigator.clipboard 不存在，降级 execCommand
+            function copyText(text, onDone) {
+                if (navigator.clipboard?.writeText) {
+                    return navigator.clipboard.writeText(text)
+                        .then(onDone)
+                        .catch(() => legacyCopy(text, onDone));
+                }
+                return Promise.resolve(legacyCopy(text, onDone));
+            }
+            function legacyCopy(text, onDone) {
+                try {
+                    const ta = document.createElement('textarea');
+                    ta.value = text;
+                    ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
+                    document.body.appendChild(ta);
+                    ta.focus(); ta.select();
+                    const ok = document.execCommand('copy');
+                    ta.remove();
+                    if (ok && onDone) onDone(); else showToast('复制失败，请手动选择复制', 'error');
+                } catch {
+                    showToast('复制失败，请手动选择复制', 'error');
+                }
+            }
+
+            // div 行/卡补键盘可达性：Tab 可聚焦，Enter/Space 触发 click（鼠标路径不变）
+            function a11yRow(el) {
+                el.setAttribute('role', 'button');
+                el.setAttribute('tabindex', '0');
+                el.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        el.click();
+                    }
+                });
+                return el;
             }
 
             let modalResolve = null;
@@ -1177,8 +1261,18 @@
                 } else if (!wsConnected) {
                     els.messageInput.placeholder = '连接已断开，等待重连…';
                 } else if (isGroupKey(state.currentAgentId)) {
-                    els.messageInput.placeholder = '输入消息，@成员 或 @全体 触发回复';
-                    els.inputHint.textContent = '@成员 触发回复 · 支持粘贴或拖入图片、文件';
+                    const g = groupFromKey(state.currentAgentId);
+                    const onlineMembers = g ? g.agentIds.filter(id => state.agents[id]?.online).length : 0;
+                    if (g && onlineMembers === 0) {
+                        els.messageInput.placeholder = '群内暂无在线成员…';
+                        els.inputHint.textContent = '成员均离线，发送将跳过全部成员';
+                    } else {
+                        els.messageInput.placeholder = '输入消息，@成员 或 @全体 触发回复';
+                        els.inputHint.textContent = '@成员 触发回复 · 支持粘贴或拖入图片、文件';
+                    }
+                } else if (state.agents[state.currentAgentId] && !state.agents[state.currentAgentId].online) {
+                    els.messageInput.placeholder = 'Agent 离线，上线后才能发送…';
+                    els.inputHint.textContent = '当前 Agent 不在线 · 上线后将自动恢复';
                 } else {
                     els.messageInput.placeholder = state.settings.sendWith === 'cmd-enter'
                         ? '输入消息，⌘Enter 发送，Enter 换行'
@@ -1312,7 +1406,12 @@
 
             function renderAgents() {
                 els.agentList.innerHTML = '';
-                const ids = Object.keys(state.agents);
+                // 在线优先，其次最近心跳，离线沉底——一眼找到可用的 agent
+                const ids = Object.keys(state.agents).sort((x, y) => {
+                    const a = state.agents[x], b = state.agents[y];
+                    return ((b.online ? 1 : 0) - (a.online ? 1 : 0))
+                        || ((b.lastHeartbeat || 0) - (a.lastHeartbeat || 0));
+                });
                 if (ids.length === 0) {
                     els.agentList.innerHTML =
                         '<div class="empty-hint">暂无 Agent，接入后会显示在这里</div>' +
@@ -1380,6 +1479,7 @@
                         switchSidebarSection('sessions');
                         selectAgent(id);
                     });
+                    a11yRow(card);
                     els.agentList.appendChild(card);
                 });
             }
@@ -1474,6 +1574,7 @@
                         switchSidebarSection('sessions');
                         selectAgent(key);
                     });
+                    a11yRow(card);
                     els.groupList.appendChild(card);
                 });
             }
@@ -1540,6 +1641,11 @@
                 const agentIds = [...els.groupMemberList.querySelectorAll('input:checked')].map(i => i.value);
                 if (!name) { showToast('请输入群组名称', 'warning'); return; }
                 if (agentIds.length === 0) { showToast('请至少勾选一个 Agent', 'warning'); return; }
+                // 保存中禁用按钮：编辑路径是串行多条 RPC，双击会建出重复群
+                if (els.groupCreate.disabled) return;
+                els.groupCreate.disabled = true;
+                const originLabel = els.groupCreate.textContent;
+                els.groupCreate.textContent = '保存中…';
                 try {
                     if (groupEditing) {
                         const gid = groupEditing.id;
@@ -1574,6 +1680,9 @@
                     }
                 } catch (e) {
                     showToast((groupEditing ? '保存失败：' : '创建失败：') + (e.message || e), 'error');
+                } finally {
+                    els.groupCreate.disabled = false;
+                    els.groupCreate.textContent = originLabel;
                 }
             }
 
@@ -1622,11 +1731,25 @@
                         escapeHtml((name || '群')[0]) + '</span>';
                 }
                 const a = state.agents[key];
-                return '<span class="agent-avatar" style="background:' + avatarColor(a?.name || key) + '">' +
-                    agentAvatarInner(a) + '</span>';
+                const cls = a?.online ? (a.busy ? 'busy' : 'online') : 'offline';
+                return '<span class="target-avatar-wrap" title="' + (a?.online ? (a.busy ? '忙碌' : '在线') : '离线') + '">' +
+                    '<span class="agent-avatar" style="background:' + avatarColor(a?.name || key) + '">' +
+                    agentAvatarInner(a) + '</span>' +
+                    '<span class="status-dot target-status-dot ' + cls + '"></span></span>';
             }
 
             // 「消息」面板：微信式按聊天对象聚合，每行一个对象（预览取最新会话）
+            // 合并防抖：群 fan-out 一条用户消息会 appendMessage N+1 次（N 个成员占位），
+            // 直接渲染就重建 N+1 次列表；150ms 内合并成一次
+            let sessionsRenderTimer = null;
+            function scheduleSessionsRender() {
+                if (sessionsRenderTimer) return;
+                sessionsRenderTimer = setTimeout(() => {
+                    sessionsRenderTimer = null;
+                    renderSessions();
+                }, 150);
+            }
+
             function renderSessions() {
                 updateRailUnreadBadge();
                 els.sessionList.innerHTML = '';
@@ -1694,12 +1817,21 @@
                 const unread = targetUnreadCount(key);
                 const expanded = expandedTargets.has(key);
                 const multi = Object.keys(state.sessions[key] || {}).length > 1;
+                let meta = relativeTime(latest.updatedAt);
+                if (isGroupKey(key)) {
+                    const g = groupFromKey(key);
+                    if (g && g.agentIds.length) {
+                        const on = g.agentIds.filter(id => state.agents[id]?.online).length;
+                        meta += ' · <span class="agent-status-text ' + (on ? 'online' : 'offline') + '">' +
+                            on + '/' + g.agentIds.length + ' 在线</span>';
+                    }
+                }
                 item.innerHTML =
                     targetAvatarHtml(key) +
                     '<div class="session-body">' +
                         '<div class="session-title">' + escapeHtml(targetDisplayName(key)) + '</div>' +
                         (latest.preview ? '<div class="session-preview">' + escapeHtml(latest.preview) + '</div>' : '') +
-                        '<div class="session-meta">' + relativeTime(latest.updatedAt) + '</div>' +
+                        '<div class="session-meta">' + meta + '</div>' +
                     '</div>' +
                     (unread ? '<span class="target-unread">' + (unread > 99 ? '99+' : unread) + '</span>' : '') +
                     (multi
@@ -1714,6 +1846,7 @@
                     }
                     selectAgent(key);
                 });
+                a11yRow(item);
                 return item;
             }
 
@@ -1732,6 +1865,7 @@
                     selectAgent(key);
                     if (state.sessions[key]?.[s.id]) selectSession(s.id);
                 });
+                a11yRow(item);
                 return item;
             }
 
@@ -1786,6 +1920,7 @@
                     selectSession(s.id);
                 });
                 item.addEventListener('dblclick', () => startRenameSession(item, s));
+                a11yRow(item);
                 return item;
             }
 
@@ -1968,15 +2103,32 @@
 
             /* ---------- rendering: chat ---------- */
 
+            // 头部标题旁的实时状态圆点；cls 为 null 时隐藏（无会话）
+            function setChatStatusDot(cls, title) {
+                if (!els.chatStatusDot) return;
+                if (!cls) {
+                    els.chatStatusDot.style.display = 'none';
+                    els.chatStatusDot.title = '';
+                    return;
+                }
+                els.chatStatusDot.className = 'status-dot header-status-dot ' + cls;
+                els.chatStatusDot.title = title || '';
+                els.chatStatusDot.style.display = '';
+            }
+
             function renderChatHeader() {
                 const session = getCurrentSession();
                 if (els.sessionMenuBtn) {
                     els.sessionMenuBtn.style.display = session ? '' : 'none';
                 }
+                els.chatTitle.style.cursor = '';
+                els.chatTitle.onclick = null;
+                els.chatTitle.title = '';
                 if (!session) {
                     els.chatTitle.textContent = '选择一个 Agent 开始对话';
                     els.chatSubtitle.textContent = '';
                     els.headerChips.innerHTML = '';
+                    setChatStatusDot(null);
                     return;
                 }
                 const countText = (session.messageCount ?? session.messages.length) + ' 条';
@@ -1987,11 +2139,15 @@
                     els.typingAvatar.textContent = (group.name || '群')[0];
                     els.typingAvatar.style.background = avatarColor(group.name);
                     els.typingAvatar.style.color = '#fff';
+                    const onlineCount = group.agentIds.filter(id => state.agents[id]?.online).length;
+                    setChatStatusDot(onlineCount > 0 ? 'online' : 'offline',
+                        onlineCount + ' / ' + group.agentIds.length + ' 个成员在线');
                     const chips = [];
                     if (group.managerAgentId) {
                         chips.push('<span class="chip" style="color:var(--warning)" title="管理者 agent：@它 可调度群内其他 agent">★ ' + escapeHtml(groupMemberName(group.managerAgentId)) + '</span>');
                     }
-                    chips.push('<span class="chip" title="@成员 或 @全体 发消息">' + group.agentIds.length + ' 个成员</span>');
+                    chips.push('<span class="chip" title="@成员 或 @全体 发消息">' + group.agentIds.length + ' 个成员 · ' +
+                        '<span class="agent-status-text ' + (onlineCount ? 'online' : 'offline') + '">' + onlineCount + ' 在线</span></span>');
                     chips.push(workdirChipHtml(session));
                     els.headerChips.innerHTML = chips.join('');
                     bindWorkdirChip();
@@ -1999,16 +2155,22 @@
                 }
                 const agent = state.agents[session.agentId];
                 els.chatTitle.textContent = agentDisplayName(agent) || session.agentId;
+                els.chatTitle.style.cursor = 'pointer';
+                els.chatTitle.title = '查看 Agent 详情';
+                els.chatTitle.onclick = () => openAgentDrawer(session.agentId);
                 els.chatSubtitle.textContent = session.title + ' · ' + countText;
                 els.typingAvatar.innerHTML = agentAvatarInner(agent);
                 els.typingAvatar.style.background = avatarColor(agent?.name || session.agentId);
                 const chips = [];
+                const statusClass = agent?.online ? (agent.busy ? 'busy' : 'online') : 'offline';
+                const statusText = agent?.online ? (agent.busy ? '忙碌' : '在线') : '离线';
+                setChatStatusDot(statusClass, agentDisplayName(agent) + ' · ' + statusText);
                 if (agent?.status === 'pending' || agent?.approvalStatus === 'pending') {
                     chips.push('<span class="chip" style="color: var(--warning)">待审批</span>');
-                } else if (agent && !agent.online) {
-                    chips.push('<span class="chip" style="color: var(--text-tertiary)">离线</span>');
-                } else if (agent?.busy) {
-                    chips.push('<span class="chip" style="color: var(--warning)">忙碌</span>');
+                } else {
+                    // 状态 chip 常显：在线(绿)/忙碌(黄,脉冲)/离线(灰)，一眼可见
+                    chips.push('<span class="chip chip-status ' + statusClass + '" title="Agent 实时状态">' +
+                        '<span class="status-dot ' + statusClass + '"></span>' + statusText + '</span>');
                 }
                 if (agent?.platform?.os) {
                     chips.push('<span class="chip platform" title="' + escapeAttr(agent.platform.os + ' / ' + (agent.platform.arch || '')) + '">' +
@@ -2264,7 +2426,7 @@
                     const text = msg.role === 'user'
                         ? (msg.text || '')
                         : (msg.chunks || []).filter(c => c.type === 'text').map(c => c.text || '').join('\n');
-                    navigator.clipboard.writeText(text).then(() => showToast('已复制', 'success', 1500));
+                    copyText(text, () => showToast('已复制', 'success', 1500));
                 };
                 const editBtn = actions.querySelector('[data-act="edit"]');
                 if (editBtn) {
@@ -2366,7 +2528,7 @@
                 });
                 el.querySelectorAll('.code-copy').forEach(btn => {
                     btn.onclick = () => {
-                        navigator.clipboard.writeText(btn.dataset.code).then(() => {
+                        copyText(btn.dataset.code, () => {
                             btn.innerHTML = ICONS.checkCircle + '<span>已复制</span>';
                             btn.classList.add('copied');
                             setTimeout(() => {
@@ -2463,6 +2625,11 @@
 
             function respondToInteraction(card, response) {
                 if (card.classList.contains('answered')) return;
+                // send() 断线时静默丢弃，先检查连接再标"已回复"，否则答案丢失 UI 还谎报成功
+                if (!ws || ws.readyState !== WebSocket.OPEN) {
+                    showToast('连接已断开，回复未发送，请稍后重试', 'error');
+                    return;
+                }
                 const msg = els.messages.querySelector('[data-message-id="' + card.dataset.messageId + '"]');
                 const session = getCurrentSession();
                 const message = session?.messages.find(m => m.id === card.dataset.messageId);
@@ -2938,6 +3105,10 @@
 
             function respondToBlock(card, actionId, valueOverride) {
                 if (card.classList.contains('answered')) return;
+                if (!ws || ws.readyState !== WebSocket.OPEN) {
+                    showToast('连接已断开，回复未发送，请稍后重试', 'error');
+                    return;
+                }
                 const response = valueOverride || collectBlockValues(card);
                 card.classList.add('answered');
                 card.classList.add('block-' + (actionId || 'submit'));
@@ -3119,7 +3290,7 @@
                     els.messages.appendChild(msgEl);
                     scrollToBottom(true);
                 }
-                renderSessions();
+                scheduleSessionsRender(); // 消息高频路径走合并渲染
             }
 
             const dirtyMessages = new Set();
@@ -3516,6 +3687,8 @@
                 saveState();
                 renderAgents();
                 renderGroups(); // 群卡片成员名/在线数依赖 agent 列表
+                renderSessions(); // 列表头像角标跟随状态刷新
+                updateInputState();
                 if (!state.currentAgentId && list.length > 0) {
                     selectAgent(list[0].id);
                 } else if (state.currentAgentId && !next[state.currentAgentId]) {
@@ -3545,6 +3718,9 @@
                 saveState();
                 renderAgents();
                 renderGroups();
+                renderSessions(); // 列表头像角标实时跟随上下线
+                renderChatHeader(); // 当前对话头部状态同步
+                updateInputState(); // 离线提示/占位文案同步
             }
 
             function handleTaskProgress(params) {
@@ -3947,7 +4123,19 @@
                 renderCmdMenu();
             }
 
+            // 重入守卫：附件上传/RPC 期间再按 Enter 不许二次发送（按钮虽禁用，键盘路径仍会进来）
+            let sending = false;
             async function sendMessage() {
+                if (sending) return;
+                sending = true;
+                try {
+                    await doSendMessage();
+                } finally {
+                    sending = false;
+                }
+            }
+
+            async function doSendMessage() {
                 const text = els.messageInput.value.trim();
                 const files = composerFiles;
                 if (!text && files.length === 0) return;
@@ -4127,6 +4315,11 @@
             }
 
             function stopCurrentTask() {
+                // 断线时 task.cancel 发不出去，本地标"已取消"是假的——直接拒绝操作
+                if (!ws || ws.readyState !== WebSocket.OPEN) {
+                    showToast('连接已断开，无法取消任务', 'error');
+                    return;
+                }
                 let changed = false;
                 const cancelledGroups = new Set();
                 for (const [taskId, task] of pendingTasks) {
@@ -4369,7 +4562,7 @@
                 els.searchChatBtn.addEventListener('click', () => toggleChatSearch());
                 els.exportChatBtn.addEventListener('click', exportSession);
                 els.chatSearchClose.addEventListener('click', () => toggleChatSearch(false));
-                els.chatSearchInput.addEventListener('input', () => filterMessages(els.chatSearchInput.value));
+                els.chatSearchInput.addEventListener('input', scheduleFilterMessages);
                 els.chatSearchCount.addEventListener('click', () => {
                     if (els.chatSearchCount.classList.contains('can-load')) loadEarlierAndResearch();
                 });
@@ -4657,7 +4850,10 @@
                 renderChat();
                 updateInputState();
                 // 心跳等相对时间标签每分钟刷新一次
-                setInterval(renderAgents, 60_000);
+                setInterval(() => {
+                    if (document.hidden) return; // 后台标签页不空转，回前台事件会触发别的刷新兜底
+                    renderAgents(); renderSessions();
+                }, 60_000); // 相对时间/心跳展示保鲜
                 // 先用 HTTP 验一次缓存的 token：失效就清掉直接停在登录页。
                 // 否则会乐观进主界面，WS 三次 401 重试后又弹回登录页
                 if (state.token) {
