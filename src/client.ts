@@ -1323,6 +1323,14 @@ async function buildProductCatalog(cfg: ClientConfig, ui: LocalUIState): Promise
     seen.add(b.name);
     const inst = installed.find(p => p.brand === b.name);
     const pkg = remote.filter(e => e.brand === b.name).sort((x, y) => String(y.updated_at).localeCompare(String(x.updated_at)))[0];
+    // 实例判断细分：有实例，且其生效命令落在 products/<brand>/ 内 = 接的是产品目录这份；
+    // 有实例但命令在外部（仓库目录/手动指定）= 外部命令接入，不受安装器管理
+    const instances = ui.lastSync.filter(a => a.brand_id === b.id);
+    const instDirPrefix = inst?.install_dir || path.join(productsRoot(), b.name);
+    const fromInstall = instances.some(a => {
+      const { target } = resolveLaunch(cfg, a);
+      return target.includes(instDirPrefix);
+    });
     rows.push({
       brand: b.name,
       brand_id: b.id,
@@ -1333,7 +1341,8 @@ async function buildProductCatalog(cfg: ClientConfig, ui: LocalUIState): Promise
       installed_version: inst?.version || null,
       remote_version: pkg ? String(pkg.version) : null,
       remote_size: pkg ? pkg.size : null,
-      has_instance: ui.lastSync.some(a => a.brand_id === b.id),
+      has_instance: instances.length > 0,
+      instance_from_install: fromInstall,
       local_run: localRunOf(b.name),
     });
   }
@@ -1351,6 +1360,7 @@ async function buildProductCatalog(cfg: ClientConfig, ui: LocalUIState): Promise
       remote_version: null,
       remote_size: null,
       has_instance: false,
+      instance_from_install: false,
       local_run: localRunOf(p.brand),
     });
   }

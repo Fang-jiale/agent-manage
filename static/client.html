@@ -603,11 +603,15 @@
                         localCell = '<span class="cell-sub">—</span>';
                         actions = e.brand_id ? '<button data-act="open" data-id="' + escapeAttr(e.brand_id) + '">打开</button>' : '';
                     } else {
-                        localCell = installed
-                            ? '<span class="chip green">已装 ' + escapeHtml(installed) + '</span>' +
-                              (e.has_instance ? '<div class="cell-sub">已接入网关</div>' : '') +
-                              (localRun.running ? '<div class="cell-sub" style="color:var(--success)">本地运行中</div>' : '')
-                            : '<span class="chip">未安装</span>';
+                        if (installed) {
+                            localCell = '<span class="chip green">已装 ' + escapeHtml(installed) + '</span>';
+                            if (e.has_instance) localCell += '<div class="cell-sub">' + (e.instance_from_install ? '已接入网关（产品目录）' : '已接入网关（外部命令）') + '</div>';
+                            if (localRun.running) localCell += '<div class="cell-sub" style="color:var(--success)">本地运行中</div>';
+                        } else if (e.has_instance) {
+                            localCell = '<span class="chip amber">未安装 · 外部命令接入</span><div class="cell-sub">命令在产品目录外，不受升级/卸载管理</div>';
+                        } else {
+                            localCell = '<span class="chip">未安装</span>';
+                        }
                         if (!installed && remote) actions += '<button data-act="install" data-brand="' + escapeAttr(e.brand) + '" data-ver="' + escapeAttr(remote) + '" class="btn-primary">安装 ' + escapeHtml(remote) + '</button> ';
                         if (canUpgrade) actions += '<button data-act="install" data-brand="' + escapeAttr(e.brand) + '" data-ver="' + escapeAttr(remote) + '">升级到 ' + escapeHtml(remote) + '</button> ';
                         if (installed) {
