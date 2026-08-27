@@ -137,6 +137,22 @@
                         </table>
                         <div class="admin-empty" id="adminBrandEmpty" style="display:none">暂无品牌</div>
                     </div>
+
+                    <h2 style="margin-top:24px">产品分发</h2>
+                    <div class="admin-page-desc">上传 Agent 产品安装包（tar.gz，内含 manifest.json）供终端在本地管理页一键安装；manifest 可在此编辑，服务端版本为准</div>
+                    <div class="admin-toolbar">
+                        <input type="file" id="adminPkgFile" accept=".tar.gz,.tgz" style="display:none">
+                        <span id="adminPkgStatus" style="font-size:12.5px;color:var(--text-tertiary)"></span>
+                        <span class="spacer"></span>
+                        <button class="btn btn-primary" id="adminPkgUploadBtn">上传产品包…</button>
+                    </div>
+                    <div class="admin-table-wrap">
+                        <table class="admin-table">
+                            <thead><tr><th>产品</th><th>版本</th><th>类型</th><th>大小 / 校验和</th><th style="text-align:right">操作</th></tr></thead>
+                            <tbody id="adminPkgRows"></tbody>
+                        </table>
+                        <div class="admin-empty" id="adminPkgEmpty" style="display:none">暂无产品包</div>
+                    </div>
                 </div>
                 <div class="admin-page" id="adminPageKeys">
                     <h2>设备密钥</h2>
@@ -271,6 +287,22 @@
         </div>
     </div>
 
+    <!-- 产品 manifest 编辑 -->
+    <div class="modal-overlay" id="pkgManifestOverlay">
+        <div class="modal" style="width:560px">
+            <h3 id="pkgManifestTitle">编辑 manifest</h3>
+            <p style="font-size:12.5px;color:var(--text-tertiary)">brand / version 是目录身份不可改；其余字段编辑后对全体终端生效（安装时以服务端为准）</p>
+            <div class="form-field">
+                <label>manifest.json</label>
+                <textarea id="pkgManifestInput" rows="16" spellcheck="false" style="font-family:var(--mono);font-size:12.5px"></textarea>
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-ghost" id="pkgManifestCancel">取消</button>
+                <button class="btn btn-primary" id="pkgManifestOk">保存</button>
+            </div>
+        </div>
+    </div>
+
     <div class="modal-overlay" id="assignOverlay">
         <div class="modal">
             <h3>注册 Agent</h3>
@@ -384,6 +416,8 @@
              'pairCreatedOverlay', 'pairCreatedValue', 'pairCreatedCmd', 'pairCopyBtn', 'pairCreatedOk',
              'reassignOverlay', 'reassignText', 'reassignOwner', 'reassignCancel', 'reassignOk',
              'brandOverlay', 'brandFormTitle', 'brandFormName', 'brandFormDesc', 'brandFormCaps',
+             'adminPkgFile', 'adminPkgUploadBtn', 'adminPkgStatus', 'adminPkgRows', 'adminPkgEmpty',
+             'pkgManifestOverlay', 'pkgManifestTitle', 'pkgManifestInput', 'pkgManifestCancel', 'pkgManifestOk',
              'brandFormConnType', 'brandLaunchCmdField', 'brandFormLaunchCmd', 'brandEndpointField', 'brandFormEndpoint',
              'brandFormFile', 'brandLogoPreview', 'brandFormCancel', 'brandFormOk',
              'assignOverlay', 'assignConnector', 'assignBrand', 'assignName', 'assignCancel', 'assignOk',
@@ -535,6 +569,7 @@
                     loadAgents();
                 } else if (tab === 'brands') {
                     loadBrands();
+                    if (isAdmin) loadPackages();
                 } else if (tab === 'keys') {
                     if (isAdmin) ensureOwnerOptions();
                     loadKeys(); loadPairingCodes();
@@ -949,6 +984,114 @@
                 });
             }
 
+            /* ---------- 产品分发 ---------- */
+
+            let pkgCache = [];
+
+            async function loadPackages() {
+                try {
+                    const r = await fetch('/products/catalog');
+                    const body = await r.json();
+                    pkgCache = body.products || [];
+                } catch (e) {
+                    pkgCache = [];
+                }
+                els.adminPkgEmpty.style.display = pkgCache.length ? 'none' : '';
+                els.adminPkgRows.innerHTML = pkgCache.map((e, i) => {
+                    const m = e.manifest || {};
+                    return '<tr>' +
+                    '<td><div class="cell-main">' + escapeHtml(m.name || e.brand) + '</div>' +
+                    '<div class="cell-sub">' + escapeHtml(e.brand) + '</div></td>' +
+                    '<td>' + escapeHtml(e.version) + '</td>' +
+                    '<td><span class="chip">' + escapeHtml(m.kind || 'stdio') + '</span></td>' +
+                    '<td><div class="cell-sub">' + (e.size ? (e.size / 1048576).toFixed(1) + ' MB' : '—') + '</div>' +
+                    '<div class="cell-sub mono" title="' + escapeAttr(e.sha256 || '') + '">' + escapeHtml((e.sha256 || '').slice(0, 16)) + '…</div></td>' +
+                    '<td><div class="row-actions">' +
+                    '<button data-i="' + i + '" data-act="edit">编辑 manifest</button>' +
+                    '<button data-i="' + i + '" data-act="del" class="danger">删除</button>' +
+                    '</div></td></tr>';
+                }).join('');
+                els.adminPkgRows.querySelectorAll('button').forEach(btn => {
+                    btn.onclick = async () => {
+                        const e = pkgCache[Number(btn.dataset.i)];
+                        if (!e) return;
+                        if (btn.dataset.act === 'edit') openPkgManifest(e);
+                        else {
+                            const ok = await confirmModal('删除产品包',
+                                '删除 ' + e.brand + ' ' + e.version + '？终端将不再能看到该版本（已安装的本机副本不受影响）。', '删除');
+                            if (!ok) return;
+                            try {
+                                const r = await fetch('/products/' + encodeURIComponent(e.brand) + '/' + encodeURIComponent(e.version), {
+                                    method: 'DELETE', headers: { Authorization: 'Bearer ' + token }
+                                });
+                                if (!r.ok) throw new Error('HTTP ' + r.status);
+                                showToast('已删除', 'success');
+                                loadPackages();
+                            } catch (err) {
+                                showToast('删除失败：' + (err.message || err), 'error');
+                            }
+                        }
+                    };
+                });
+            }
+
+            let pkgManifestRef = null;
+            function openPkgManifest(e) {
+                pkgManifestRef = e;
+                els.pkgManifestTitle.textContent = '编辑 manifest · ' + e.brand + ' ' + e.version;
+                els.pkgManifestInput.value = JSON.stringify(e.manifest, null, 2);
+                els.pkgManifestOverlay.classList.add('open');
+            }
+
+            els.pkgManifestCancel.addEventListener('click', () => els.pkgManifestOverlay.classList.remove('open'));
+            els.pkgManifestOk.addEventListener('click', async () => {
+                if (!pkgManifestRef) return;
+                let m;
+                try { m = JSON.parse(els.pkgManifestInput.value); }
+                catch (e) { showToast('JSON 解析失败：' + (e.message || e), 'error'); return; }
+                try {
+                    const r = await fetch('/products/' + encodeURIComponent(pkgManifestRef.brand) + '/' + encodeURIComponent(pkgManifestRef.version) + '/manifest', {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+                        body: JSON.stringify(m)
+                    });
+                    const body = await r.json().catch(() => null);
+                    if (!r.ok) throw new Error((body && body.error) || ('HTTP ' + r.status));
+                    showToast('manifest 已保存', 'success');
+                    els.pkgManifestOverlay.classList.remove('open');
+                    loadPackages();
+                } catch (e) {
+                    showToast('保存失败：' + (e.message || e), 'error', 6000);
+                }
+            });
+
+            els.adminPkgUploadBtn.addEventListener('click', () => els.adminPkgFile.click());
+            els.adminPkgFile.addEventListener('change', async () => {
+                const file = els.adminPkgFile.files && els.adminPkgFile.files[0];
+                if (!file) return;
+                els.adminPkgUploadBtn.disabled = true;
+                els.adminPkgStatus.textContent = '上传中…（' + (file.size / 1048576).toFixed(1) + ' MB）';
+                try {
+                    const buf = await file.arrayBuffer();
+                    const r = await fetch('/products/upload?filename=' + encodeURIComponent(file.name), {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/octet-stream', Authorization: 'Bearer ' + token },
+                        body: buf
+                    });
+                    const body = await r.json().catch(() => null);
+                    if (!r.ok) throw new Error((body && body.error) || ('HTTP ' + r.status));
+                    els.adminPkgStatus.textContent = '';
+                    showToast('已发布 ' + body.brand + ' ' + body.version, 'success');
+                    loadPackages();
+                } catch (e) {
+                    els.adminPkgStatus.textContent = '';
+                    showToast('上传失败：' + (e.message || e), 'error', 8000);
+                } finally {
+                    els.adminPkgUploadBtn.disabled = false;
+                    els.adminPkgFile.value = '';
+                }
+            });
+
             let brandEditing = null;   // null = 新建，否则为正在编辑的品牌对象
             let brandLogoURL = '';     // 当前表单生效的 logo_url（已有或刚上传）
 
@@ -1332,6 +1475,11 @@
                 els.adminPageBrands.querySelector('h2').textContent = '品牌目录';
                 els.adminPageBrands.querySelector('.admin-page-desc').textContent = '可接入的 Agent 品牌（只读；维护请联系管理员）';
                 els.adminCreateBrandBtn.style.display = 'none';
+                // 产品分发仅 admin：整块隐藏
+                els.adminPageBrands.querySelectorAll('h2')[1]?.style.setProperty('display', 'none');
+                els.adminPkgUploadBtn.parentElement.style.display = 'none';
+                els.adminPkgRows.closest('.admin-table-wrap').style.display = 'none';
+                els.adminPageBrands.querySelector('.admin-page-desc:nth-of-type(2)')?.style.setProperty('display', 'none');
                 els.adminKeyOwner.style.display = 'none';
                 els.adminPageKeys.querySelector('.admin-page-desc').insertAdjacentHTML('afterend',
                     '<p style="font-size:13px;color:var(--text-tertiary);margin:2px 0 10px">配对完成后需管理员审批接入，审批通过后 Agent 才会上线</p>');

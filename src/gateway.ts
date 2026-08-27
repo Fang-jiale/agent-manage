@@ -18,6 +18,7 @@ import {
 } from "./storage.ts";
 import { hashPassword, verifyPassword, signJwt, verifyJwt } from "./auth.ts";
 import { OIDCProvider } from "./oidc.ts";
+import { readTarEntry } from "./tar.ts";
 import { Metrics } from "./metrics.ts";
 import { RateLimiter, clientIp } from "./ratelimit.ts";
 
@@ -1778,7 +1779,124 @@ async function handleConnectorPair(hub: Hub, agent: AgentConn, msg: proto.Messag
   sendMsg(agent.ws, proto.newResponse(msg.id ?? "", { status: "pending" } satisfies proto.ConnectorPairResult));
 }
 
-// ---- 品牌目录管理 ----
+// ---- 产品分发目录（安装包仓库）：data/products/<brand>/<version>/{manifest.json,package.tar.gz,meta.json} ----
+
+interface ProductCatalogEntry {
+  brand: string;
+  version: string;
+  manifest: Record<string, unknown>;
+  sha256: string;
+  size: number;
+  updated_at: number;
+}
+
+function validProductBrand(s: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(s);
+}
+function validProductVersion(s: string): boolean {
+  return /^(?:\d+\.){2}\d+(?:-[0-9A-Za-z.+-]+)?$/.test(s);
+}
+
+function validateProductManifest(m: Record<string, unknown>): Record<string, unknown> {
+  if (m.format !== 1) throw new Error("manifest.format 必须为 1");
+  if (typeof m.brand !== "string" || !validProductBrand(m.brand)) throw new Error("manifest.brand 非法");
+  if (typeof m.version !== "string" || !validProductVersion(m.version)) throw new Error("manifest.version 需要 semver（如 1.0.0）");
+  if (typeof m.kind !== "string" || !["stdio", "http", "ws", "web", "app"].includes(m.kind)) throw new Error("manifest.kind 非法");
+  return m;
+}
+
+// 安全路径拼接：brand/version 白名单字符校验后再 join
+function productDirPath(root: string, brand: string, version: string): string | null {
+  if (!validProductBrand(brand) || !validProductVersion(version)) return null;
+  return path.join(root, brand, version);
+}
+function productPackagePath(root: string, brand: string, version: string): string | null {
+  const dir = productDirPath(root, brand, version);
+  return dir ? path.join(dir, "package.tar.gz") : null;
+}
+
+interface ProductMeta { sha256: string; size: number; uploaded_at: number; }
+function readProductMeta(dir: string): ProductMeta | null {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(dir, "meta.json"), "utf8")) as ProductMeta;
+  } catch {
+    return null;
+  }
+}
+
+function scanProductCatalog(root: string): ProductCatalogEntry[] {
+  const out: ProductCatalogEntry[] = [];
+  let brands: fs.Dirent[] = [];
+  try {
+    brands = fs.readdirSync(root, { withFileTypes: true }).filter(e => e.isDirectory() && !e.name.startsWith("."));
+  } catch {
+    return out; // 目录不存在 = 空目录
+  }
+  for (const b of brands) {
+    let versions: fs.Dirent[] = [];
+    try {
+      versions = fs.readdirSync(path.join(root, b.name), { withFileTypes: true })
+        .filter(e => e.isDirectory() && validProductVersion(e.name));
+    } catch { continue; }
+    for (const v of versions) {
+      const dir = path.join(root, b.name, v.name);
+      try {
+        const manifest = JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf8")) as Record<string, unknown>;
+        const meta = readProductMeta(dir);
+        if (!meta) continue;
+        out.push({
+          brand: b.name,
+          version: v.name,
+          manifest,
+          sha256: meta.sha256,
+          size: meta.size,
+          updated_at: meta.uploaded_at,
+        });
+      } catch { /* 坏条目跳过 */ }
+    }
+  }
+  out.sort((x, y) => x.brand.localeCompare(y.brand) || (x.updated_at - y.updated_at));
+  return out;
+}
+
+// 发布：从 tar 里抽 manifest 校验后落盘（manifest.json 服务端为准，可后续编辑）+ 算 sha256 存 meta
+function publishProductPackage(root: string, buf: Buffer, filename: string): {
+  brand: string; version: string; sha256: string; size: number;
+} {
+  const raw = readTarEntry(buf, "manifest.json");
+  if (!raw) throw new Error("安装包内缺少 manifest.json（" + filename + "）");
+  const manifest = validateProductManifest(JSON.parse(raw.toString("utf8")) as Record<string, unknown>);
+  const brand = manifest.brand as string;
+  const version = manifest.version as string;
+  const dir = path.join(root, brand, version);
+  if (fs.existsSync(path.join(dir, "package.tar.gz"))) {
+    throw new Error("该产品版本已发布：" + brand + " " + version + "（如需覆盖请先删除）");
+  }
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "package.tar.gz"), buf);
+  fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify(manifest, null, 2), "utf8");
+  const meta: ProductMeta = {
+    sha256: crypto.createHash("sha256").update(buf).digest("hex"),
+    size: buf.length,
+    uploaded_at: Date.now(),
+  };
+  fs.writeFileSync(path.join(dir, "meta.json"), JSON.stringify(meta), "utf8");
+  return { brand, version, sha256: meta.sha256, size: meta.size };
+}
+
+// HTTP 管理员鉴权：Bearer JWT + admin 角色（产品上传/编辑/删除用）
+async function httpAdmin(req: http.IncomingMessage, cfg: GatewayConfig, db?: Db): Promise<DbUser | null> {
+  const bearer = req.headers.authorization?.startsWith("Bearer ")
+    ? req.headers.authorization.slice(7)
+    : "";
+  const claims = bearer ? verifyJwt(bearer, cfg.jwtSecret) : undefined;
+  if (!claims || !db) return null;
+  const user = await db.getUserById(claims.sub).catch(() => undefined);
+  if (!user || user.disabled === 1 || user.role !== "admin") return null;
+  return user;
+}
+
+
 
 function brandInfoOf(b: DbAgentBrand): proto.BrandInfo {
   let caps: proto.Capability[] = [];
@@ -2958,6 +3076,7 @@ export interface GatewayConfig {
   instanceID: string;
   trustProxy: boolean; // 前面有可信反代时才信任 X-Forwarded-For
   attachDir: string;
+  productsDir?: string;
   attachQuotaMb: number;
   retentionDays: number;
   s3Endpoint: string;
@@ -2990,6 +3109,7 @@ export function loadGatewayConfig(): GatewayConfig {
     { name: "instance-id", type: "string" as const, default: envString("AGENT_MANAGE_INSTANCE_ID", crypto.randomBytes(6).toString("hex")) },
     { name: "trust-proxy", type: "string" as const, default: envString("AGENT_MANAGE_TRUST_PROXY", "") },
     { name: "attach-dir", type: "string" as const, default: envString("AGENT_MANAGE_ATTACH_DIR", "data/attachments") },
+    { name: "products-dir", type: "string" as const, default: envString("AGENT_MANAGE_PRODUCTS_DIR", "data/products") },
     { name: "attach-quota-mb", type: "string" as const, default: envString("AGENT_MANAGE_ATTACH_QUOTA_MB", "0") },
     { name: "retention-days", type: "string" as const, default: envString("AGENT_MANAGE_RETENTION_DAYS", "0") },
     { name: "s3-endpoint", type: "string" as const, default: envString("AGENT_MANAGE_S3_ENDPOINT", "") },
@@ -3032,6 +3152,7 @@ export function loadGatewayConfig(): GatewayConfig {
     s3SecretKey: values["s3-secret-key"],
     s3PublicURL: values["s3-public-url"],
     attachDir: values["attach-dir"],
+    productsDir: values["products-dir"],
     attachQuotaMb: Number(values["attach-quota-mb"]) || 0,
     retentionDays: Number(values["retention-days"]) || 0,
     oidcIssuer: values["oidc-issuer"],
@@ -3064,11 +3185,31 @@ function readBody(req: http.IncomingMessage, limit = 64 * 1024): Promise<string>
   });
 }
 
+// 原始二进制体（产品包上传，上限远大于 JSON body）
+function readRawBody(req: http.IncomingMessage, limit: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => {
+      size += c.length;
+      if (size > limit) {
+        reject(new Error("body too large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+
 export async function createGatewayServer(cfg: GatewayConfig, staticFile: string, db?: Db, attachments?: AttachmentStore) {
   const hub = new Hub(cfg.agentTimeoutMs, cfg.userTimeoutMs, cfg.taskTimeoutMs);
   hub.db = db;
   hub.attachments = attachments;
   if (db) await hub.reloadBrands();
+  const productsDir = cfg.productsDir ?? "data/products"; // 产品分发目录（测试夹层不传时用默认）
   const loginLimiter = new RateLimiter(10, 60_000); // 每 IP 每分钟 10 次登录尝试
   const uploadLimiter = new RateLimiter(20, 60_000); // 每用户每分钟 20 次上传
   // 用户不存在时也跑一次 scrypt，拉齐登录接口时序，防用户名枚举
@@ -3494,6 +3635,133 @@ location.replace('/');
       });
       return;
     }
+
+    /* ---------- 产品分发：目录 / 下载 / 上传（admin） / manifest 编辑（admin） / 删除（admin） ---------- */
+
+    if (url.pathname === "/products/catalog" && req.method === "GET") {
+      void (async () => {
+        try {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ products: scanProductCatalog(productsDir) }));
+        } catch (e) {
+          logger.error("product catalog failed", { error: String(e) });
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "internal error" }));
+        }
+      })();
+      return;
+    }
+
+    const dl = /^\/products\/([A-Za-z0-9._-]+)\/((?:\d+\.){2}\d+(?:-[0-9A-Za-z.+-]+)?)\/download$/.exec(url.pathname);
+    if (dl && req.method === "GET") {
+      const file = productPackagePath(productsDir, dl[1], dl[2]);
+      if (!file || !fs.existsSync(file)) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "product not found" }));
+        return;
+      }
+      const meta = readProductMeta(path.dirname(file));
+      if (meta) res.setHeader("X-Checksum-Sha256", meta.sha256);
+      res.writeHead(200, { "Content-Type": "application/gzip" });
+      fs.createReadStream(file).pipe(res);
+      return;
+    }
+
+    if (url.pathname === "/products/upload" && req.method === "POST") {
+      void (async () => {
+        const admin = await httpAdmin(req, cfg, db);
+        if (!admin) {
+          res.writeHead(401, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "unauthorized" }));
+          return;
+        }
+        const filename = url.searchParams.get("filename") || "package.tgz";
+        if (!/\.(tar\.gz|tgz)$/i.test(filename)) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "仅支持 .tar.gz / .tgz 安装包" }));
+          return;
+        }
+        const buf = await readRawBody(req, 512 * 1024 * 1024);
+        try {
+          const r = publishProductPackage(productsDir, buf, filename);
+          logger.info("product published", { by: admin.name, brand: r.brand, version: r.version, sha256: r.sha256.slice(0, 12) + "…" });
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(r));
+        } catch (e) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: e instanceof Error ? e.message : String(e) }));
+        }
+      })().catch((e) => {
+        logger.error("product upload failed", { error: String(e) });
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "internal error" }));
+      });
+      return;
+    }
+
+    const mpm = /^\/products\/([A-Za-z0-9._-]+)\/((?:\d+\.){2}\d+(?:-[0-9A-Za-z.+-]+)?)\/manifest$/.exec(url.pathname);
+    if (mpm && req.method === "PUT") {
+      void (async () => {
+        const admin = await httpAdmin(req, cfg, db);
+        if (!admin) {
+          res.writeHead(401, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "unauthorized" }));
+          return;
+        }
+        const dir = productDirPath(productsDir, mpm[1], mpm[2]);
+        if (!dir || !fs.existsSync(path.join(dir, "manifest.json"))) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "product not found" }));
+          return;
+        }
+        try {
+          const body = JSON.parse(await readBody(req, 1024 * 1024)) as Record<string, unknown>;
+          const m = validateProductManifest(body);
+          if (m.brand !== mpm[1] || m.version !== mpm[2]) {
+            throw new Error("brand/version 是目录身份，不可修改（要换身份请重新上传包）");
+          }
+          fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify(m, null, 2), "utf8");
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ status: "ok", manifest: m }));
+        } catch (e) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: e instanceof Error ? e.message : String(e) }));
+        }
+      })().catch((e) => {
+        logger.error("product manifest update failed", { error: String(e) });
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "internal error" }));
+      });
+      return;
+    }
+
+    const mpd = /^\/products\/([A-Za-z0-9._-]+)\/((?:\d+\.){2}\d+(?:-[0-9A-Za-z.+-]+)?)$/.exec(url.pathname);
+    if (mpd && req.method === "DELETE") {
+      void (async () => {
+        const admin = await httpAdmin(req, cfg, db);
+        if (!admin) {
+          res.writeHead(401, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "unauthorized" }));
+          return;
+        }
+        const dir = productDirPath(productsDir, mpd[1], mpd[2]);
+        if (!dir || !fs.existsSync(dir)) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "product not found" }));
+          return;
+        }
+        fs.rmSync(dir, { recursive: true, force: true });
+        logger.info("product removed", { by: admin.name, brand: mpd[1], version: mpd[2] });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "ok" }));
+      })().catch((e) => {
+        logger.error("product delete failed", { error: String(e) });
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "internal error" }));
+      });
+      return;
+    }
+
     res.writeHead(404).end("not found");
   });
 

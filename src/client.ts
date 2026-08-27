@@ -2,7 +2,6 @@ import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import crypto from "node:crypto";
-import zlib from "node:zlib";
 import fs from "node:fs";
 import { readFileSync, existsSync, promises as fsp } from "node:fs";
 import { spawn } from "node:child_process";
@@ -13,6 +12,7 @@ import { envString, envDurationMs, parseDurationMs, parseFlags, setLogLevel, log
 import { HTTPAdapter } from "./adapters/http.ts";
 import { StdioAdapter } from "./adapters/stdio.ts";
 import { WSAdapter } from "./adapters/ws.ts";
+import { extractTarGz } from "./tar.ts";
 import type { LocalAgentAdapter, LocalAgentEvent } from "./adapters/types.ts";
 
 // 本机覆盖：字符串 = stdio 启动命令（旧格式）；对象 = {conn_type, target}
@@ -1133,58 +1133,9 @@ function listInstalledProducts(): InstalledProduct[] {
   });
 }
 
-// 最小 ustar/tar 读取器：文件与目录、GNU 长名(L)、pax 头跳过；拒绝路径穿越
-function extractTarGz(buf: Buffer, dest: string): number {
-  const tar = zlib.gunzipSync(buf);
-  const str = (b: Buffer, start: number, len: number): string => {
-    const slice = b.subarray(start, start + len);
-    const end = slice.indexOf(0);
-    return slice.subarray(0, end === -1 ? len : end).toString("utf8").trim();
-  };
-  let off = 0;
-  let files = 0;
-  let longName: string | null = null;
-  while (off + 512 <= tar.length) {
-    const header = tar.subarray(off, off + 512);
-    if (header.every(v => v === 0)) break; // 结束全零块
-    const nameField = str(header, 0, 100);
-    const sizeStr = str(header, 124, 12);
-    const size = parseInt(sizeStr, 8) || 0;
-    const type = String.fromCharCode(header[156] || 0x30);
-    const prefix = str(header, 345, 155);
-    const name = longName ?? (prefix ? prefix + "/" + nameField : nameField);
-    longName = null;
-    const dataStart = off + 512;
-    const data = tar.subarray(dataStart, dataStart + size);
-    off = dataStart + Math.ceil(size / 512) * 512;
-    if (type === "L") { // GNU 长文件名：内容是下一条目的路径
-      longName = data.toString("utf8").replace(/\0+$/, "");
-      continue;
-    }
-    if (type === "x" || type === "g") continue; // pax 扩展头：跳过
-    if (type !== "0" && type !== "\0" && type !== "5") continue; // 链接等不支持
-    const rel = name.replace(/^\.?\//, "").replace(/\/+$/, "");
-    if (rel === "" || rel === ".") continue; // 根目录条目（./ 或 ./dir/ 已归一化）
-    if (rel.includes("..") || path.isAbsolute(rel)) {
-      throw new Error("unsafe entry in archive: " + name);
-    }
-    const target = path.join(dest, rel);
-    if (!target.startsWith(dest + path.sep)) throw new Error("unsafe entry in archive: " + name);
-    if (type === "5") {
-      fs.mkdirSync(target, { recursive: true });
-      continue;
-    }
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, data);
-    fs.chmodSync(target, 0o755); // 产物里的可执行位不依赖打包机
-    files++;
-  }
-  if (files === 0) throw new Error("archive contains no files");
-  return files;
-}
-
 // 安装：staging 解包 → 校验 manifest → 版本目录落位 → 指针切换 → 清旧版本
-function installProduct(buf: Buffer, filename: string, sha256?: string | null): {
+function installProduct(buf: Buffer, filename: string, sha256?: string | null,
+  manifestOverride?: Record<string, unknown>): {
   brand: string; version: string; install_dir: string; files: number; upgraded: boolean;
 } {
   if (sha256) {
@@ -1207,8 +1158,11 @@ function installProduct(buf: Buffer, filename: string, sha256?: string | null): 
         manifestPath = path.join(manifestDir, "manifest.json");
       }
     }
-    if (!existsSync(manifestPath)) throw new Error("安装包内缺少 manifest.json（" + filename + "）");
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as ProductManifest;
+    if (!existsSync(manifestPath) && !manifestOverride) throw new Error("安装包内缺少 manifest.json（" + filename + "）");
+    // 远程安装时服务端 manifest 为准（管理端可编辑），包内版本仅作回退
+    const manifest = (manifestOverride
+      ? JSON.parse(JSON.stringify(manifestOverride)) as ProductManifest
+      : JSON.parse(fs.readFileSync(manifestPath, "utf8")) as ProductManifest);
     if (manifest.format !== 1) throw new Error("不支持的 manifest format: " + String(manifest.format));
     if (!validBrandSlug(manifest.brand)) throw new Error("manifest.brand 非法: " + String(manifest.brand));
     if (!validVersion(manifest.version)) throw new Error("manifest.version 需要 semver（如 1.0.0）: " + String(manifest.version));
@@ -1225,6 +1179,9 @@ function installProduct(buf: Buffer, filename: string, sha256?: string | null): 
     fs.mkdirSync(brandRoot, { recursive: true });
     fs.renameSync(manifestDir, dest);
     fs.rmSync(staging, { recursive: true, force: true });
+    if (manifestOverride && !existsSync(path.join(dest, "manifest.json"))) {
+      fs.writeFileSync(path.join(dest, "manifest.json"), JSON.stringify(manifest, null, 2), "utf8");
+    }
     // 指针 + manifest 副本：先落副本再切指针（失败时指针仍指旧版本）
     fs.writeFileSync(path.join(brandRoot, "manifest.json"), JSON.stringify(manifest, null, 2), "utf8");
     fs.writeFileSync(path.join(brandRoot, "current"), manifest.version, "utf8");
@@ -1243,6 +1200,26 @@ function uninstallProduct(brand: string): void {
   if (!existsSync(brandRoot)) throw new Error("未安装: " + brand);
   fs.rmSync(brandRoot, { recursive: true, force: true });
   logger.info("product uninstalled", { brand });
+}
+
+// cfg.gateway(ws(s)://host:port/ws/agent)→HTTP 基址（产品目录/下载走 HTTP）
+function gatewayHttpBase(gateway: string): string {
+  const m = /^(wss?):\/\/([^/?#]+)/.exec(gateway.trim());
+  if (!m) throw new Error("网关地址无法解析: " + gateway);
+  return (m[1] === "wss" ? "https" : "http") + "://" + m[2];
+}
+
+// manifest → 本机 override target（{{install_dir}} 解析）；web/app 返回 null（不托管）
+function overrideTargetFor(manifest: ProductManifest, installDir: string): { conn_type: string; target: string } | null {
+  if (manifest.kind === "stdio") {
+    if (!manifest.launch_cmd) return null;
+    return { conn_type: "stdio", target: manifest.launch_cmd.replace(/\{\{install_dir\}\}/g, installDir) };
+  }
+  if (manifest.kind === "http" || manifest.kind === "ws") {
+    if (!manifest.endpoint) return null;
+    return { conn_type: manifest.kind, target: manifest.endpoint };
+  }
+  return null;
 }
 
 // 跨平台拉起：可执行路径直接 spawn，失败回退系统 opener
@@ -1431,6 +1408,66 @@ async function handleUIRequest(
 
   if (req.method === "GET" && p === "/api/products") {
     sendJSON(res, 200, { products: listInstalledProducts() });
+    return;
+  }
+
+  // 远程产品目录（网关 data/products；未连网关/网关不可达返回空并标注）
+  if (req.method === "GET" && p === "/api/remote-products") {
+    try {
+      const r = await fetch(gatewayHttpBase(cfg.gateway) + "/products/catalog",
+        { signal: AbortSignal.timeout(8000) });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const body = await r.json() as { products?: unknown[] };
+      sendJSON(res, 200, { gateway: gatewayHttpBase(cfg.gateway), products: body.products || [] });
+    } catch (e) {
+      sendJSON(res, 200, { gateway: gatewayHttpBase(cfg.gateway), products: [], error: e instanceof Error ? e.message : String(e) });
+    }
+    return;
+  }
+
+  // 一键远程安装：网关下载 → 服务端 sha256 校验 → 安装 → 已有实例自动重指向新版本目录
+  const mir = /^\/api\/products\/([A-Za-z0-9._-]+)\/((?:\d+\.){2}\d+(?:-[0-9A-Za-z.+-]+)?)\/install-remote$/.exec(p);
+  if (mir && req.method === "POST") {
+    const brand = mir[1];
+    const version = mir[2];
+    try {
+      const base = gatewayHttpBase(cfg.gateway);
+      const cr = await fetch(base + "/products/catalog", { signal: AbortSignal.timeout(8000) });
+      const catalog = cr.ok ? ((await cr.json()) as { products?: Array<Record<string, unknown>> }).products || [] : [];
+      const entry = catalog.find(x => x.brand === brand && x.version === version);
+      if (!entry) throw new Error("网关目录里没有 " + brand + " " + version);
+      const dr = await fetch(base + "/products/" + brand + "/" + version + "/download",
+        { signal: AbortSignal.timeout(300_000) });
+      if (!dr.ok) throw new Error("下载失败（HTTP " + dr.status + "）");
+      const buf = Buffer.from(await dr.arrayBuffer());
+      const installed = installProduct(buf, brand + "-" + version + ".tar.gz",
+        typeof entry.sha256 === "string" ? entry.sha256 : null,
+        entry.manifest as Record<string, unknown> | undefined);
+      // 同品牌已有实例 → override 自动指到新目录（connector sync 后自动重启到新版本）。
+      // 重指向依赖网关 WS，失败不影响安装结果
+      const repointed: string[] = [];
+      const manifest = entry.manifest as unknown as ProductManifest;
+      const ov = overrideTargetFor(manifest, installed.install_dir);
+      if (ov) {
+        try {
+          const bl = await ui.rpc(proto.METHOD_BRAND_LIST, {});
+          const brands = bl.error ? [] : ((bl.result as { brands?: proto.BrandInfo[] }).brands || []);
+          const match = brands.find(b => b.name === manifest.brand || b.name === (manifest.name || manifest.brand));
+          if (match) {
+            for (const a of ui.lastSync) {
+              if (a.brand_id !== match.id) continue;
+              await ui.applyOverride(a.agent_id, ov);
+              repointed.push(a.agent_id);
+            }
+          }
+        } catch (e) {
+          logger.warn("product installed but repoint skipped", { error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+      sendJSON(res, 200, { ...installed, manifest, repointed });
+    } catch (e) {
+      sendJSON(res, 400, { error: e instanceof Error ? e.message : String(e) });
+    }
     return;
   }
 

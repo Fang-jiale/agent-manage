@@ -230,6 +230,14 @@
                 </table>
                 <div class="empty-tip" id="productEmpty" style="display:none">本机还没有安装产品</div>
             </div>
+            <div class="form-hint" style="margin:12px 0 6px">远程产品目录（网关分发）· 一键下载安装，已有实例自动升级到新版本</div>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>产品</th><th>版本</th><th>类型</th><th>本机状态</th><th style="text-align:right">操作</th></tr></thead>
+                    <tbody id="remoteRows"></tbody>
+                </table>
+                <div class="empty-tip" id="remoteEmpty" style="display:none">网关产品目录为空（管理员在管理后台上传产品包）</div>
+            </div>
             <div class="form-hint" style="margin:12px 0 6px">网关产品目录 · web / app 型点「打开」直接启动</div>
             <div class="table-wrap" style="margin-bottom:0">
                 <table>
@@ -297,6 +305,7 @@
             ['connDot', 'connText', 'stateCard', 'agentRows', 'agentEmpty', 'agentsError',
              'addCard', 'addBrand', 'addBrandCmd', 'addCmdLabel', 'addName', 'addCmd', 'addBtn', 'addError',
              'productCard', 'pkgFile', 'pkgInstallBtn', 'pkgStatus', 'productRows', 'productEmpty', 'catalogRows', 'catalogEmpty', 'productError',
+             'remoteRows', 'remoteEmpty',
              'toastContainer', 'modalOverlay', 'modalTitle', 'modalText', 'modalOk', 'modalCancel',
              'cmdOverlay', 'cmdAgentLabel', 'cmdLabel', 'cmdInput', 'cmdCancel', 'cmdOk'
             ].forEach(id => { els[id] = document.getElementById(id); });
@@ -584,6 +593,74 @@
                 }
                 renderProducts();
                 renderCatalog();
+                loadRemote();
+            }
+
+            /* 远程目录 + 一键安装 */
+
+            let remoteCache = [];
+            let remoteError = '';
+
+            async function loadRemote() {
+                try {
+                    const r = await api('/api/remote-products');
+                    remoteCache = r.products || [];
+                    remoteError = r.error || '';
+                } catch (e) {
+                    remoteCache = [];
+                    remoteError = e.message || String(e);
+                }
+                renderRemote();
+            }
+
+            function remoteStatus(entry) {
+                const inst = productsCache.find(p => p.brand === entry.brand);
+                if (!inst) return { label: '<span class="chip">未安装</span>', can: true };
+                if (entry.version === inst.version) return { label: '<span class="chip green">已是最新</span>', can: false };
+                return { label: '<span class="chip amber">已装 ' + escapeHtml(inst.version) + ' → 可升级</span>', can: true };
+            }
+
+            function renderRemote() {
+                els.remoteEmpty.style.display = remoteCache.length ? 'none' : '';
+                if (!remoteCache.length && remoteError) {
+                    els.remoteEmpty.textContent = '网关目录不可达：' + remoteError;
+                }
+                els.remoteRows.innerHTML = remoteCache.map(e => {
+                    const m = e.manifest || {};
+                    const st = remoteStatus(e);
+                    return '<tr>' +
+                    '<td><div class="cell-main">' + escapeHtml(m.name || e.brand) + '</div>' +
+                    '<div class="cell-sub">' + escapeHtml(m.description || e.brand) + '</div></td>' +
+                    '<td><div>' + escapeHtml(e.version) + '</div>' +
+                    '<div class="cell-sub">' + (e.size ? (e.size / 1048576).toFixed(1) + ' MB' : '') + '</div></td>' +
+                    '<td><span class="chip">' + escapeHtml(KIND_LABELS[m.kind || 'stdio'] || m.kind || 'stdio') + '</span></td>' +
+                    '<td>' + st.label + '</td>' +
+                    '<td><div class="row-actions">' +
+                    (st.can ? '<button data-act="ri" data-brand="' + escapeAttr(e.brand) + '" data-ver="' + escapeAttr(e.version) + '">' +
+                        (productsCache.some(p => p.brand === e.brand) ? '升级到 ' + escapeHtml(e.version) : '安装') + '</button>' : '') +
+                    '</div></td></tr>';
+                }).join('');
+                els.remoteRows.querySelectorAll('button').forEach(btn => {
+                    btn.onclick = () => installRemote(btn.dataset.brand, btn.dataset.ver, btn);
+                });
+            }
+
+            async function installRemote(brand, version, btn) {
+                btn.disabled = true;
+                btn.textContent = '下载安装中…';
+                showError(els.productError, '');
+                try {
+                    const r = await api('/api/products/' + encodeURIComponent(brand) + '/' + encodeURIComponent(version) + '/install-remote', { method: 'POST' });
+                    const extra = (r.repointed && r.repointed.length)
+                        ? '；' + r.repointed.length + ' 个实例已自动切到新版本'
+                        : '';
+                    showToast('已安装 ' + r.brand + ' ' + r.version + '（' + r.files + ' 个文件）' + extra, 'success', 6000);
+                    loadProducts();
+                    loadState();
+                } catch (e) {
+                    showToast('远程安装失败：' + (e.message || e), 'error', 8000);
+                    renderRemote(); // 恢复按钮
+                }
             }
 
             function renderProducts() {
