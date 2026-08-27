@@ -616,13 +616,14 @@
                                     : '已接入网关（外部命令' + (e.runtime_version ? '，运行 v' + escapeHtml(e.runtime_version) : '') + '）') + '</div>';
                             if (localRun.running) localCell += '<div class="cell-sub" style="color:var(--success)">本地运行中</div>';
                         } else if (e.has_instance) {
-                            localCell = '<span class="chip amber">未安装 · 外部命令接入' +
+                            // 外部目录装着、且正在跑——它就是装了的，只是不受本安装器管理
+                            localCell = '<span class="chip amber">外部安装' +
                                 (e.runtime_version ? ' · 运行 v' + escapeHtml(e.runtime_version) : '') + '</span>' +
-                                '<div class="cell-sub">命令在产品目录外，不受升级/卸载管理</div>';
+                                '<div class="cell-sub">装在产品目录外，不受升级/卸载管理</div>';
                         } else {
                             localCell = '<span class="chip">未安装</span>';
                         }
-                        if (!installed && remote) actions += '<button data-act="install" data-brand="' + escapeAttr(e.brand) + '" data-ver="' + escapeAttr(remote) + '" class="btn-primary">安装 ' + escapeHtml(remote) + '</button> ';
+                        if (!installed && remote) actions += '<button data-act="install" data-brand="' + escapeAttr(e.brand) + '" data-ver="' + escapeAttr(remote) + '" class="btn-primary">' + (e.has_instance ? '纳管安装 ' : '安装 ') + escapeHtml(remote) + '</button> ';
                         if (canUpgrade) actions += '<button data-act="install" data-brand="' + escapeAttr(e.brand) + '" data-ver="' + escapeAttr(remote) + '">升级到 ' + escapeHtml(remote) + '</button> ';
                         if (installed) {
                             if (!e.has_instance) actions += '<button data-act="instantiate" data-brand="' + escapeAttr(e.brand) + '">接入网关</button> ';
@@ -668,6 +669,13 @@
             }
 
             async function installRemote(brand, version, btn) {
+                const row = catalogCache.find(x => x.brand === brand);
+                if (row && row.has_instance && !row.installed_version) {
+                    const ok = await confirmModal('纳管安装',
+                        '「' + brand + '」当前有实例从外部目录运行。安装后实例将自动切换到产品目录的新副本（旧目录不动，可回退）。继续？',
+                        '安装并切换');
+                    if (!ok) return;
+                }
                 if (btn) { btn.disabled = true; btn.textContent = '下载安装中…'; }
                 showError(els.productError, '');
                 try {
@@ -695,6 +703,15 @@
             }
 
             async function localRunOp(brand, op) {
+                if (op === 'start') {
+                    const row = catalogCache.find(x => x.brand === brand);
+                    if (row && row.has_instance) {
+                        const ok = await confirmModal('本地运行',
+                            '「' + brand + '」已有网关实例在运行。同产品双开可能端口冲突或数据库锁竞争，确认要本地再起一份？',
+                            '仍然本地起');
+                        if (!ok) return;
+                    }
+                }
                 try {
                     const r = await api('/api/products/' + encodeURIComponent(brand) + '/local-run/' + op, { method: 'POST' });
                     if (op === 'start' && r.log_path) showToast('已在本地启动，日志：' + r.log_path, 'success', 5000);
