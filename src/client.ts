@@ -1242,6 +1242,121 @@ function launchEndpoint(target: string): { launched: boolean; error?: string } {
   }
 }
 
+// ---- 本地运行（不接网关）：把已装产品按 manifest 命令拉起，日志落文件，可停 ----
+const localRuns = new Map<string, { child: ReturnType<typeof spawn>; logPath: string; startedAt: number }>();
+
+function localRunOf(brand: string): { running: boolean; log_path?: string; started_at?: number } {
+  const r = localRuns.get(brand);
+  if (!r) return { running: false };
+  return { running: !r.child.killed && r.child.exitCode === null, log_path: r.logPath, started_at: r.startedAt };
+}
+
+function startLocalRun(brand: string): { running: boolean; log_path: string; error?: string } {
+  const products = listInstalledProducts().filter(x => x.brand === brand);
+  const prod = products[0];
+  if (!prod || !prod.manifest || !prod.install_dir) throw new Error("本机未安装该产品: " + brand);
+  if (localRuns.has(brand)) {
+    const cur = localRuns.get(brand);
+    if (cur && cur.child.exitCode === null) return { running: true, log_path: cur.logPath };
+    localRuns.delete(brand);
+  }
+  const ov = overrideTargetFor(prod.manifest, prod.install_dir);
+  const logPath = path.join(productsRoot(), brand, "local-run.log");
+  fs.mkdirSync(path.dirname(logPath), { recursive: true });
+  const manifest = prod.manifest;
+  if (manifest.kind === "web" || manifest.kind === "app") {
+    // 产品型：web/app 不需要进程托管，直接打开
+    const target = manifest.endpoint || "";
+    if (!target) throw new Error("manifest 未配置 endpoint");
+    if (manifest.kind === "web") throw new Error("web 型产品请在目录里点「打开」");
+    const r = launchEndpoint(target);
+    if (!r.launched) throw new Error("启动失败: " + r.error);
+    return { running: false, log_path: logPath };
+  }
+  if (!ov) throw new Error("manifest 缺少 launch_cmd / endpoint，无法本地启动");
+  // tokenizeCommand 与 stdio 适配器同款语义：命令字符串拆 argv
+  const log = fs.openSync(logPath, "a");
+  fs.writeSync(log, "\n===== local run " + new Date().toISOString() + " =====\n");
+  const child = spawn(ov.target, [], {
+    shell: true,                       // 命令字符串原样执行（与品牌 launch_cmd 语义一致）
+    detached: false, stdio: ["ignore", log, log],
+    env: { ...process.env },
+  });
+  child.on("exit", (code, sig) => {
+    try { fs.writeSync(log, "\n===== exited code=" + code + " sig=" + sig + " =====\n"); } catch { /* 日志句柄可能已关 */ }
+  });
+  localRuns.set(brand, { child, logPath, startedAt: Date.now() });
+  logger.info("product local run started", { brand, pid: child.pid, log: logPath });
+  return { running: true, log_path: logPath };
+}
+
+function stopLocalRun(brand: string): void {
+  const r = localRuns.get(brand);
+  if (!r) throw new Error("该产品没有在本地运行");
+  if (r.child.exitCode === null) {
+    try { r.child.kill("SIGTERM"); } catch { /* 已退出 */ }
+  }
+  localRuns.delete(brand);
+  logger.info("product local run stopped", { brand });
+}
+
+// 统一产品目录：网关品牌 × 远程产品包 × 本机安装 × 本地运行状态 合成一张表
+async function buildProductCatalog(cfg: ClientConfig, ui: LocalUIState): Promise<unknown[]> {
+  const base = gatewayHttpBase(cfg.gateway);
+  // 远程包目录（网关不可达时降级为空）
+  let remote: Array<Record<string, unknown>> = [];
+  try {
+    const r = await fetch(base + "/products/catalog", { signal: AbortSignal.timeout(8000) });
+    if (r.ok) remote = ((await r.json()) as { products?: Array<Record<string, unknown>> }).products || [];
+  } catch { /* 离线：只展示本机 */ }
+  // 品牌身份（连着网关才有；logo 相对路径补成网关绝对地址）
+  let brands: proto.BrandInfo[] = [];
+  try {
+    const bl = await ui.rpc(proto.METHOD_BRAND_LIST, {});
+    if (!bl.error) brands = ((bl.result as { brands?: proto.BrandInfo[] }).brands || []);
+  } catch { /* 未连接 */ }
+  const installed = listInstalledProducts();
+  const rows: Record<string, unknown>[] = [];
+  const seen = new Set<string>();
+  for (const b of brands) {
+    if (b.disabled) continue;
+    seen.add(b.name);
+    const inst = installed.find(p => p.brand === b.name);
+    const pkg = remote.filter(e => e.brand === b.name).sort((x, y) => String(y.updated_at).localeCompare(String(x.updated_at)))[0];
+    rows.push({
+      brand: b.name,
+      brand_id: b.id,
+      name: inst?.manifest?.name || (pkg?.manifest as Record<string, unknown> | undefined)?.name || b.name,
+      description: b.description || (pkg?.manifest as Record<string, unknown> | undefined)?.description || "",
+      kind: b.conn_type || (pkg?.manifest as Record<string, unknown> | undefined)?.kind || "stdio",
+      logo_url: b.logo_url ? (String(b.logo_url).startsWith("http") ? b.logo_url : base + b.logo_url) : null,
+      installed_version: inst?.version || null,
+      remote_version: pkg ? String(pkg.version) : null,
+      remote_size: pkg ? pkg.size : null,
+      has_instance: ui.lastSync.some(a => a.brand_id === b.id),
+      local_run: localRunOf(b.name),
+    });
+  }
+  // 只在本机出现（离线装了、或网关没这个品牌）的产品补在后面
+  for (const p of installed) {
+    if (seen.has(p.brand)) continue;
+    rows.push({
+      brand: p.brand,
+      brand_id: null,
+      name: p.manifest?.name || p.brand,
+      description: p.manifest?.description || "",
+      kind: p.manifest?.kind || "stdio",
+      logo_url: null,
+      installed_version: p.version || null,
+      remote_version: null,
+      remote_size: null,
+      has_instance: false,
+      local_run: localRunOf(p.brand),
+    });
+  }
+  return rows;
+}
+
 function startLocalUI(addr: string, cfg: ClientConfig, ui: LocalUIState): http.Server {
   const idx = addr.lastIndexOf(":");
   const host = idx === -1 ? "127.0.0.1" : addr.slice(0, idx) || "127.0.0.1";
@@ -1408,6 +1523,32 @@ async function handleUIRequest(
 
   if (req.method === "GET" && p === "/api/products") {
     sendJSON(res, 200, { products: listInstalledProducts() });
+    return;
+  }
+
+  // 统一产品目录：品牌 × 远程包 × 本机安装 × 本地运行 一张表
+  if (req.method === "GET" && p === "/api/product-catalog") {
+    try {
+      sendJSON(res, 200, { gateway: gatewayHttpBase(cfg.gateway), products: await buildProductCatalog(cfg, ui) });
+    } catch (e) {
+      sendJSON(res, 500, { error: e instanceof Error ? e.message : String(e) });
+    }
+    return;
+  }
+
+  const mlr = /^\/api\/products\/([A-Za-z0-9._-]+)\/local-run\/(start|stop)$/.exec(p);
+  if (mlr && req.method === "POST") {
+    try {
+      if (mlr[2] === "start") {
+        const r = startLocalRun(decodeURIComponent(mlr[1]));
+        sendJSON(res, 200, r);
+      } else {
+        stopLocalRun(decodeURIComponent(mlr[1]));
+        sendJSON(res, 200, { status: "ok" });
+      }
+    } catch (e) {
+      sendJSON(res, 400, { error: e instanceof Error ? e.message : String(e) });
+    }
     return;
   }
 

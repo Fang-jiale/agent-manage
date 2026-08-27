@@ -214,37 +214,22 @@
             <div class="section-error" id="agentsError"></div>
         </div>
 
-        <!-- 产品中心：安装 / 升级 / 启动 Agent 产品 -->
+        <!-- 产品中心：品牌 → 安装 → 接网关 / 本地起 -->
         <div class="card" id="productCard" style="display:none">
             <h2>产品中心</h2>
-            <div class="card-desc">安装 / 升级 Agent 产品（tar.gz 包内含 manifest.json，规格见 docs/installer-spec.md）</div>
+            <div class="card-desc">品牌即产品：从网关目录一键安装/升级；装完可接入网关（聊天/调度）或本地运行（不接网关）</div>
             <div class="form-row" style="margin-bottom:12px">
                 <input type="file" id="pkgFile" accept=".tar.gz,.tgz" style="display:none">
-                <button class="btn btn-primary" id="pkgInstallBtn">安装 / 升级产品包…</button>
                 <span class="form-hint" id="pkgStatus"></span>
+                <span style="flex:1"></span>
+                <button class="btn" id="pkgInstallBtn">离线安装…</button>
             </div>
-            <div class="table-wrap">
-                <table>
-                    <thead><tr><th>已安装产品</th><th>当前版本</th><th>类型</th><th style="text-align:right">操作</th></tr></thead>
-                    <tbody id="productRows"></tbody>
-                </table>
-                <div class="empty-tip" id="productEmpty" style="display:none">本机还没有安装产品</div>
-            </div>
-            <div class="form-hint" style="margin:12px 0 6px">远程产品目录（网关分发）· 一键下载安装，已有实例自动升级到新版本</div>
-            <div class="table-wrap">
-                <table>
-                    <thead><tr><th>产品</th><th>版本</th><th>类型</th><th>本机状态</th><th style="text-align:right">操作</th></tr></thead>
-                    <tbody id="remoteRows"></tbody>
-                </table>
-                <div class="empty-tip" id="remoteEmpty" style="display:none">网关产品目录为空（管理员在管理后台上传产品包）</div>
-            </div>
-            <div class="form-hint" style="margin:12px 0 6px">网关产品目录 · web / app 型点「打开」直接启动</div>
             <div class="table-wrap" style="margin-bottom:0">
                 <table>
-                    <thead><tr><th>产品</th><th>类型</th><th>地址 / 路径</th><th style="text-align:right">操作</th></tr></thead>
-                    <tbody id="catalogRows"></tbody>
+                    <thead><tr><th>产品</th><th>类型</th><th>本机</th><th>远程</th><th style="text-align:right">操作</th></tr></thead>
+                    <tbody id="productRows"></tbody>
                 </table>
-                <div class="empty-tip" id="catalogEmpty" style="display:none">网关目录里暂无 web / app 型品牌</div>
+                <div class="empty-tip" id="productEmpty" style="display:none">暂无产品（管理员在管理后台 · 品牌管理 · 产品分发给品牌上传安装包）</div>
             </div>
             <div class="section-error" id="productError"></div>
         </div>
@@ -304,8 +289,7 @@
             const els = {};
             ['connDot', 'connText', 'stateCard', 'agentRows', 'agentEmpty', 'agentsError',
              'addCard', 'addBrand', 'addBrandCmd', 'addCmdLabel', 'addName', 'addCmd', 'addBtn', 'addError',
-             'productCard', 'pkgFile', 'pkgInstallBtn', 'pkgStatus', 'productRows', 'productEmpty', 'catalogRows', 'catalogEmpty', 'productError',
-             'remoteRows', 'remoteEmpty',
+             'productCard', 'pkgFile', 'pkgInstallBtn', 'pkgStatus', 'productRows', 'productEmpty', 'productError',
              'toastContainer', 'modalOverlay', 'modalTitle', 'modalText', 'modalOk', 'modalCancel',
              'cmdOverlay', 'cmdAgentLabel', 'cmdLabel', 'cmdInput', 'cmdCancel', 'cmdOk'
             ].forEach(id => { els[id] = document.getElementById(id); });
@@ -530,7 +514,6 @@
                         els.addBrand.innerHTML = hostable.map(b =>
                             '<option value="' + escapeAttr(b.id) + '">' + escapeHtml(b.name) + '（' + escapeHtml(b.id) + '）</option>').join('');
                     }
-                    renderCatalog();
                     updateBrandCmdHint();
                     showError(els.addError, '');
                 } catch (e) {
@@ -577,126 +560,86 @@
                 }
             }
 
-            /* ---------- 产品中心 ---------- */
+            /* ---------- 产品中心：品牌 × 远程包 × 本机安装 × 本地运行 ---------- */
 
             const KIND_LABELS = { stdio: 'stdio · 命令', http: 'http · 服务', ws: 'ws · 服务', web: 'web · 网页', app: 'app · 应用' };
-            let productsCache = [];
-
+            let catalogCache = [];
             let lastProductsLoad = 0;
+
             async function loadProducts() {
                 lastProductsLoad = Date.now();
                 try {
-                    const r = await api('/api/products');
-                    productsCache = r.products || [];
+                    const r = await api('/api/product-catalog');
+                    catalogCache = r.products || [];
                 } catch (e) {
-                    productsCache = [];
+                    catalogCache = [];
                 }
                 renderProducts();
-                renderCatalog();
-                loadRemote();
             }
 
-            /* 远程目录 + 一键安装 */
-
-            let remoteCache = [];
-            let remoteError = '';
-
-            async function loadRemote() {
-                try {
-                    const r = await api('/api/remote-products');
-                    remoteCache = r.products || [];
-                    remoteError = r.error || '';
-                } catch (e) {
-                    remoteCache = [];
-                    remoteError = e.message || String(e);
+            function versionGt(a, b) {
+                if (!a || !b || a === b) return false;
+                const pa = String(a).split(/[.-]/).map(Number).slice(0, 3);
+                const pb = String(b).split(/[.-]/).map(Number).slice(0, 3);
+                for (let i = 0; i < 3; i++) {
+                    if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) > (pb[i] || 0);
                 }
-                renderRemote();
-            }
-
-            function remoteStatus(entry) {
-                const inst = productsCache.find(p => p.brand === entry.brand);
-                if (!inst) return { label: '<span class="chip">未安装</span>', can: true };
-                if (entry.version === inst.version) return { label: '<span class="chip green">已是最新</span>', can: false };
-                return { label: '<span class="chip amber">已装 ' + escapeHtml(inst.version) + ' → 可升级</span>', can: true };
-            }
-
-            function renderRemote() {
-                els.remoteEmpty.style.display = remoteCache.length ? 'none' : '';
-                if (!remoteCache.length && remoteError) {
-                    els.remoteEmpty.textContent = '网关目录不可达：' + remoteError;
-                }
-                els.remoteRows.innerHTML = remoteCache.map(e => {
-                    const m = e.manifest || {};
-                    const st = remoteStatus(e);
-                    return '<tr>' +
-                    '<td><div class="cell-main">' + escapeHtml(m.name || e.brand) + '</div>' +
-                    '<div class="cell-sub">' + escapeHtml(m.description || e.brand) + '</div></td>' +
-                    '<td><div>' + escapeHtml(e.version) + '</div>' +
-                    '<div class="cell-sub">' + (e.size ? (e.size / 1048576).toFixed(1) + ' MB' : '') + '</div></td>' +
-                    '<td><span class="chip">' + escapeHtml(KIND_LABELS[m.kind || 'stdio'] || m.kind || 'stdio') + '</span></td>' +
-                    '<td>' + st.label + '</td>' +
-                    '<td><div class="row-actions">' +
-                    (st.can ? '<button data-act="ri" data-brand="' + escapeAttr(e.brand) + '" data-ver="' + escapeAttr(e.version) + '">' +
-                        (productsCache.some(p => p.brand === e.brand) ? '升级到 ' + escapeHtml(e.version) : '安装') + '</button>' : '') +
-                    '</div></td></tr>';
-                }).join('');
-                els.remoteRows.querySelectorAll('button').forEach(btn => {
-                    btn.onclick = () => installRemote(btn.dataset.brand, btn.dataset.ver, btn);
-                });
-            }
-
-            async function installRemote(brand, version, btn) {
-                btn.disabled = true;
-                btn.textContent = '下载安装中…';
-                showError(els.productError, '');
-                try {
-                    const r = await api('/api/products/' + encodeURIComponent(brand) + '/' + encodeURIComponent(version) + '/install-remote', { method: 'POST' });
-                    const extra = (r.repointed && r.repointed.length)
-                        ? '；' + r.repointed.length + ' 个实例已自动切到新版本'
-                        : '';
-                    showToast('已安装 ' + r.brand + ' ' + r.version + '（' + r.files + ' 个文件）' + extra, 'success', 6000);
-                    loadProducts();
-                    loadState();
-                } catch (e) {
-                    showToast('远程安装失败：' + (e.message || e), 'error', 8000);
-                    renderRemote(); // 恢复按钮
-                }
+                return true; // 同三段不同后缀按可升级处理
             }
 
             function renderProducts() {
-                els.productEmpty.style.display = productsCache.length ? 'none' : '';
-                els.productRows.innerHTML = productsCache.map(p =>
-                    '<tr>' +
-                    '<td><div class="cell-main">' + escapeHtml(p.brand) + '</div>' +
-                    '<div class="cell-sub">' + escapeHtml(p.manifest && p.manifest.description || '') + '</div></td>' +
-                    '<td><div>' + escapeHtml(p.version || '—') + '</div>' +
-                    (p.versions.length > 1 ? '<div class="cell-sub">历史: ' + escapeHtml(p.versions.filter(v => v !== p.version).join(', ')) + '</div>' : '') + '</td>' +
-                    '<td><span class="chip">' + escapeHtml(KIND_LABELS[(p.manifest && p.manifest.kind) || 'stdio'] || 'stdio') + '</span></td>' +
-                    '<td><div class="row-actions">' +
-                    (p.version ? '<button data-act="instantiate" data-brand="' + escapeAttr(p.brand) + '">创建 Agent 实例</button>' : '') +
-                    '<button data-act="uninstall" data-brand="' + escapeAttr(p.brand) + '" class="danger">卸载</button>' +
-                    '</div></td></tr>').join('');
+                els.productEmpty.style.display = catalogCache.length ? 'none' : '';
+                els.productRows.innerHTML = catalogCache.map(e => {
+                    const kind = e.kind || 'stdio';
+                    const installed = e.installed_version;
+                    const remote = e.remote_version;
+                    const canUpgrade = installed && remote && versionGt(remote, installed);
+                    const localRun = e.local_run || {};
+                    const logo = e.logo_url
+                        ? '<img src="' + escapeAttr(e.logo_url) + '" alt="" style="width:22px;height:22px;border-radius:6px;flex-shrink:0">'
+                        : '<span style="width:22px;height:22px;border-radius:6px;flex-shrink:0;background:var(--border);display:inline-block"></span>';
+                    let localCell, actions = '';
+                    if (kind === 'web' || kind === 'app') {
+                        localCell = '<span class="cell-sub">—</span>';
+                        actions = e.brand_id ? '<button data-act="open" data-id="' + escapeAttr(e.brand_id) + '">打开</button>' : '';
+                    } else {
+                        localCell = installed
+                            ? '<span class="chip green">已装 ' + escapeHtml(installed) + '</span>' +
+                              (e.has_instance ? '<div class="cell-sub">已接入网关</div>' : '') +
+                              (localRun.running ? '<div class="cell-sub" style="color:var(--success)">本地运行中</div>' : '')
+                            : '<span class="chip">未安装</span>';
+                        if (!installed && remote) actions += '<button data-act="install" data-brand="' + escapeAttr(e.brand) + '" data-ver="' + escapeAttr(remote) + '" class="btn-primary">安装 ' + escapeHtml(remote) + '</button> ';
+                        if (canUpgrade) actions += '<button data-act="install" data-brand="' + escapeAttr(e.brand) + '" data-ver="' + escapeAttr(remote) + '">升级到 ' + escapeHtml(remote) + '</button> ';
+                        if (installed) {
+                            if (!e.has_instance) actions += '<button data-act="instantiate" data-brand="' + escapeAttr(e.brand) + '">接入网关</button> ';
+                            actions += localRun.running
+                                ? '<button data-act="lrstop" data-brand="' + escapeAttr(e.brand) + '">停止本地</button> '
+                                : '<button data-act="lrstart" data-brand="' + escapeAttr(e.brand) + '">本地起</button> ';
+                            actions += '<button data-act="uninstall" data-brand="' + escapeAttr(e.brand) + '" class="danger">卸载</button>';
+                        }
+                    }
+                    const remoteCell = remote
+                        ? '<div>' + escapeHtml(remote) + '</div><div class="cell-sub">' + (e.remote_size ? (e.remote_size / 1048576).toFixed(1) + ' MB' : '') + '</div>'
+                        : (installed ? '<span class="cell-sub">仅本机</span>' : '<span class="cell-sub">—</span>');
+                    return '<tr>' +
+                        '<td><div style="display:flex;align-items:center;gap:8px">' + logo +
+                        '<div><div class="cell-main">' + escapeHtml(e.name || e.brand) + '</div>' +
+                        '<div class="cell-sub">' + escapeHtml(e.description || e.brand) + '</div></div></div></td>' +
+                        '<td><span class="chip">' + escapeHtml(KIND_LABELS[kind] || kind) + '</span></td>' +
+                        '<td>' + localCell + '</td>' +
+                        '<td>' + remoteCell + '</td>' +
+                        '<td><div class="row-actions">' + actions + '</div></td></tr>';
+                }).join('');
                 els.productRows.querySelectorAll('button').forEach(btn => {
                     btn.onclick = () => {
-                        if (btn.dataset.act === 'instantiate') instantiateProduct(btn.dataset.brand);
-                        else uninstallProduct(btn.dataset.brand);
+                        const act = btn.dataset.act;
+                        if (act === 'open') launchBrand(btn.dataset.id);
+                        else if (act === 'install') installRemote(btn.dataset.brand, btn.dataset.ver, btn);
+                        else if (act === 'instantiate') instantiateProduct(btn.dataset.brand);
+                        else if (act === 'lrstart') localRunOp(btn.dataset.brand, 'start');
+                        else if (act === 'lrstop') localRunOp(btn.dataset.brand, 'stop');
+                        else if (act === 'uninstall') uninstallProduct(btn.dataset.brand);
                     };
-                });
-            }
-
-            function renderCatalog() {
-                const webApps = brandsCache.filter(b => b.conn_type === 'web' || b.conn_type === 'app');
-                els.catalogEmpty.style.display = webApps.length ? 'none' : '';
-                els.catalogRows.innerHTML = webApps.map(b =>
-                    '<tr>' +
-                    '<td><div class="cell-main">' + escapeHtml(b.name) + '</div></td>' +
-                    '<td><span class="chip">' + escapeHtml(KIND_LABELS[b.conn_type] || b.conn_type) + '</span></td>' +
-                    '<td><div class="cell-sub mono">' + escapeHtml(b.endpoint || '—') + '</div></td>' +
-                    '<td><div class="row-actions">' +
-                    '<button data-act="launch" data-id="' + escapeAttr(b.id) + '" data-ct="' + escapeAttr(b.conn_type) + '">打开</button>' +
-                    '</div></td></tr>').join('');
-                els.catalogRows.querySelectorAll('button').forEach(btn => {
-                    btn.onclick = () => launchBrand(btn.dataset.id);
                 });
             }
 
@@ -710,18 +653,46 @@
                 }
             }
 
+            async function installRemote(brand, version, btn) {
+                if (btn) { btn.disabled = true; btn.textContent = '下载安装中…'; }
+                showError(els.productError, '');
+                try {
+                    const r = await api('/api/products/' + encodeURIComponent(brand) + '/' + encodeURIComponent(version) + '/install-remote', { method: 'POST' });
+                    const extra = (r.repointed && r.repointed.length)
+                        ? '；' + r.repointed.length + ' 个已接入实例自动切到新版本' : '';
+                    showToast('已安装 ' + r.brand + ' ' + r.version + '（' + r.files + ' 个文件）' + extra, 'success', 6000);
+                    loadProducts();
+                    loadState();
+                } catch (e) {
+                    showToast('远程安装失败：' + (e.message || e), 'error', 8000);
+                    renderProducts();
+                }
+            }
+
             async function instantiateProduct(brand) {
                 try {
                     const r = await api('/api/products/' + encodeURIComponent(brand) + '/instantiate', { method: 'POST' });
-                    showToast('已创建实例：' + r.agent_id + '（启动命令已指向本机安装目录）', 'success', 5000);
+                    showToast('已接入网关：' + r.agent_id + '（在 Agent 列表可见，启动命令已指向本机安装目录）', 'success', 6000);
                     loadState();
+                    loadProducts();
                 } catch (e) {
-                    showToast('创建失败：' + (e.message || e), 'error', 6000);
+                    showToast('接入失败：' + (e.message || e), 'error', 6000);
+                }
+            }
+
+            async function localRunOp(brand, op) {
+                try {
+                    const r = await api('/api/products/' + encodeURIComponent(brand) + '/local-run/' + op, { method: 'POST' });
+                    if (op === 'start' && r.log_path) showToast('已在本地启动，日志：' + r.log_path, 'success', 5000);
+                    else if (op === 'stop') showToast('已停止本地运行', 'success');
+                    loadProducts();
+                } catch (e) {
+                    showToast('本地运行失败：' + (e.message || e), 'error', 6000);
                 }
             }
 
             async function uninstallProduct(brand) {
-                const ok = await confirmModal('卸载产品', '卸载「' + brand + '」？本机安装目录将被删除；已创建的 Agent 实例会保留但将无法启动。', '卸载');
+                const ok = await confirmModal('卸载产品', '卸载「' + brand + '」？本机安装目录将被删除；已接入网关的实例会保留但将无法启动。', '卸载');
                 if (!ok) return;
                 try {
                     await api('/api/products/' + encodeURIComponent(brand), { method: 'DELETE' });

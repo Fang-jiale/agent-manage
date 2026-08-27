@@ -1859,15 +1859,19 @@ function scanProductCatalog(root: string): ProductCatalogEntry[] {
   return out;
 }
 
-// 发布：从 tar 里抽 manifest 校验后落盘（manifest.json 服务端为准，可后续编辑）+ 算 sha256 存 meta
-function publishProductPackage(root: string, buf: Buffer, filename: string): {
+// 发布：从 tar 里抽 manifest 校验后落盘（manifest.json 服务端为准，可后续编辑）+ 算 sha256 存 meta。
+// 品牌=产品身份：上架前必须已存在同名品牌（先建品牌再传包）
+async function publishProductPackage(root: string, buf: Buffer, filename: string, db?: Db): Promise<{
   brand: string; version: string; sha256: string; size: number;
-} {
+}> {
   const raw = readTarEntry(buf, "manifest.json");
   if (!raw) throw new Error("安装包内缺少 manifest.json（" + filename + "）");
   const manifest = validateProductManifest(JSON.parse(raw.toString("utf8")) as Record<string, unknown>);
   const brand = manifest.brand as string;
   const version = manifest.version as string;
+  if (db && !(await db.getBrandByName(brand))) {
+    throw new Error("品牌「" + brand + "」不存在：请先在品牌管理创建同名品牌，再上传产品包");
+  }
   const dir = path.join(root, brand, version);
   if (fs.existsSync(path.join(dir, "package.tar.gz"))) {
     throw new Error("该产品版本已发布：" + brand + " " + version + "（如需覆盖请先删除）");
@@ -3683,7 +3687,7 @@ location.replace('/');
         }
         const buf = await readRawBody(req, 512 * 1024 * 1024);
         try {
-          const r = publishProductPackage(productsDir, buf, filename);
+          const r = await publishProductPackage(productsDir, buf, filename, db);
           logger.info("product published", { by: admin.name, brand: r.brand, version: r.version, sha256: r.sha256.slice(0, 12) + "…" });
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify(r));
