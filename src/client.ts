@@ -30,6 +30,7 @@ interface ClientConfig {
   configPath: string; // connector 配置文件（零配置启动）
   uiAddr: string; // 本地管理页监听地址，"off" 关闭
   overrides: Record<string, LaunchOverride>; // 本机覆盖：agent_id → 连接方式/目标
+  productsDir: string; // 产品安装根目录（内部保持 <brand>/<version>/ 结构）
   logLevel: string;
   taskTimeoutMs: number;
 }
@@ -40,6 +41,7 @@ interface ConnectorFileConfig {
   connector_id?: string;
   key?: string;
   overrides?: Record<string, LaunchOverride>;
+  products_dir?: string;
 }
 
 function loadClientConfig(): ClientConfig {
@@ -56,6 +58,7 @@ function loadClientConfig(): ClientConfig {
     { name: "pair", type: "string" as const, default: envString("AGENT_MANAGE_PAIR_CODE", "") },
     { name: "config", type: "string" as const, default: envString("AGENT_MANAGE_CONFIG", defaultConfigPath) },
     { name: "ui-addr", type: "string" as const, default: envString("AGENT_MANAGE_UI_ADDR", "127.0.0.1:9321") },
+    { name: "products-dir", type: "string" as const, default: envString("AGENT_MANAGE_PRODUCTS_DIR", "") },
     { name: "log-level", type: "string" as const, default: envString("AGENT_MANAGE_LOG_LEVEL", "info") },
     { name: "task-timeout", type: "duration" as const, default: String(envDurationMs("AGENT_MANAGE_TASK_TIMEOUT", 7_200_000)) },
   ];
@@ -106,6 +109,7 @@ function loadClientConfig(): ClientConfig {
     configPath: values["config"],
     uiAddr: values["ui-addr"],
     overrides: fileCfg.overrides ?? {},
+    productsDir: values["products-dir"] || fileCfg.products_dir || "",
     logLevel: values["log-level"],
     taskTimeoutMs,
   };
@@ -118,6 +122,7 @@ async function saveConfig(cfg: ClientConfig): Promise<void> {
     connector_id: cfg.connectorID,
     key: cfg.deviceKey,
     overrides: cfg.overrides,
+    ...(cfg.productsDir ? { products_dir: cfg.productsDir } : {}),
   };
   await fsp.mkdir(path.dirname(cfg.configPath), { recursive: true });
   await fsp.writeFile(cfg.configPath, JSON.stringify(fileCfg, null, 2) + "\n", { mode: 0o600 });
@@ -626,6 +631,7 @@ interface LocalUIState {
   lastSync: proto.ConnectorSyncAgent[]; // 最近一次全量目标集
   hosted: Map<string, HostedAgent> | undefined;
   hostStates: Map<string, HostState>; // agent_id → 宿主状态（启动失败原因展示用）
+  agentVersions: Map<string, string>; // agent_id → 运行时自报版本（register 捕获，外部安装探测用）
   rpc: (method: string, params: object) => Promise<proto.Message>;
   applyOverride: (agentID: string, override: LaunchOverride | "") => Promise<void>; // 空串 = 清除覆盖
   dropOverride: (agentID: string) => Promise<void>;
@@ -639,6 +645,7 @@ function newLocalUIState(): LocalUIState {
     lastSync: [],
     hosted: undefined,
     hostStates: new Map(),
+    agentVersions: new Map(),
     rpc: () => Promise.reject(new Error("connector 未运行")),
     applyOverride: () => Promise.reject(new Error("connector 未运行")),
     dropOverride: () => Promise.reject(new Error("connector 未运行")),
@@ -770,7 +777,13 @@ async function mainConnector(cfg: ClientConfig, connectorID: string, ui: LocalUI
       if (events) {
         void (async () => {
           for await (const ev of events) {
-            if (ev.method === proto.METHOD_LIFECYCLE_REGISTER) continue;
+            // register 虽然不透传（身份以 sync 为准），但版本号是运行时真相——
+            // 外部安装的产品靠它探测版本，不猜目录名
+            if (ev.method === proto.METHOD_LIFECYCLE_REGISTER) {
+              const v = (ev.params as { version?: string } | undefined | null)?.version;
+              if (v) ui.agentVersions.set(a.agent_id, v);
+              continue;
+            }
             const m = bridgeAgentEvent(currentWS, a.agent_id, adapter, ev, pendingInvokes);
             if (m && currentWS) safeSend(currentWS, m);
           }
@@ -780,6 +793,7 @@ async function mainConnector(cfg: ClientConfig, connectorID: string, ui: LocalUI
             const msg = connType === "stdio" ? "本地子进程已退出" : "本地服务连接已断开";
             logger.error("agent exited unexpectedly", { agent_id: a.agent_id, detail: msg });
             hosted.delete(a.agent_id);
+            ui.agentVersions.delete(a.agent_id);
             h.tasks.cancelAll();
             setHostState(a.agent_id, "failed", msg);
             if (currentWS) sendStatus(currentWS, a.agent_id, proto.AGENT_STATUS_OFFLINE);
@@ -796,6 +810,7 @@ async function mainConnector(cfg: ClientConfig, connectorID: string, ui: LocalUI
   async function dropAgent(agentID: string): Promise<void> {
     cancelRetry(agentID);
     ui.hostStates.delete(agentID);
+    ui.agentVersions.delete(agentID);
     const h = hosted.get(agentID);
     if (!h) return;
     hosted.delete(agentID);
@@ -1055,8 +1070,14 @@ interface InstalledProduct {
   manifest: ProductManifest | null;
 }
 
+// 产品安装根目录可自定义（磁盘规划）；<brand>/<version>/ 内部结构是升级/回滚机制的一部分，不可打散
+let productsRootOverride: string | null = null;
+function setProductsRoot(dir: string): void {
+  productsRootOverride = dir && dir.trim() ? path.resolve(dir.trim()) : null;
+  if (productsRootOverride) fs.mkdirSync(productsRootOverride, { recursive: true });
+}
 function productsRoot(): string {
-  return path.join(os.homedir(), ".agent-manage", "products");
+  return productsRootOverride ?? path.join(os.homedir(), ".agent-manage", "products");
 }
 
 function validBrandSlug(s: string): boolean {
@@ -1326,6 +1347,7 @@ async function buildProductCatalog(cfg: ClientConfig, ui: LocalUIState): Promise
     // 实例判断细分：有实例，且其生效命令落在 products/<brand>/ 内 = 接的是产品目录这份；
     // 有实例但命令在外部（仓库目录/手动指定）= 外部命令接入，不受安装器管理
     const instances = ui.lastSync.filter(a => a.brand_id === b.id);
+    const runtimeVersion = instances.map(a => ui.agentVersions.get(a.agent_id)).find(Boolean) ?? null;
     const instDirPrefix = inst?.install_dir || path.join(productsRoot(), b.name);
     const fromInstall = instances.some(a => {
       const { target } = resolveLaunch(cfg, a);
@@ -1343,6 +1365,7 @@ async function buildProductCatalog(cfg: ClientConfig, ui: LocalUIState): Promise
       remote_size: pkg ? pkg.size : null,
       has_instance: instances.length > 0,
       instance_from_install: fromInstall,
+      runtime_version: runtimeVersion,
       local_run: localRunOf(b.name),
     });
   }
@@ -1426,6 +1449,7 @@ async function handleUIRequest(
         state: hs?.state ?? (ui.hosted?.has(a.agent_id) ? "running" : "stopped"),
         error: hs?.error ?? null,
         retry_at: hs?.retry_at ?? null,
+        version: ui.agentVersions.get(a.agent_id) ?? null,
       };
     });
     sendJSON(res, 200, {
@@ -1434,8 +1458,23 @@ async function handleUIRequest(
       gateway: cfg.gateway,
       connector_id: cfg.connectorID,
       config_path: cfg.configPath,
+      products_dir: productsRoot(),
       agents,
     });
+    return;
+  }
+  if (req.method === "PUT" && p === "/api/settings/products-dir") {
+    const body = await readBody(req);
+    const dir = String(body.dir ?? "").trim();
+    if (dir && !path.isAbsolute(dir)) {
+      sendJSON(res, 400, { error: "请填写绝对路径" });
+      return;
+    }
+    cfg.productsDir = dir;
+    await saveConfig(cfg);
+    setProductsRoot(dir);
+    logger.info("products root changed", { dir: productsRoot() });
+    sendJSON(res, 200, { products_dir: productsRoot() });
     return;
   }
   if (req.method === "POST" && p === "/api/pair") {
@@ -1792,6 +1831,7 @@ async function runPairing(cfg: ClientConfig): Promise<void> {
 async function main(): Promise<void> {
   const cfg = loadClientConfig();
   setLogLevel(cfg.logLevel);
+  setProductsRoot(cfg.productsDir);
 
   // 本地管理页：无论是否已配置都先起来
   const ui = newLocalUIState();

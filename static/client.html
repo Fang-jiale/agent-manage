@@ -224,6 +224,11 @@
                 <span style="flex:1"></span>
                 <button class="btn" id="pkgInstallBtn">离线安装…</button>
             </div>
+            <div class="form-row" style="margin-bottom:12px">
+                <span class="form-hint" style="margin:0;flex-shrink:0">安装目录</span>
+                <input type="text" id="productsDirInput" placeholder="默认 ~/.agent-manage/products（可改到数据盘；内部保持 <品牌>/<版本>/ 结构）" style="min-width:260px" autocomplete="off">
+                <button class="btn" id="productsDirSave">保存</button>
+            </div>
             <div class="table-wrap" style="margin-bottom:0">
                 <table>
                     <thead><tr><th>产品</th><th>类型</th><th>本机</th><th>远程</th><th style="text-align:right">操作</th></tr></thead>
@@ -290,6 +295,7 @@
             ['connDot', 'connText', 'stateCard', 'agentRows', 'agentEmpty', 'agentsError',
              'addCard', 'addBrand', 'addBrandCmd', 'addCmdLabel', 'addName', 'addCmd', 'addBtn', 'addError',
              'productCard', 'pkgFile', 'pkgInstallBtn', 'pkgStatus', 'productRows', 'productEmpty', 'productError',
+             'productsDirInput', 'productsDirSave',
              'toastContainer', 'modalOverlay', 'modalTitle', 'modalText', 'modalOk', 'modalCancel',
              'cmdOverlay', 'cmdAgentLabel', 'cmdLabel', 'cmdInput', 'cmdCancel', 'cmdOk'
             ].forEach(id => { els[id] = document.getElementById(id); });
@@ -605,10 +611,14 @@
                     } else {
                         if (installed) {
                             localCell = '<span class="chip green">已装 ' + escapeHtml(installed) + '</span>';
-                            if (e.has_instance) localCell += '<div class="cell-sub">' + (e.instance_from_install ? '已接入网关（产品目录）' : '已接入网关（外部命令）') + '</div>';
+                            if (e.has_instance) localCell += '<div class="cell-sub">' +
+                                (e.instance_from_install ? '已接入网关（产品目录' + (e.runtime_version && e.runtime_version !== installed ? '，运行 v' + escapeHtml(e.runtime_version) : '') + '）'
+                                    : '已接入网关（外部命令' + (e.runtime_version ? '，运行 v' + escapeHtml(e.runtime_version) : '') + '）') + '</div>';
                             if (localRun.running) localCell += '<div class="cell-sub" style="color:var(--success)">本地运行中</div>';
                         } else if (e.has_instance) {
-                            localCell = '<span class="chip amber">未安装 · 外部命令接入</span><div class="cell-sub">命令在产品目录外，不受升级/卸载管理</div>';
+                            localCell = '<span class="chip amber">未安装 · 外部命令接入' +
+                                (e.runtime_version ? ' · 运行 v' + escapeHtml(e.runtime_version) : '') + '</span>' +
+                                '<div class="cell-sub">命令在产品目录外，不受升级/卸载管理</div>';
                         } else {
                             localCell = '<span class="chip">未安装</span>';
                         }
@@ -735,6 +745,22 @@
                 }
             });
 
+            /* ---------- 安装目录设置 ---------- */
+
+            els.productsDirSave.addEventListener('click', async () => {
+                const dir = els.productsDirInput.value.trim();
+                els.productsDirSave.disabled = true;
+                try {
+                    const r = await api('/api/settings/products-dir', jsonOpts('PUT', { dir }));
+                    showToast('安装目录已保存：' + (r.products_dir || '默认'), 'success');
+                    loadProducts();
+                } catch (e) {
+                    showToast('保存失败：' + (e.message || e), 'error');
+                } finally {
+                    els.productsDirSave.disabled = false;
+                }
+            });
+
             /* ---------- 轮询 ---------- */
 
             async function loadState() {
@@ -745,6 +771,9 @@
                     showError(els.agentsError, '');
                     els.addCard.style.display = s.configured ? '' : 'none';
                     els.productCard.style.display = s.configured ? '' : 'none';
+                    if (s.products_dir && document.activeElement !== els.productsDirInput) {
+                        els.productsDirInput.value = s.products_dir;
+                    }
                     // 产品列表本地扫描有 IO，节流到 15s；安装/卸载/建实例后手动刷
                     if (s.configured && Date.now() - lastProductsLoad > 15000) loadProducts();
                     if (s.configured && s.connected && !brandsLoaded) loadBrands();
