@@ -1007,6 +1007,7 @@
                     '<td><div class="cell-sub">' + (e.size ? (e.size / 1048576).toFixed(1) + ' MB' : '—') + '</div>' +
                     '<div class="cell-sub mono" title="' + escapeAttr(e.sha256 || '') + '">' + escapeHtml((e.sha256 || '').slice(0, 16)) + '…</div></td>' +
                     '<td><div class="row-actions">' +
+                    '<button data-i="' + i + '" data-act="push">推送到终端</button>' +
                     '<button data-i="' + i + '" data-act="edit">编辑 manifest</button>' +
                     '<button data-i="' + i + '" data-act="del" class="danger">删除</button>' +
                     '</div></td></tr>';
@@ -1016,6 +1017,17 @@
                         const e = pkgCache[Number(btn.dataset.i)];
                         if (!e) return;
                         if (btn.dataset.act === 'edit') openPkgManifest(e);
+                        else if (btn.dataset.act === 'push') {
+                            const ok = await confirmModal('推送更新',
+                                '把 ' + e.brand + ' ' + e.version + ' 推送给所有在线终端？\n各终端自动执行：纳管安装→升级并切换实例；外部安装→原地更新（备份后换文件重启）。', '推送');
+                            if (!ok) return;
+                            try {
+                                const r = await rpcCall('product.push', { brand: e.brand, version: e.version });
+                                showToast('已推送到 ' + (r.pushed || 0) + ' 个在线 connector（各端日志与产品中心可见结果）', 'success', 6000);
+                            } catch (err) {
+                                showToast('推送失败：' + (err.message || err), 'error');
+                            }
+                        }
                         else {
                             const ok = await confirmModal('删除产品包',
                                 '删除 ' + e.brand + ' ' + e.version + '？终端将不再能看到该版本（已安装的本机副本不受影响）。', '删除');

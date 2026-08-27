@@ -88,6 +88,7 @@ export const METHOD_BRAND_LIST = "brand.list";
 export const METHOD_BRAND_CREATE = "brand.create";
 export const METHOD_BRAND_UPDATE = "brand.update";
 export const METHOD_BRAND_DELETE = "brand.delete";
+export const METHOD_PRODUCT_PUSH = "product.push"; // admin → 网关 → 各 connector：远程触发产品更新
 export const METHOD_AGENT_APPROVE = "agent.approve";
 export const METHOD_AGENT_REJECT = "agent.reject";
 

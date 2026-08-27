@@ -636,6 +636,7 @@ interface LocalUIState {
   applyOverride: (agentID: string, override: LaunchOverride | "") => Promise<void>; // 空串 = 清除覆盖
   dropOverride: (agentID: string) => Promise<void>;
   retry?: (agentID: string) => Promise<void>; // 手动重试拉起（connector 模式才有）
+  stop?: (agentID: string) => Promise<void>; // 停实例（原地更新前停进程用）
   pairAndConnect?: (gateway: string, code: string, connectorID?: string) => Promise<void>;
 }
 
@@ -825,6 +826,9 @@ async function mainConnector(cfg: ClientConfig, connectorID: string, ui: LocalUI
     await dropAgent(agentID); // 清掉残骸与重试计时，退避计数归零后全新拉起
     await ensureAgent(a);
   };
+  ui.stop = async (agentID: string): Promise<void> => {
+    await dropAgent(agentID);
+  };
 
   // 全量对账：目标集里没有的下线，缺的上起并注册；已有的重注册（重连恢复）
   function applySync(params: proto.ConnectorSyncParams): void {
@@ -913,6 +917,64 @@ async function mainConnector(cfg: ClientConfig, connectorID: string, ui: LocalUI
         case proto.METHOD_CONNECTOR_SYNC:
           applySync(proto.decodeParams<proto.ConnectorSyncParams>(msg));
           break;
+        case proto.METHOD_PRODUCT_PUSH: {
+          // 管理端远程推送：本机装过/在跑才动作，否则忽略。纳管安装走升级+实例重指向；
+          // 外部安装走原地更新（探测记忆的路径）
+          const p = (msg.params ?? {}) as { brand?: string; version?: string };
+          const brand = String(p.brand ?? "");
+          const version = String(p.version ?? "");
+          if (!brand || !version) break;
+          void (async () => {
+            const installed = listInstalledProducts().some(x => x.brand === brand);
+            const externals = loadExternals();
+            logger.info("product push received", { brand, version, installed });
+            if (installed) {
+              const { buf, entry } = await fetchRemotePackage(cfg, brand, version);
+              const r = installProduct(buf, brand + "-" + version + ".tar.gz",
+                typeof entry.sha256 === "string" ? entry.sha256 : null,
+                entry.manifest as Record<string, unknown> | undefined);
+              // 实例重指向（与 install-remote 同款）
+              const manifest = entry.manifest as unknown as ProductManifest;
+              const ov = overrideTargetFor(manifest, r.install_dir);
+              if (ov) {
+                try {
+                  const bl = await ui.rpc(proto.METHOD_BRAND_LIST, {});
+                  const brands = bl.error ? [] : ((bl.result as { brands?: proto.BrandInfo[] }).brands || []);
+                  const match = brands.find(b => b.name === manifest.brand || b.name === (manifest.name || manifest.brand));
+                  if (match) {
+                    for (const a of ui.lastSync) {
+                      if (a.brand_id === match.id) await ui.applyOverride(a.agent_id, ov);
+                    }
+                  }
+                } catch { /* 重指向失败不影响安装 */ }
+              }
+              logger.info("product push: managed upgrade done", { brand, version, dir: r.install_dir });
+              return;
+            }
+            // 外部安装：原地更新（记忆路径；没有记忆就记日志等下次探测）
+            const bl = await ui.rpc(proto.METHOD_BRAND_LIST, {}).catch(() => null);
+            const brands = bl && !bl.error ? ((bl.result as { brands?: proto.BrandInfo[] }).brands || []) : [];
+            const match = brands.find(b => b.name === brand);
+            const ext = (match && externals[match.id]) || null;
+            if (!ext) {
+              logger.info("product push ignored: not installed here", { brand });
+              return;
+            }
+            const instanceIDs: string[] = [];
+            if (match) {
+              for (const a of ui.lastSync) {
+                if (a.brand_id === match.id) instanceIDs.push(a.agent_id);
+              }
+            }
+            for (const id of instanceIDs) { if (ui.stop) await ui.stop(id); }
+            if (localRuns.has(brand)) { try { stopLocalRun(brand); } catch { /* 未在跑 */ } }
+            const { buf, entry } = await fetchRemotePackage(cfg, brand, version);
+            const r = updateInPlace(ext.path, buf, typeof entry.sha256 === "string" ? entry.sha256 : null);
+            for (const id of instanceIDs) { if (ui.retry) await ui.retry(id).catch(() => {}); }
+            logger.info("product push: in-place update done", { brand, version, path: ext.path, backup: r.backup });
+          })().catch((e) => logger.error("product push failed", { brand, version, error: String(e) }));
+          break;
+        }
         case proto.METHOD_CONNECTOR_RESTART: {
           // 重启单实例：杀子进程后按原目标重建，agent_id 不变（程序更新场景）
           const p = proto.decodeParams<proto.ConnectorRestartParams>(msg);
@@ -1263,6 +1325,68 @@ function launchEndpoint(target: string): { launched: boolean; error?: string } {
   }
 }
 
+// ---- 原地更新：对任意已探测路径下发新版本（备份→换目录→重启→可回滚） ----
+
+// 安全校验：拒绝系统目录与 Git 仓库（原地覆盖会毁版本库），要求可写
+function inPlaceBlockReason(dir: string): string | null {
+  const blocked = [/^\/System/i, /^\/usr/i, /^\/bin/i, /^\/sbin/i, /^\/etc/i, /^\/Applications/i, /^\/Library/i, /^C:\\Windows/i];
+  for (const re of blocked) if (re.test(dir)) return "系统/应用目录不允许原地更新";
+  let cur = path.resolve(dir);
+  for (let i = 0; i < 24; i++) {
+    if (existsSync(path.join(cur, ".git"))) return "路径位于 Git 仓库内（" + cur + "），原地更新会破坏版本库——请改用纳管安装";
+    const parent = path.dirname(cur);
+    if (parent === cur) break;
+    cur = parent;
+  }
+  try { fs.accessSync(dir, fs.constants.W_OK); } catch { return "目录不可写"; }
+  return null;
+}
+
+function updateInPlace(destDir: string, buf: Buffer, sha256?: string | null): { files: number; backup: string } {
+  if (!existsSync(destDir) || !fs.statSync(destDir).isDirectory()) throw new Error("目标路径不存在或不是目录: " + destDir);
+  const block = inPlaceBlockReason(destDir);
+  if (block) throw new Error(block);
+  if (sha256) {
+    const actual = crypto.createHash("sha256").update(buf).digest("hex");
+    if (actual !== sha256.toLowerCase()) throw new Error("校验和不匹配：包可能损坏或被替换");
+  }
+  const parent = path.dirname(destDir);
+  const staging = fs.mkdtempSync(path.join(parent, ".update-staging-"));
+  const backup = destDir + ".bak-" + Date.now();
+  try {
+    const files = extractTarGz(buf, staging);
+    // 备份旧的 → 新内容顶上（同文件系统 rename，原子且可回滚）
+    fs.renameSync(destDir, backup);
+    fs.renameSync(staging, destDir);
+    // 只留最近一份备份
+    let baks = fs.readdirSync(parent).filter(n => n.startsWith(path.basename(destDir) + ".bak-"));
+    baks.sort();
+    for (const old of baks.slice(0, -1)) fs.rmSync(path.join(parent, old), { recursive: true, force: true });
+    logger.info("product updated in place", { dir: destDir, backup, files });
+    return { files, backup };
+  } catch (e) {
+    if (existsSync(backup) && !existsSync(destDir)) {
+      try { fs.renameSync(backup, destDir); } catch { /* 回滚失败只能人工介入 */ }
+    }
+    fs.rmSync(staging, { recursive: true, force: true });
+    throw e;
+  }
+}
+
+// 从网关取包：目录条目 + 包体（install-remote 与原地更新共用语义）
+async function fetchRemotePackage(cfg: ClientConfig, brand: string, version: string): Promise<{
+  buf: Buffer; entry: Record<string, unknown>;
+}> {
+  const base = gatewayHttpBase(cfg.gateway);
+  const cr = await fetch(base + "/products/catalog", { signal: AbortSignal.timeout(8000) });
+  const catalog = cr.ok ? ((await cr.json()) as { products?: Array<Record<string, unknown>> }).products || [] : [];
+  const entry = catalog.find(x => x.brand === brand && x.version === version);
+  if (!entry) throw new Error("网关目录里没有 " + brand + " " + version);
+  const dr = await fetch(base + "/products/" + brand + "/" + version + "/download", { signal: AbortSignal.timeout(300_000) });
+  if (!dr.ok) throw new Error("下载失败（HTTP " + dr.status + "）");
+  return { buf: Buffer.from(await dr.arrayBuffer()), entry };
+}
+
 // ---- 本地运行（不接网关）：把已装产品按 manifest 命令拉起，日志落文件，可停 ----
 const localRuns = new Map<string, { child: ReturnType<typeof spawn>; logPath: string; startedAt: number }>();
 
@@ -1321,6 +1445,77 @@ function stopLocalRun(brand: string): void {
   logger.info("product local run stopped", { brand });
 }
 
+// ---- 外部安装探测：从实例生效命令解析安装根路径，记忆到 externals.json ----
+// 实例停掉后仍可见可更新（记忆最后一次看到的路径/版本）；探测不依赖文件系统扫描。
+
+interface ExternalInstall { path: string; version: string | null; last_seen: number; }
+
+function externalsPath(): string {
+  return path.join(productsRoot(), ".externals.json");
+}
+function loadExternals(): Record<string, ExternalInstall> {
+  try {
+    return JSON.parse(fs.readFileSync(externalsPath(), "utf8")) as Record<string, ExternalInstall>;
+  } catch {
+    return {};
+  }
+}
+function saveExternals(map: Record<string, ExternalInstall>): void {
+  fs.mkdirSync(productsRoot(), { recursive: true });
+  fs.writeFileSync(externalsPath(), JSON.stringify(map, null, 2), "utf8");
+}
+
+// 从启动命令解析安装根：跳过解释器后取第一个磁盘上存在的文件型 token 的所在目录。
+// node /abs/path/bin.js --config x.yml → /abs/path；相对路径按 connector cwd 解析；
+// 纯 URL（http/ws 型）返回 null
+const INTERPRETERS = new Set(["node", "node.exe", "python", "python3", "python.exe", "ruby", "deno", "bun", "env"]);
+function installPathOf(target: string): string | null {
+  const tokens = target.split(/\s+/).filter(Boolean);
+  for (const t of tokens) {
+    if (!t.includes("/") && !t.includes("\\")) continue;
+    if (/^[a-z]+:\/\//i.test(t)) continue; // URL
+    if (/^-/.test(t)) continue; // flag
+    const probe = t.replace(/^['"]|['"]$/g, "").replace(/\/$/, "");
+    if (INTERPRETERS.has(path.basename(probe))) continue; // 解释器不是产物
+    for (const cand of [path.resolve(process.cwd(), probe), probe]) {
+      try {
+        if (fs.existsSync(cand) && fs.statSync(cand).isFile()) return path.dirname(path.resolve(cand));
+      } catch { /* 不可访问的 token 跳过 */ }
+    }
+  }
+  return null;
+}
+
+// 探测并记忆：以运行实例为准刷新 externals 映射（brand → path/version）
+function refreshExternals(cfg: ClientConfig, ui: LocalUIState): Record<string, ExternalInstall> {
+  const map = loadExternals();
+  const managedRoot = productsRoot() + path.sep;
+  let dirty = false;
+  for (const a of ui.lastSync) {
+    const { target } = resolveLaunch(cfg, a);
+    if (!target) continue;
+    const root = installPathOf(target);
+    if (!root) continue;
+    if ((root + path.sep).startsWith(managedRoot)) {
+      // 纳管安装走 products 目录：清掉该品牌可能残留的旧外部记忆
+      if (map[a.brand_id]) { delete map[a.brand_id]; dirty = true; }
+      continue;
+    }
+    const ver = ui.agentVersions.get(a.agent_id) ?? null;
+    const prev = map[a.brand_id];
+    if (!prev || prev.path !== root || prev.version !== ver) {
+      // brand_id 做键（品牌改名也不串），展示时再换回品牌名
+      map[a.brand_id] = { path: root, version: ver, last_seen: Date.now() };
+      dirty = true;
+    } else {
+      prev.last_seen = Date.now();
+      dirty = true;
+    }
+  }
+  if (dirty) saveExternals(map);
+  return map;
+}
+
 // 统一产品目录：网关品牌 × 远程产品包 × 本机安装 × 本地运行状态 合成一张表
 async function buildProductCatalog(cfg: ClientConfig, ui: LocalUIState): Promise<unknown[]> {
   const base = gatewayHttpBase(cfg.gateway);
@@ -1337,6 +1532,11 @@ async function buildProductCatalog(cfg: ClientConfig, ui: LocalUIState): Promise
     if (!bl.error) brands = ((bl.result as { brands?: proto.BrandInfo[] }).brands || []);
   } catch { /* 未连接 */ }
   const installed = listInstalledProducts();
+  const externals = refreshExternals(cfg, ui);
+  const externalOf = (brandID: string | null, brandName: string): ExternalInstall | null => {
+    if (brandID && externals[brandID]) return externals[brandID];
+    return Object.values(externals).find(e => e.path.includes(brandName)) ?? null;
+  };
   const rows: Record<string, unknown>[] = [];
   const seen = new Set<string>();
   for (const b of brands) {
@@ -1366,6 +1566,7 @@ async function buildProductCatalog(cfg: ClientConfig, ui: LocalUIState): Promise
       has_instance: instances.length > 0,
       instance_from_install: fromInstall,
       runtime_version: runtimeVersion,
+      external: fromInstall ? null : externalOf(b.id, b.name),
       local_run: localRunOf(b.name),
     });
   }
@@ -1616,6 +1817,57 @@ async function handleUIRequest(
   }
 
   // 一键远程安装：网关下载 → 服务端 sha256 校验 → 安装 → 已有实例自动重指向新版本目录
+  // 原地更新：对外部安装路径直接下发新版本（探测记忆的路径，或请求体显式指定）
+  const muip = /^\/api\/products\/([A-Za-z0-9._-]+)\/((?:\d+\.){2}\d+(?:-[0-9A-Za-z.+-]+)?)\/update-in-place$/.exec(p);
+  if (muip && req.method === "POST") {
+    const brand = muip[1];
+    const version = muip[2];
+    try {
+      const body = await readBody(req);
+      let dest = String(body.path ?? "").trim();
+      if (!dest) {
+        // 未指定路径：用 externals 记忆（brand_id 优先，其次品牌名模糊匹配）
+        const externals = loadExternals();
+        const bl = await ui.rpc(proto.METHOD_BRAND_LIST, {}).catch(() => null);
+        const brands = bl && !bl.error ? ((bl.result as { brands?: proto.BrandInfo[] }).brands || []) : [];
+        const match = brands.find(b => b.name === brand);
+        const ext = (match && externals[match.id]) || Object.values(externals).find(e => e.path.includes(brand));
+        if (!ext) throw new Error("未指定 path，且没有该产品的外部安装记忆（先让实例跑一次即可探测到）");
+        dest = ext.path;
+      }
+      const { buf, entry } = await fetchRemotePackage(cfg, brand, version);
+      // 目标目录与该品牌实例解析出的路径对齐校验（防误伤别的目录）
+      const manifest = entry.manifest as unknown as ProductManifest;
+      // 停掉本品牌相关进程：网关实例 + 本地运行
+      const bl = await ui.rpc(proto.METHOD_BRAND_LIST, {}).catch(() => null);
+      const brands = bl && !bl.error ? ((bl.result as { brands?: proto.BrandInfo[] }).brands || []) : [];
+      const match = brands.find(b => b.name === brand || b.name === (manifest.name || brand));
+      const instanceIDs: string[] = [];
+      if (match) {
+        for (const a of ui.lastSync) {
+          if (a.brand_id !== match.id) continue;
+          instanceIDs.push(a.agent_id);
+          if (ui.stop) await ui.stop(a.agent_id);
+        }
+      }
+      if (localRuns.has(brand)) {
+        try { stopLocalRun(brand); } catch { /* 未在跑 */ }
+      }
+      const r = updateInPlace(dest, buf, typeof entry.sha256 === "string" ? entry.sha256 : null);
+      // 重启实例（同路径新内容；启动失败可人工回滚 backup）
+      const restarted: string[] = [];
+      for (const id of instanceIDs) {
+        if (ui.retry) {
+          try { await ui.retry(id); restarted.push(id); } catch { /* 重试调度已接管 */ }
+        }
+      }
+      sendJSON(res, 200, { brand, version, path: dest, files: r.files, backup: r.backup, restarted });
+    } catch (e) {
+      sendJSON(res, 400, { error: e instanceof Error ? e.message : String(e) });
+    }
+    return;
+  }
+
   const mir = /^\/api\/products\/([A-Za-z0-9._-]+)\/((?:\d+\.){2}\d+(?:-[0-9A-Za-z.+-]+)?)\/install-remote$/.exec(p);
   if (mir && req.method === "POST") {
     const brand = mir[1];

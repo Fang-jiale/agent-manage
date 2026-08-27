@@ -615,16 +615,19 @@
                                 (e.instance_from_install ? '已接入网关（产品目录' + (e.runtime_version && e.runtime_version !== installed ? '，运行 v' + escapeHtml(e.runtime_version) : '') + '）'
                                     : '已接入网关（外部命令' + (e.runtime_version ? '，运行 v' + escapeHtml(e.runtime_version) : '') + '）') + '</div>';
                             if (localRun.running) localCell += '<div class="cell-sub" style="color:var(--success)">本地运行中</div>';
-                        } else if (e.has_instance) {
-                            // 外部目录装着、且正在跑——它就是装了的，只是不受本安装器管理
+                        } else if (e.has_instance || e.external) {
+                            // 外部目录装着（或装过）——它就是装了的，探测到的路径与运行版本都显示
+                            const ext = e.external || {};
                             localCell = '<span class="chip amber">外部安装' +
-                                (e.runtime_version ? ' · 运行 v' + escapeHtml(e.runtime_version) : '') + '</span>' +
-                                '<div class="cell-sub">装在产品目录外，不受升级/卸载管理</div>';
+                                (e.runtime_version || ext.version ? ' · 运行 v' + escapeHtml(e.runtime_version || ext.version) : '') + '</span>' +
+                                (ext.path ? '<div class="cell-sub" title="点击复制">' + escapeHtml(ext.path) + '</div>' : '') +
+                                (!e.has_instance ? '<div class="cell-sub">实例未运行（探测记忆）</div>' : '');
                         } else {
                             localCell = '<span class="chip">未安装</span>';
                         }
                         if (!installed && remote) actions += '<button data-act="install" data-brand="' + escapeAttr(e.brand) + '" data-ver="' + escapeAttr(remote) + '" class="btn-primary">' + (e.has_instance ? '纳管安装 ' : '安装 ') + escapeHtml(remote) + '</button> ';
                         if (canUpgrade) actions += '<button data-act="install" data-brand="' + escapeAttr(e.brand) + '" data-ver="' + escapeAttr(remote) + '">升级到 ' + escapeHtml(remote) + '</button> ';
+                        if (!installed && remote && e.external && e.external.path) actions += '<button data-act="inplace" data-brand="' + escapeAttr(e.brand) + '" data-ver="' + escapeAttr(remote) + '" data-path="' + escapeAttr(e.external.path) + '" class="danger">原地更新此路径</button> ';
                         if (installed) {
                             if (!e.has_instance) actions += '<button data-act="instantiate" data-brand="' + escapeAttr(e.brand) + '">接入网关</button> ';
                             actions += localRun.running
@@ -651,6 +654,7 @@
                         if (act === 'open') launchBrand(btn.dataset.id);
                         else if (act === 'install') installRemote(btn.dataset.brand, btn.dataset.ver, btn);
                         else if (act === 'instantiate') instantiateProduct(btn.dataset.brand);
+                        else if (act === 'inplace') updateInPlace(btn.dataset.brand, btn.dataset.ver, btn.dataset.path, btn);
                         else if (act === 'lrstart') localRunOp(btn.dataset.brand, 'start');
                         else if (act === 'lrstop') localRunOp(btn.dataset.brand, 'stop');
                         else if (act === 'uninstall') uninstallProduct(btn.dataset.brand);
@@ -699,6 +703,24 @@
                     loadProducts();
                 } catch (e) {
                     showToast('接入失败：' + (e.message || e), 'error', 6000);
+                }
+            }
+
+            async function updateInPlace(brand, version, destPath, btn) {
+                const ok = await confirmModal('原地更新',
+                    '把 ' + brand + ' ' + version + ' 直接更新到外部路径？\n\n' + destPath +
+                    '\n\n原目录会整体备份为 .bak-<时间戳>，本品牌实例将停止→换文件→自动重启；启动异常时可人工把备份目录改回原名回滚。',
+                    '原地更新');
+                if (!ok) return;
+                if (btn) { btn.disabled = true; btn.textContent = '更新中…'; }
+                try {
+                    const r = await api('/api/products/' + encodeURIComponent(brand) + '/' + encodeURIComponent(version) + '/update-in-place',
+                        jsonOpts('POST', { path: destPath }));
+                    showToast('已更新 ' + r.path + '（' + r.files + ' 个文件）\n备份: ' + r.backup + (r.restarted.length ? '；已重启 ' + r.restarted.length + ' 个实例' : ''), 'success', 8000);
+                    loadProducts(); loadState();
+                } catch (e) {
+                    showToast('原地更新失败：' + (e.message || e), 'error', 8000);
+                    renderProducts();
                 }
             }
 

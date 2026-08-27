@@ -2005,6 +2005,26 @@ async function handleBrandUpdate(hub: Hub, user: UserConn, msg: proto.Message, d
   sendMsg(user.ws, proto.newResponse(msg.id ?? "", { status: "ok" }));
 }
 
+// 远程推送产品更新：广播给所有在线 connector，各端自行决定纳管升级/原地更新/忽略
+async function handleProductPush(hub: Hub, user: UserConn, msg: proto.Message, _db: Db): Promise<void> {
+  void _db;
+  const params = proto.decodeParams<{ brand?: string; version?: string }>(msg);
+  const brand = String(params.brand ?? "");
+  const version = String(params.version ?? "");
+  if (!brand || !version) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "brand/version required");
+    return;
+  }
+  const note = proto.newNotification(proto.METHOD_PRODUCT_PUSH, { brand, version });
+  let n = 0;
+  for (const c of hub.connectors.values()) {
+    hub.trySend(c.ws, note);
+    n++;
+  }
+  logger.info("product update pushed", { by: user.userID, brand, version, connectors: n });
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", { status: "ok", pushed: n }));
+}
+
 async function handleBrandDelete(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
   if (!(await requireAdmin(hub, user, msg, db))) return;
   const params = proto.decodeParams<proto.BrandDeleteParams>(msg);
@@ -2976,6 +2996,10 @@ export function handleUserMessage(hub: Hub, user: UserConn, raw: string): void {
 
     case proto.METHOD_BRAND_DELETE:
       withDb(hub, user, msg, (db) => handleBrandDelete(hub, user, msg, db));
+      break;
+
+    case proto.METHOD_PRODUCT_PUSH:
+      withDb(hub, user, msg, (db) => handleProductPush(hub, user, msg, db));
       break;
 
     case proto.METHOD_AGENT_APPROVE:
