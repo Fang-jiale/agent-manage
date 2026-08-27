@@ -245,6 +245,8 @@
                     <option value="stdio">stdio · 命令启动</option>
                     <option value="http">http · 服务地址</option>
                     <option value="ws">ws · 服务地址</option>
+                    <option value="web">web · 产品网页（打开网址）</option>
+                    <option value="app">app · 独立应用（本机路径）</option>
                 </select>
             </div>
             <div class="form-field" id="brandLaunchCmdField">
@@ -252,8 +254,8 @@
                 <textarea id="brandFormLaunchCmd" rows="2" placeholder="如：node package/dist/ywmatrix-shim.mjs --workdir /path --permission-mode default"></textarea>
             </div>
             <div class="form-field" id="brandEndpointField" style="display:none">
-                <label>服务地址</label>
-                <input type="text" id="brandFormEndpoint" placeholder="如：http://127.0.0.1:9001 或 ws://127.0.0.1:9002" autocomplete="off">
+                <label>服务地址 / 网址 / 应用路径</label>
+                <input type="text" id="brandFormEndpoint" placeholder="http/ws 服务地址、https:// 网页地址或本机应用路径" autocomplete="off">
             </div>
             <div class="form-field">
                 <label>Logo</label>

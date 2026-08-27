@@ -1,7 +1,11 @@
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
+import crypto from "node:crypto";
+import zlib from "node:zlib";
+import fs from "node:fs";
 import { readFileSync, existsSync, promises as fsp } from "node:fs";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
 import * as proto from "./protocol.ts";
@@ -611,7 +615,7 @@ async function createAdapter(connType: string, target: string, agentID?: string)
 // ---- 本地管理页共享状态：UI HTTP 服务与 connector 主循环经它交互 ----
 
 interface HostState {
-  state: "starting" | "running" | "failed";
+  state: "starting" | "running" | "failed" | "stopped";
   error?: string; // failed 时的启动/退出原因
   at: number; // 最近一次状态变迁时间
   retry_at?: number; // 下次自动重试时间（epoch ms）
@@ -732,6 +736,11 @@ async function mainConnector(cfg: ClientConfig, connectorID: string, ui: LocalUI
 
   async function ensureAgent(a: proto.ConnectorSyncAgent): Promise<void> {
     const { connType, target } = resolveLaunch(cfg, a);
+    // web/app 是"产品"型品牌（打开网页/独立应用），不是可托管的服务——不拉进程、不进重试循环
+    if (connType === "web" || connType === "app") {
+      setHostState(a.agent_id, "stopped", "产品型品牌（" + connType + "），用「打开」启动，不由此处托管");
+      return;
+    }
     let h = hosted.get(a.agent_id);
     if (h && (h.connType !== connType || h.target !== target)) {
       // 连接方式/目标变更：停掉旧本地服务，按新配置重建
@@ -991,6 +1000,15 @@ function uiPagePath(): string {
   return path.resolve(here, "..", "static", "client.html");
 }
 
+function readRawBody(req: http.IncomingMessage): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+
 function readBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -1009,6 +1027,242 @@ function readBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
 function sendJSON(res: http.ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
+}
+
+// ---- 产品安装引擎：tar.gz 安装包（内含 manifest.json）→ ~/.agent-manage/products/<brand>/<version>/ ----
+// 目录约定（详见 docs/installer-spec.md）：
+//   products/<brand>/<version>/   侧车式版本目录，升级装新目录不覆盖
+//   products/<brand>/current      指针文件，内容为当前版本号（原子切换）
+//   products/<brand>/manifest.json 当前版本 manifest 副本（列表展示用）
+
+interface ProductManifest {
+  format: number;
+  brand: string; // 品牌 slug，同时作目录名
+  version: string; // semver
+  kind: string; // stdio | http | ws | web | app
+  name?: string;
+  description?: string;
+  launch_cmd?: string | null; // kind=stdio：可含 {{install_dir}} 占位
+  endpoint?: string | null; // kind=http/ws/web/app：地址或应用路径
+  capabilities?: proto.Capability[];
+}
+
+interface InstalledProduct {
+  brand: string;
+  version: string; // current 指向的版本
+  versions: string[];
+  install_dir: string;
+  manifest: ProductManifest | null;
+}
+
+function productsRoot(): string {
+  return path.join(os.homedir(), ".agent-manage", "products");
+}
+
+function validBrandSlug(s: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(s);
+}
+function validVersion(s: string): boolean {
+  return /^\d+\.\d+\.\d+(-[0-9A-Za-z.+-]+)?$/.test(s);
+}
+
+// 语义化版本三段比较（忽略 prerelease 细节，够安装器防降级用）
+function versionTuple(v: string): [number, number, number] {
+  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(v);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : [0, 0, 0];
+}
+function versionLt(a: string, b: string): boolean {
+  const [a1, a2, a3] = versionTuple(a);
+  const [b1, b2, b3] = versionTuple(b);
+  return a1 !== b1 ? a1 < b1 : a2 !== b2 ? a2 < b2 : a3 < b3;
+}
+
+function readPointer(brandRoot: string): string | null {
+  try {
+    const v = fs.readFileSync(path.join(brandRoot, "current"), "utf8").trim();
+    return validVersion(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+// 只保留 current + 最新 2 个版本目录，其余清理
+function pruneVersions(brandRoot: string, keepCurrent: string): void {
+  let versions: string[] = [];
+  try {
+    versions = fs.readdirSync(brandRoot, { withFileTypes: true })
+      .filter(e => e.isDirectory() && validVersion(e.name)).map(e => e.name);
+  } catch { return; }
+  versions.sort((a, b) => (versionLt(a, b) ? -1 : versionLt(b, a) ? 1 : 0));
+  const keep = new Set([keepCurrent, ...versions.slice(-2)]);
+  for (const v of versions) {
+    if (!keep.has(v)) {
+      fs.rmSync(path.join(brandRoot, v), { recursive: true, force: true });
+      logger.info("pruned old product version", { brand: path.basename(brandRoot), version: v });
+    }
+  }
+}
+
+function listInstalledProducts(): InstalledProduct[] {
+  const root = productsRoot();
+  let brands: fs.Dirent[] = [];
+  try {
+    brands = fs.readdirSync(root, { withFileTypes: true }).filter(e => e.isDirectory() && !e.name.startsWith("."));
+  } catch {
+    return []; // 目录不存在 = 没装过
+  }
+  return brands.map(e => {
+    const brandRoot = path.join(root, e.name);
+    const current = readPointer(brandRoot);
+    let versions: string[] = [];
+    try {
+      versions = fs.readdirSync(brandRoot, { withFileTypes: true })
+        .filter(d => d.isDirectory() && validVersion(d.name)).map(d => d.name);
+    } catch { /* 空品牌目录 */ }
+    let manifest: ProductManifest | null = null;
+    try {
+      manifest = JSON.parse(fs.readFileSync(path.join(brandRoot, "manifest.json"), "utf8")) as ProductManifest;
+    } catch { /* 无副本 */ }
+    return {
+      brand: e.name,
+      version: current ?? versions[versions.length - 1] ?? "",
+      versions,
+      install_dir: current ? path.join(brandRoot, current) : "",
+      manifest,
+    };
+  });
+}
+
+// 最小 ustar/tar 读取器：文件与目录、GNU 长名(L)、pax 头跳过；拒绝路径穿越
+function extractTarGz(buf: Buffer, dest: string): number {
+  const tar = zlib.gunzipSync(buf);
+  const str = (b: Buffer, start: number, len: number): string => {
+    const slice = b.subarray(start, start + len);
+    const end = slice.indexOf(0);
+    return slice.subarray(0, end === -1 ? len : end).toString("utf8").trim();
+  };
+  let off = 0;
+  let files = 0;
+  let longName: string | null = null;
+  while (off + 512 <= tar.length) {
+    const header = tar.subarray(off, off + 512);
+    if (header.every(v => v === 0)) break; // 结束全零块
+    const nameField = str(header, 0, 100);
+    const sizeStr = str(header, 124, 12);
+    const size = parseInt(sizeStr, 8) || 0;
+    const type = String.fromCharCode(header[156] || 0x30);
+    const prefix = str(header, 345, 155);
+    const name = longName ?? (prefix ? prefix + "/" + nameField : nameField);
+    longName = null;
+    const dataStart = off + 512;
+    const data = tar.subarray(dataStart, dataStart + size);
+    off = dataStart + Math.ceil(size / 512) * 512;
+    if (type === "L") { // GNU 长文件名：内容是下一条目的路径
+      longName = data.toString("utf8").replace(/\0+$/, "");
+      continue;
+    }
+    if (type === "x" || type === "g") continue; // pax 扩展头：跳过
+    if (type !== "0" && type !== "\0" && type !== "5") continue; // 链接等不支持
+    const rel = name.replace(/^\.?\//, "").replace(/\/+$/, "");
+    if (rel === "" || rel === ".") continue; // 根目录条目（./ 或 ./dir/ 已归一化）
+    if (rel.includes("..") || path.isAbsolute(rel)) {
+      throw new Error("unsafe entry in archive: " + name);
+    }
+    const target = path.join(dest, rel);
+    if (!target.startsWith(dest + path.sep)) throw new Error("unsafe entry in archive: " + name);
+    if (type === "5") {
+      fs.mkdirSync(target, { recursive: true });
+      continue;
+    }
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, data);
+    fs.chmodSync(target, 0o755); // 产物里的可执行位不依赖打包机
+    files++;
+  }
+  if (files === 0) throw new Error("archive contains no files");
+  return files;
+}
+
+// 安装：staging 解包 → 校验 manifest → 版本目录落位 → 指针切换 → 清旧版本
+function installProduct(buf: Buffer, filename: string, sha256?: string | null): {
+  brand: string; version: string; install_dir: string; files: number; upgraded: boolean;
+} {
+  if (sha256) {
+    const actual = crypto.createHash("sha256").update(buf).digest("hex");
+    if (actual !== sha256.toLowerCase()) throw new Error("校验和不匹配：包可能损坏或被替换");
+  }
+  const root = productsRoot();
+  fs.mkdirSync(root, { recursive: true });
+  const staging = fs.mkdtempSync(path.join(root, ".staging-"));
+  let manifestDir = staging;
+  let manifestPath = path.join(staging, "manifest.json");
+  try {
+    const files = extractTarGz(buf, staging);
+    // manifest 允许在包根，或唯一一级子目录内（tar 打包常见 ./dir/ 前缀）
+    if (!existsSync(manifestPath)) {
+      const dirs = fs.readdirSync(staging, { withFileTypes: true })
+        .filter(e => e.isDirectory() && !e.name.startsWith("."));
+      if (dirs.length === 1) {
+        manifestDir = path.join(staging, dirs[0].name);
+        manifestPath = path.join(manifestDir, "manifest.json");
+      }
+    }
+    if (!existsSync(manifestPath)) throw new Error("安装包内缺少 manifest.json（" + filename + "）");
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as ProductManifest;
+    if (manifest.format !== 1) throw new Error("不支持的 manifest format: " + String(manifest.format));
+    if (!validBrandSlug(manifest.brand)) throw new Error("manifest.brand 非法: " + String(manifest.brand));
+    if (!validVersion(manifest.version)) throw new Error("manifest.version 需要 semver（如 1.0.0）: " + String(manifest.version));
+    if (!["stdio", "http", "ws", "web", "app"].includes(manifest.kind)) {
+      throw new Error("manifest.kind 非法: " + String(manifest.kind));
+    }
+    const brandRoot = path.join(root, manifest.brand);
+    const dest = path.join(brandRoot, manifest.version);
+    if (existsSync(dest)) throw new Error("版本 " + manifest.version + " 已存在（同版本重装请先卸载）");
+    const current = readPointer(brandRoot);
+    if (current && versionLt(manifest.version, current)) {
+      throw new Error("不允许降级安装：当前 " + current + "，包为 " + manifest.version);
+    }
+    fs.mkdirSync(brandRoot, { recursive: true });
+    fs.renameSync(manifestDir, dest);
+    fs.rmSync(staging, { recursive: true, force: true });
+    // 指针 + manifest 副本：先落副本再切指针（失败时指针仍指旧版本）
+    fs.writeFileSync(path.join(brandRoot, "manifest.json"), JSON.stringify(manifest, null, 2), "utf8");
+    fs.writeFileSync(path.join(brandRoot, "current"), manifest.version, "utf8");
+    pruneVersions(brandRoot, manifest.version);
+    logger.info("product installed", { brand: manifest.brand, version: manifest.version, files, upgraded: current !== null });
+    return { brand: manifest.brand, version: manifest.version, install_dir: dest, files, upgraded: current !== null };
+  } catch (e) {
+    fs.rmSync(staging, { recursive: true, force: true });
+    throw e;
+  }
+}
+
+function uninstallProduct(brand: string): void {
+  if (!validBrandSlug(brand)) throw new Error("非法品牌名");
+  const brandRoot = path.join(productsRoot(), brand);
+  if (!existsSync(brandRoot)) throw new Error("未安装: " + brand);
+  fs.rmSync(brandRoot, { recursive: true, force: true });
+  logger.info("product uninstalled", { brand });
+}
+
+// 跨平台拉起：可执行路径直接 spawn，失败回退系统 opener
+function launchEndpoint(target: string): { launched: boolean; error?: string } {
+  try {
+    const child = spawn(target, [], { detached: true, stdio: "ignore", shell: process.platform === "win32" });
+    child.unref();
+    return { launched: true };
+  } catch (e) {
+    const opener = process.platform === "darwin" ? "open"
+      : process.platform === "win32" ? "cmd" : "xdg-open";
+    const args = process.platform === "win32" ? ["/c", "start", "", target] : [target];
+    try {
+      const child = spawn(opener, args, { detached: true, stdio: "ignore" });
+      child.unref();
+      return { launched: true };
+    } catch (e2) {
+      return { launched: false, error: (e instanceof Error ? e.message : String(e)) + "; " + (e2 instanceof Error ? e2.message : String(e2)) };
+    }
+  }
 }
 
 function startLocalUI(addr: string, cfg: ClientConfig, ui: LocalUIState): http.Server {
@@ -1172,6 +1426,124 @@ async function handleUIRequest(
     sendJSON(res, 200, { status: "ok" });
     return;
   }
+
+  /* ---------- 产品中心：安装 / 列表 / 卸载 / 建实例 / 启动 ---------- */
+
+  if (req.method === "GET" && p === "/api/products") {
+    sendJSON(res, 200, { products: listInstalledProducts() });
+    return;
+  }
+
+  if (req.method === "POST" && p === "/api/products/install") {
+    const filename = url.searchParams.get("filename") || "package.tgz";
+    if (!/\.(tar\.gz|tgz)$/i.test(filename)) {
+      sendJSON(res, 400, { error: "仅支持 .tar.gz / .tgz 安装包" });
+      return;
+    }
+    const buf = await readRawBody(req);
+    try {
+      const r = installProduct(buf, filename, url.searchParams.get("sha256"));
+      sendJSON(res, 200, r);
+    } catch (e) {
+      sendJSON(res, 400, { error: e instanceof Error ? e.message : String(e) });
+    }
+    return;
+  }
+
+  const mp = /^\/api\/products\/([^/]+)$/.exec(p);
+  if (mp && req.method === "DELETE") {
+    try {
+      uninstallProduct(decodeURIComponent(mp[1]));
+      sendJSON(res, 200, { status: "ok" });
+    } catch (e) {
+      sendJSON(res, 400, { error: e instanceof Error ? e.message : String(e) });
+    }
+    return;
+  }
+
+  const mip = /^\/api\/products\/([^/]+)\/instantiate$/.exec(p);
+  if (mip && req.method === "POST") {
+    const brand = decodeURIComponent(mip[1]);
+    const products = listInstalledProducts().filter(x => x.brand === brand);
+    const prod = products[0];
+    if (!prod || !prod.manifest) {
+      sendJSON(res, 404, { error: "本机未安装该产品: " + brand });
+      return;
+    }
+    const manifest = prod.manifest;
+    // 在网关品牌目录里找同名品牌（品牌=身份；装的产品与品牌同名约定见 installer-spec）
+    const bl = await ui.rpc(proto.METHOD_BRAND_LIST, {});
+    if (bl.error) {
+      sendJSON(res, 502, { error: bl.error.message });
+      return;
+    }
+    const brands = (bl.result as { brands?: proto.BrandInfo[] }).brands || [];
+    const match = brands.find(b => b.name === manifest.brand || b.name === (manifest.name || manifest.brand));
+    if (!match) {
+      sendJSON(res, 409, { error: "网关品牌目录里没有「" + manifest.brand + "」，请先在管理后台创建同名品牌" });
+      return;
+    }
+    const r = await ui.rpc(proto.METHOD_AGENT_ASSIGN, {
+      connector_id: cfg.connectorID,
+      brand_id: match.id,
+      name: manifest.name || undefined,
+    } satisfies proto.AgentAssignParams);
+    if (r.error) {
+      sendJSON(res, 502, { error: r.error.message });
+      return;
+    }
+    const agentID = (r.result as proto.AgentAssignResult).agent_id;
+    // stdio 产品：launch_cmd 的 {{install_dir}} 解析为本机版本目录，写进本机覆盖
+    if (manifest.kind === "stdio" && manifest.launch_cmd) {
+      const target = manifest.launch_cmd.replace(/\{\{install_dir\}\}/g, prod.install_dir);
+      await ui.applyOverride(agentID, { conn_type: "stdio", target });
+    } else if ((manifest.kind === "http" || manifest.kind === "ws") && manifest.endpoint) {
+      await ui.applyOverride(agentID, { conn_type: manifest.kind, target: manifest.endpoint });
+    }
+    sendJSON(res, 200, { agent_id: agentID, install_dir: prod.install_dir });
+    return;
+  }
+
+  if (req.method === "POST" && p === "/api/launch") {
+    const body = await readBody(req);
+    const brandID = String(body.brand_id ?? "");
+    if (!brandID) {
+      sendJSON(res, 400, { error: "brand_id required" });
+      return;
+    }
+    const bl = await ui.rpc(proto.METHOD_BRAND_LIST, {});
+    if (bl.error) {
+      sendJSON(res, 502, { error: bl.error.message });
+      return;
+    }
+    const brands = (bl.result as { brands?: proto.BrandInfo[] }).brands || [];
+    const b = brands.find(x => x.id === brandID);
+    if (!b) {
+      sendJSON(res, 404, { error: "品牌不存在" });
+      return;
+    }
+    const target = b.endpoint || "";
+    if (b.conn_type === "web") {
+      if (!target) {
+        sendJSON(res, 400, { error: "该品牌未配置网址" });
+        return;
+      }
+      sendJSON(res, 200, { kind: "web", url: target }); // 浏览器侧 window.open
+      return;
+    }
+    if (b.conn_type === "app") {
+      if (!target) {
+        sendJSON(res, 400, { error: "该品牌未配置应用路径" });
+        return;
+      }
+      const r = launchEndpoint(target);
+      sendJSON(res, r.launched ? 200 : 500, r.launched ? { kind: "app", launched: true } : { error: "启动失败: " + r.error });
+      return;
+    }
+    sendJSON(res, 400, { error: "该品牌是托管型（" + b.conn_type + "），在 Agent 列表里管理" });
+    return;
+  }
+
   sendJSON(res, 404, { error: "not found" });
 }
 

@@ -1818,8 +1818,8 @@ async function handleBrandCreate(hub: Hub, user: UserConn, msg: proto.Message, d
     return;
   }
   const connType = params.conn_type ?? "stdio";
-  if (!["stdio", "http", "ws"].includes(connType)) {
-    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "conn_type must be stdio|http|ws");
+  if (!["stdio", "http", "ws", "web", "app"].includes(connType)) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "conn_type must be stdio|http|ws|web|app");
     return;
   }
   const b: DbAgentBrand = {
@@ -1860,8 +1860,8 @@ async function handleBrandUpdate(hub: Hub, user: UserConn, msg: proto.Message, d
     return;
   }
   const connType = params.conn_type ?? "stdio";
-  if (!["stdio", "http", "ws"].includes(connType)) {
-    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "conn_type must be stdio|http|ws");
+  if (!["stdio", "http", "ws", "web", "app"].includes(connType)) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "conn_type must be stdio|http|ws|web|app");
     return;
   }
   await db.updateBrand(params.id, {

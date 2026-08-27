@@ -494,6 +494,18 @@ Agent 在运行中能力发生变化时主动通知。等价于 MCP 的 `notific
 
 由于审批不设超时，"用户点停止"是待决任务**唯一**的退出路径——用户不点，子进程会一直等。可另保留一个较长任务超时（默认 2 小时，可配 `-task-timeout`）作为兜底。
 
+### 6.3.1 优雅退出（SIGTERM）
+
+AgentClient / systemd / 安装器升级都会以 **SIGTERM** 请求 Agent 退出（systemd `TimeoutStopSec` 后补 SIGKILL）。Agent 必须在限时（建议 ≤10s）内完成：
+
+1. 停止接收新任务（对未 ack 的 `task.create` 回 `-32002` 或直接不应答由对端超时兜底）；
+2. 中断执行中的任务：停止被控工具调用，为每个在跑任务补发终态（`event.error` 或 done chunk，reason 标 `interrupted`），清掉所有待决 `confirm_required`（补发 `confirm_cancelled`，reason=`interrupted`）；
+3. flush 持久化（transcript / 状态数据落盘）后 `process.exit(0)`。
+
+对 stdio 绑定：AgentClient 关闭子进程 stdin 前会先发 SIGTERM；Agent 不应依赖「stdin EOF 才退出」。HTTP/ws 绑定同理，收到 SIGTERM 先完成上述三步再断连接。
+
+> 升级场景（安装器换版本目录后重启实例）完全复用本节语义：停干净 → 切指针 → 重拉 → 以 `lifecycle.initialize` 自报的 `serverInfo.version` 比对确认新版在跑。
+
 ### 6.4 任务完成
 
 Agent 主动通知任务完成。
@@ -1084,6 +1096,7 @@ Agent 主动通知非任务相关事件。
 - **沙箱限制**：生产环境应对 Agent 可执行命令、访问路径做限制
 - **传输安全**：HTTP 适配器建议只绑定 `127.0.0.1`，避免外部访问
 - **命令注入防护**：Stdio 适配器避免把用户输入直接拼接到命令行
+- **优雅退出**：必须处理 SIGTERM（见 §6.3.1），限时 flush 后退出——被 SIGKILL 硬杀会丢消息与状态
 
 ## 14. 与网关协议的映射
 

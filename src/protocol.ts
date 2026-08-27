@@ -667,7 +667,7 @@ export interface BrandInfo {
   description: string;
   logo_url: string | null;
   capabilities: Capability[];
-  conn_type: string; // stdio | http | ws：托管实例与本地服务的连接方式
+  conn_type: string; // stdio | http | ws：托管实例与本地服务的连接方式；web | app：产品型（打开网页/独立应用，不托管）
   launch_cmd: string | null; // conn_type=stdio：本地服务启动命令
   endpoint: string | null; // conn_type=http/ws：本地服务地址
   disabled: boolean;
@@ -736,7 +736,7 @@ export interface ConnectorSyncAgent {
   brand_id: string;
   name: string;
   capabilities: Capability[];
-  conn_type?: string; // stdio | http | ws（品牌定义），缺省按 launch_cmd 推断
+  conn_type?: string; // stdio | http | ws | web | app（品牌定义），缺省按 launch_cmd 推断
   launch_cmd?: string; // stdio：本地服务启动命令
   endpoint?: string; // http/ws：本地服务地址
 }

@@ -214,6 +214,33 @@
             <div class="section-error" id="agentsError"></div>
         </div>
 
+        <!-- 产品中心：安装 / 升级 / 启动 Agent 产品 -->
+        <div class="card" id="productCard" style="display:none">
+            <h2>产品中心</h2>
+            <div class="card-desc">安装 / 升级 Agent 产品（tar.gz 包内含 manifest.json，规格见 docs/installer-spec.md）</div>
+            <div class="form-row" style="margin-bottom:12px">
+                <input type="file" id="pkgFile" accept=".tar.gz,.tgz" style="display:none">
+                <button class="btn btn-primary" id="pkgInstallBtn">安装 / 升级产品包…</button>
+                <span class="form-hint" id="pkgStatus"></span>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>已安装产品</th><th>当前版本</th><th>类型</th><th style="text-align:right">操作</th></tr></thead>
+                    <tbody id="productRows"></tbody>
+                </table>
+                <div class="empty-tip" id="productEmpty" style="display:none">本机还没有安装产品</div>
+            </div>
+            <div class="form-hint" style="margin:12px 0 6px">网关产品目录 · web / app 型点「打开」直接启动</div>
+            <div class="table-wrap" style="margin-bottom:0">
+                <table>
+                    <thead><tr><th>产品</th><th>类型</th><th>地址 / 路径</th><th style="text-align:right">操作</th></tr></thead>
+                    <tbody id="catalogRows"></tbody>
+                </table>
+                <div class="empty-tip" id="catalogEmpty" style="display:none">网关目录里暂无 web / app 型品牌</div>
+            </div>
+            <div class="section-error" id="productError"></div>
+        </div>
+
         <!-- 添加 Agent -->
         <div class="card" id="addCard" style="display:none">
             <h2>添加 Agent</h2>
@@ -269,6 +296,7 @@
             const els = {};
             ['connDot', 'connText', 'stateCard', 'agentRows', 'agentEmpty', 'agentsError',
              'addCard', 'addBrand', 'addBrandCmd', 'addCmdLabel', 'addName', 'addCmd', 'addBtn', 'addError',
+             'productCard', 'pkgFile', 'pkgInstallBtn', 'pkgStatus', 'productRows', 'productEmpty', 'catalogRows', 'catalogEmpty', 'productError',
              'toastContainer', 'modalOverlay', 'modalTitle', 'modalText', 'modalOk', 'modalCancel',
              'cmdOverlay', 'cmdAgentLabel', 'cmdLabel', 'cmdInput', 'cmdCancel', 'cmdOk'
             ].forEach(id => { els[id] = document.getElementById(id); });
@@ -485,12 +513,15 @@
                     const r = await api('/api/brands');
                     brandsCache = (r.brands || []).filter(b => !b.disabled);
                     brandsLoaded = true;
-                    if (!brandsCache.length) {
+                    // 添加 Agent 只面向托管型品牌；web/app 是产品型，在产品中心「打开」
+                    const hostable = brandsCache.filter(b => b.conn_type !== 'web' && b.conn_type !== 'app');
+                    if (!hostable.length) {
                         els.addBrand.innerHTML = '<option value="">暂无可用品牌</option>';
                     } else {
-                        els.addBrand.innerHTML = brandsCache.map(b =>
+                        els.addBrand.innerHTML = hostable.map(b =>
                             '<option value="' + escapeAttr(b.id) + '">' + escapeHtml(b.name) + '（' + escapeHtml(b.id) + '）</option>').join('');
                     }
+                    renderCatalog();
                     updateBrandCmdHint();
                     showError(els.addError, '');
                 } catch (e) {
@@ -537,6 +568,121 @@
                 }
             }
 
+            /* ---------- 产品中心 ---------- */
+
+            const KIND_LABELS = { stdio: 'stdio · 命令', http: 'http · 服务', ws: 'ws · 服务', web: 'web · 网页', app: 'app · 应用' };
+            let productsCache = [];
+
+            let lastProductsLoad = 0;
+            async function loadProducts() {
+                lastProductsLoad = Date.now();
+                try {
+                    const r = await api('/api/products');
+                    productsCache = r.products || [];
+                } catch (e) {
+                    productsCache = [];
+                }
+                renderProducts();
+                renderCatalog();
+            }
+
+            function renderProducts() {
+                els.productEmpty.style.display = productsCache.length ? 'none' : '';
+                els.productRows.innerHTML = productsCache.map(p =>
+                    '<tr>' +
+                    '<td><div class="cell-main">' + escapeHtml(p.brand) + '</div>' +
+                    '<div class="cell-sub">' + escapeHtml(p.manifest && p.manifest.description || '') + '</div></td>' +
+                    '<td><div>' + escapeHtml(p.version || '—') + '</div>' +
+                    (p.versions.length > 1 ? '<div class="cell-sub">历史: ' + escapeHtml(p.versions.filter(v => v !== p.version).join(', ')) + '</div>' : '') + '</td>' +
+                    '<td><span class="chip">' + escapeHtml(KIND_LABELS[(p.manifest && p.manifest.kind) || 'stdio'] || 'stdio') + '</span></td>' +
+                    '<td><div class="row-actions">' +
+                    (p.version ? '<button data-act="instantiate" data-brand="' + escapeAttr(p.brand) + '">创建 Agent 实例</button>' : '') +
+                    '<button data-act="uninstall" data-brand="' + escapeAttr(p.brand) + '" class="danger">卸载</button>' +
+                    '</div></td></tr>').join('');
+                els.productRows.querySelectorAll('button').forEach(btn => {
+                    btn.onclick = () => {
+                        if (btn.dataset.act === 'instantiate') instantiateProduct(btn.dataset.brand);
+                        else uninstallProduct(btn.dataset.brand);
+                    };
+                });
+            }
+
+            function renderCatalog() {
+                const webApps = brandsCache.filter(b => b.conn_type === 'web' || b.conn_type === 'app');
+                els.catalogEmpty.style.display = webApps.length ? 'none' : '';
+                els.catalogRows.innerHTML = webApps.map(b =>
+                    '<tr>' +
+                    '<td><div class="cell-main">' + escapeHtml(b.name) + '</div></td>' +
+                    '<td><span class="chip">' + escapeHtml(KIND_LABELS[b.conn_type] || b.conn_type) + '</span></td>' +
+                    '<td><div class="cell-sub mono">' + escapeHtml(b.endpoint || '—') + '</div></td>' +
+                    '<td><div class="row-actions">' +
+                    '<button data-act="launch" data-id="' + escapeAttr(b.id) + '" data-ct="' + escapeAttr(b.conn_type) + '">打开</button>' +
+                    '</div></td></tr>').join('');
+                els.catalogRows.querySelectorAll('button').forEach(btn => {
+                    btn.onclick = () => launchBrand(btn.dataset.id);
+                });
+            }
+
+            async function launchBrand(brandID) {
+                try {
+                    const r = await api('/api/launch', jsonOpts('POST', { brand_id: brandID }));
+                    if (r.kind === 'web' && r.url) window.open(r.url, '_blank');
+                    else showToast('已启动', 'success');
+                } catch (e) {
+                    showToast('打开失败：' + (e.message || e), 'error', 6000);
+                }
+            }
+
+            async function instantiateProduct(brand) {
+                try {
+                    const r = await api('/api/products/' + encodeURIComponent(brand) + '/instantiate', { method: 'POST' });
+                    showToast('已创建实例：' + r.agent_id + '（启动命令已指向本机安装目录）', 'success', 5000);
+                    loadState();
+                } catch (e) {
+                    showToast('创建失败：' + (e.message || e), 'error', 6000);
+                }
+            }
+
+            async function uninstallProduct(brand) {
+                const ok = await confirmModal('卸载产品', '卸载「' + brand + '」？本机安装目录将被删除；已创建的 Agent 实例会保留但将无法启动。', '卸载');
+                if (!ok) return;
+                try {
+                    await api('/api/products/' + encodeURIComponent(brand), { method: 'DELETE' });
+                    showToast('已卸载', 'success');
+                    loadProducts();
+                } catch (e) {
+                    showError(els.productError, '卸载失败：' + (e.message || e));
+                }
+            }
+
+            els.pkgInstallBtn.addEventListener('click', () => els.pkgFile.click());
+            els.pkgFile.addEventListener('change', async () => {
+                const file = els.pkgFile.files && els.pkgFile.files[0];
+                if (!file) return;
+                els.pkgInstallBtn.disabled = true;
+                els.pkgStatus.textContent = '上传并安装中…（' + (file.size / 1048576).toFixed(1) + ' MB）';
+                showError(els.productError, '');
+                try {
+                    const buf = await file.arrayBuffer();
+                    const resp = await fetch('/api/products/install?filename=' + encodeURIComponent(file.name), {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/octet-stream' },
+                        body: buf
+                    });
+                    const r = await resp.json().catch(() => null);
+                    if (!resp.ok) throw new Error((r && r.error) || ('HTTP ' + resp.status));
+                    els.pkgStatus.textContent = '';
+                    showToast((r.upgraded ? '已升级 ' : '已安装 ') + r.brand + ' ' + r.version + '（' + r.files + ' 个文件）', 'success', 5000);
+                    loadProducts();
+                } catch (e) {
+                    els.pkgStatus.textContent = '';
+                    showError(els.productError, '安装失败：' + (e.message || e));
+                } finally {
+                    els.pkgInstallBtn.disabled = false;
+                    els.pkgFile.value = '';
+                }
+            });
+
             /* ---------- 轮询 ---------- */
 
             async function loadState() {
@@ -546,6 +692,9 @@
                     renderAgents(s.agents || []);
                     showError(els.agentsError, '');
                     els.addCard.style.display = s.configured ? '' : 'none';
+                    els.productCard.style.display = s.configured ? '' : 'none';
+                    // 产品列表本地扫描有 IO，节流到 15s；安装/卸载/建实例后手动刷
+                    if (s.configured && Date.now() - lastProductsLoad > 15000) loadProducts();
                     if (s.configured && s.connected && !brandsLoaded) loadBrands();
                 } catch (e) {
                     els.connDot.className = 'conn-dot';
