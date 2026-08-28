@@ -36,6 +36,9 @@
             <button class="icon-btn rail-item" id="adminBtn" title="管理后台" style="display:none">
                 <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg>
             </button>
+            <a class="icon-btn rail-item" href="/docs" target="_blank" title="使用文档">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 3.2c1.2-.7 2.4-.7 3.5 0v9.6c-1.1-.7-2.3-.7-3.5 0zM13.5 3.2c-1.2-.7-2.4-.7-3.5 0v9.6c1.1-.7 2.3-.7 3.5 0zM8 2.7v10.6" stroke-linejoin="round"/></svg>
+            </a>
             <button class="icon-btn rail-item" id="settingsBtn" title="设置">
                 <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="2"/><path d="M13.3 8a5.3 5.3 0 0 0-.1-1.1l1.4-1.1-1.4-2.4-1.6.7a5.3 5.3 0 0 0-1.9-1.1L9.4 1.5H6.6l-.3 1.5a5.3 5.3 0 0 0-1.9 1.1l-1.6-.7-1.4 2.4 1.4 1.1a5.3 5.3 0 0 0 0 2.2l-1.4 1.1 1.4 2.4 1.6-.7a5.3 5.3 0 0 0 1.9 1.1l.3 1.5h2.8l.3-1.5a5.3 5.3 0 0 0 1.9-1.1l1.6.7 1.4-2.4-1.4-1.1c.06-.36.1-.72.1-1.1z" stroke-linejoin="round"/></svg>
             </button>
@@ -361,7 +364,7 @@
                         <button class="btn btn-primary" id="loginBtn" type="submit">登录</button>
                         <button class="btn btn-ghost" id="oidcLoginBtn" type="button" style="display:none">使用统一认证登录</button>
                     </form>
-                    <div class="login-hint">使用管理员分配的账号登录，每个用户只能看到自己名下的 Agent</div>
+                    <div class="login-hint">使用管理员分配的账号登录，每个用户只能看到自己名下的 Agent · <a href="/docs" target="_blank" style="color:var(--accent)">使用文档</a></div>
                 </div>
             </div>
         </div>

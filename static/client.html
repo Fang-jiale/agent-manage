@@ -191,6 +191,7 @@
     <header class="topbar">
         <span class="topbar-title">AgentClient 本机管理</span>
         <span class="topbar-sub">127.0.0.1 本地接口 · 无需登录</span>
+        <a id="docsLink" href="#" target="_blank" style="font-size:12.5px;color:var(--text-secondary);display:none">使用文档</a>
         <span class="spacer"></span>
         <span class="conn-dot" id="connDot"></span>
         <span class="conn-text" id="connText">网关未连接</span>
@@ -810,6 +811,8 @@
                     showError(els.agentsError, '');
                     els.addCard.style.display = s.configured ? '' : 'none';
                     els.productCard.style.display = s.configured ? '' : 'none';
+                    const dl = document.getElementById('docsLink');
+                    if (dl && s.gateway) dl.style.display = '', dl.href = s.gateway.replace(/^ws/, 'http').replace(/\/ws\/agent.*$/, '') + '/docs';
                     if (s.products_dir && document.activeElement !== els.productsDirInput) {
                         els.productsDirInput.value = s.products_dir;
                     }
