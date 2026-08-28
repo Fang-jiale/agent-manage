@@ -3748,8 +3748,34 @@
 
             function handleTaskProgress(params) {
                 const taskId = params.task_id;
-                const task = pendingTasks.get(taskId);
-                if (!task) return;
+                let task = pendingTasks.get(taskId);
+                if (!task) {
+                    // 多端：网关把任务进度按 owner 广播给所有在线端——任务可能由同账号的
+                    // 另一台设备/另一个标签页发起。本地有该会话就自动收养并实时渲染；
+                    // 本地没有此会话则忽略，等打开会话时由服务端对账取回。
+                    if (!params.session_id) return;
+                    let ownerKey = null;
+                    let session = null;
+                    for (const key of Object.keys(state.sessions)) {
+                        const s = state.sessions[key]?.[params.session_id];
+                        if (s) { session = s; ownerKey = key; break; }
+                    }
+                    if (!session) return;
+                    if (session.messages.some(m => m.taskId === taskId)) return; // 已有该任务消息（如对账取回过）不重建
+                    const msgId = generateId();
+                    appendMessage(session, {
+                        id: msgId, role: 'assistant', taskId,
+                        agentId: params.group_id ? null : (params.agent_id || null),
+                        groupId: params.group_id || null,
+                        chunks: [], done: false, createdAt: Date.now()
+                    });
+                    task = {
+                        taskId, messageId: msgId, agentId: ownerKey, sessionId: params.session_id,
+                        groupId: params.group_id || null, done: false, adopted: true,
+                        startTime: Date.now(), lastActivity: Date.now()
+                    };
+                    pendingTasks.set(taskId, task);
+                }
                 const session = state.sessions[task.agentId]?.[task.sessionId];
                 if (!session) return;
                 task.lastActivity = Date.now();
@@ -3809,8 +3835,9 @@
                         if (tid === taskId) pendingRequests.delete(reqId);
                     }
                     notifyTaskCompletion(task, params, durationMs);
-                    // 断线窗口期间丢的 chunk：任务结束落库后向服务端对账，取回完整消息
-                    if (task.recovered || (task.startTime || 0) < lastDisconnectAt) {
+                    // 补齐窗口期丢的 chunk：断线间隙 / 刷新恢复 / 多端收养（加入晚于任务起点），
+                    // 任务结束落库后向服务端对账，取回完整消息
+                    if (task.recovered || task.adopted || (task.startTime || 0) < lastDisconnectAt) {
                         void syncSessionFromServer(session);
                     }
                     // 修复：done 路径之前不刷输入态——typing 指示器卡住、sendBtn 不解禁
