@@ -1233,6 +1233,39 @@
                 };
             }
 
+            // 会话对账：以服务端持久化消息为准（拿到离开页面期间完成的记录），
+            // 本地仍在流式的消息（尚未落库）合并在后；已被服务端落库的任务，
+            // 本地占位与 pendingTasks 一并清掉（离开期间已完成的收养任务在此收敛）。
+            async function syncSessionFromServer(session) {
+                if (!session || !wsConnected) return;
+                try {
+                    const res = await rpcCall('message.list', {
+                        session_id: session.id, limit: MSG_PAGE
+                    }, 30000);
+                    const serverMsgs = (res.messages || []).map(storedMessageToLocal);
+                    const serverTaskIds = new Set(serverMsgs.map(m => m.taskId).filter(Boolean));
+                    // 服务端已有最终消息的任务：本地收养条目作废
+                    for (const tid of serverTaskIds) {
+                        if (pendingTasks.has(tid)) pendingTasks.delete(tid);
+                    }
+                    const streaming = (session.messages || []).filter(m => {
+                        if (m.role !== 'assistant') return false;
+                        if (serverTaskIds.has(m.taskId)) return false; // 已被服务端版本替代
+                        const t = pendingTasks.get(m.taskId);
+                        return t && !t.done && t.messageId === m.id;
+                    });
+                    session.messages = serverMsgs.concat(streaming).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+                    session.messageCount = res.total;
+                    loadedSessions.add(session.id);
+                    saveSessionState(session.agentId);
+                    if (session.id === state.currentSessionId) {
+                        renderChat();
+                        renderChatHeader();
+                        syncChatChrome();
+                    }
+                } catch (e) { /* 会话可能已删除或离线，静默 */ }
+            }
+
             async function loadMessages(session, before) {
                 const res = await rpcCall('message.list', {
                     session_id: session.id, limit: MSG_PAGE, before
@@ -1309,10 +1342,9 @@
                 persistPendingTasks();
             }
 
-            // 任务刷新恢复：pendingTasks 持久化到 localStorage，刷新后把还在跑
-            // 的 task 标 error「页面刷新，任务输出已断开」——不假装能续上，
-            // 因为 chunk 推送是按 ws 连接的，新连接收不到旧 task 的 chunk；
-            // 服务端 flushTaskBuffer 写 db 的最终状态可由 loadMessages 拉到。
+            // 任务刷新恢复：任务归会话不归连接——网关按 owner 广播进度、
+            // 结束才落库，与页面在不在线无关。刷新/退出后重新收养任务：
+            // 重连续流；断线窗口丢的 chunk 由任务结束后的会话同步补全。
             function persistPendingTasks() {
                 try {
                     const arr = [];
@@ -1327,40 +1359,35 @@
                 } catch {}
             }
 
+            let lastDisconnectAt = 0; // 最近一次 WS 断开时间：期间在跑的任务完成后要向服务端对账
             function recoverPendingTasks() {
                 let saved = [];
                 try { saved = JSON.parse(localStorage.getItem('ywm-pending-tasks') || '[]'); } catch {}
                 localStorage.removeItem('ywm-pending-tasks');
                 if (!saved.length) return;
+                let adopted = 0;
                 for (const t of saved) {
                     const session = state.sessions[t.agentId]?.[t.sessionId];
                     if (!session) continue;
                     const msg = session.messages.find(m => m.id === t.messageId);
-                    if (msg && !msg.done) {
-                        msg.done = true;
-                        msg.errorText = msg.errorText || '页面刷新，任务输出已断开';
-                    }
+                    if (!msg || msg.done) continue;
+                    pendingTasks.set(t.taskId, {
+                        taskId: t.taskId, messageId: t.messageId,
+                        agentId: t.agentId, sessionId: t.sessionId,
+                        done: false, recovered: true,
+                        startTime: Date.now(), lastActivity: Date.now()
+                    });
+                    adopted++;
                 }
+                if (adopted) syncChatChrome();
             }
 
-            // 断线兜底：把所有在跑的 task / 等 RPC / 等 ack 的请求全部判失败。
-            // 否则 stop 按钮会一直亮着、消息卡 typing 直到重连——重连回来 chunk
-            // 也已丢，状态彻底卡死。重连后由用户决定是否重发。
+            // 断线兜底：只失败等 RPC / 等 ack 的请求。任务不判死——网关侧任务
+            // 与页面连接无关，重连后进度广播继续；断线窗口丢的 chunk 在任务
+            // 结束落库后由 syncSessionFromServer 对账补全。
             function failAllPending(reason) {
                 let changed = false;
-                for (const [taskId, task] of [...pendingTasks]) {
-                    if (task.done) continue;
-                    const session = state.sessions[task.agentId]?.[task.sessionId];
-                    if (session) {
-                        updateAssistantMessage(session, task.messageId,
-                            { type: 'error', text: reason },
-                            true,
-                            Date.now() - (task.startTime || task.lastActivity));
-                    }
-                    task.done = true;
-                    pendingTasks.delete(taskId);
-                    changed = true;
-                }
+                lastDisconnectAt = Date.now();
                 for (const [id, p] of [...pendingRpc]) {
                     pendingRpc.delete(id);
                     p.reject(new Error(reason));
@@ -3439,8 +3466,9 @@
                 toggleChatSearch(false);
                 syncChatChrome();
                 const session = getCurrentSession();
-                if (session && !loadedSessions.has(sessionId) && wsConnected) {
-                    loadMessages(session).then(() => renderChat()).catch(e => console.warn('loadMessages', e));
+                if (session && wsConnected) {
+                    // 每次打开都对账：离开页面期间完成的任务记录在服务端，直接取回
+                    syncSessionFromServer(session);
                 }
             }
 
@@ -3513,13 +3541,10 @@
                     if (state.currentAgentId) {
                         // 当前对象补一次定向同步（含"无会话自动建一个"的兜底）
                         syncSessions(state.currentAgentId);
-                        // 重连后重新拉当前 session 的消息：断线期间可能漏 chunk，
-                        // 服务端持久化的 done 状态比 UI 当前状态可信
+                        // 重连后对账当前 session：服务端 done 状态可信，
+                        // 本地流式中的消息（未落库）保留继续收流
                         const cur = getCurrentSession();
-                        if (cur) {
-                            loadedSessions.delete(cur.id);
-                            loadMessages(cur).then(renderChat).catch(e => console.warn('reload after reconnect failed', e));
-                        }
+                        if (cur) syncSessionFromServer(cur);
                     }
                 };
                 ws.onmessage = (event) => {
@@ -3786,6 +3811,10 @@
                         if (tid === taskId) pendingRequests.delete(reqId);
                     }
                     notifyTaskCompletion(task, params, durationMs);
+                    // 断线窗口期间丢的 chunk：任务结束落库后向服务端对账，取回完整消息
+                    if (task.recovered || (task.startTime || 0) < lastDisconnectAt) {
+                        void syncSessionFromServer(session);
+                    }
                     // 修复：done 路径之前不刷输入态——typing 指示器卡住、sendBtn 不解禁
                     syncChatChrome();
                 }
