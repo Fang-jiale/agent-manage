@@ -2676,7 +2676,6 @@
                 answer.textContent = answerText;
                 card.appendChild(answer);
                 collapseAnsweredCard(card, answerText);
-                message.answered = true;
                 // 本地 chunk 同步标记：网关落库前刷新页面也有已答状态兜底
                 const ansChunk = (message.chunks || []).find(c =>
                     (card.dataset.confirmId && c.confirmId === card.dataset.confirmId) ||
@@ -2971,7 +2970,7 @@
                     && (chunk.type === 'confirm_required' || chunk.type === 'prompt_required' || chunk.type === 'block_required')) {
                     return { answered: true, cancelled: true, text: '已撤销：任务结束' };
                 }
-                if (chunk.answered || (msg && msg.answered)) {
+                if (chunk.answered) { // chunk 级为权威；消息级 answered 已废弃——同消息后续确认卡会被误标
                     return { answered: true, cancelled: false, text: chunk.answer === undefined ? '已回复' : '已回复：' + respondAnswerText(chunk.answer) };
                 }
                 return { answered: false, cancelled: false, text: '' };
@@ -3146,7 +3145,6 @@
                 collapseAnsweredCard(card, '已提交：' + (actionId || 'submit'));
                 const found = findSessionMessage(card.dataset.messageId);
                 if (found) {
-                    found.message.answered = true;
                     const ansChunk = (found.message.chunks || []).find(c => c.blockId === card.dataset.blockId);
                     if (ansChunk) { ansChunk.answered = true; ansChunk.answer = response; }
                     saveSessionState(found.session.agentId);
