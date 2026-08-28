@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>产品文档 · YwMatrix</title>
+    <link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/static/shared.css">
+    <style>
+        :root {
+            --bg: #f8fafc; --bg-side: #eef2f7; --text: #0f172a; --text-2: #475569; --text-3: #94a3b8;
+            --border: #e2e8f0; --border-strong: #cbd5e1; --accent: #10b981; --accent-soft: #d1fae5;
+            --warning: #f59e0b; --danger: #ef4444; --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root { --bg: #0f172a; --bg-side: #1e293b; --text: #e2e8f0; --text-2: #94a3b8; --text-3: #64748b;
+                --border: #334155; --border-strong: #475569; --accent: #34d399; --accent-soft: #064e3b; }
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif;
+            font-size: 14.5px; line-height: 1.75; color: var(--text); background: var(--bg); }
+        a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+        code { font-family: var(--mono); font-size: .88em; background: var(--bg-side); border: 1px solid var(--border);
+            border-radius: 4px; padding: 1px 5px; }
+        pre { font-family: var(--mono); font-size: 12.5px; line-height: 1.6; background: var(--bg-side);
+            border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; overflow-x: auto; margin: 12px 0; }
+        pre code { background: none; border: none; padding: 0; }
+
+        .topbar { position: sticky; top: 0; z-index: 50; display: flex; align-items: center; gap: 12px;
+            height: 52px; padding: 0 22px; background: var(--bg); border-bottom: 1px solid var(--border); }
+        .topbar .word { font-weight: 700; font-size: 15px; }
+        .topbar .sub { font-size: 12.5px; color: var(--text-3); }
+        .topbar .spacer { flex: 1; }
+
+        .layout { display: flex; max-width: 1160px; margin: 0 auto; gap: 28px; padding: 26px 22px 80px; }
+        nav.toc { width: 218px; flex-shrink: 0; position: sticky; top: 78px; align-self: flex-start;
+            font-size: 13px; max-height: calc(100vh - 100px); overflow-y: auto; }
+        nav.toc .toc-h { font-weight: 700; font-size: 12px; color: var(--text-3); letter-spacing: .5px; margin: 14px 0 4px; }
+        nav.toc a { display: block; color: var(--text-2); padding: 3.5px 10px; border-radius: 6px; }
+        nav.toc a:hover { background: var(--bg-side); color: var(--text); text-decoration: none; }
+        main { flex: 1; min-width: 0; }
+
+        section { margin-bottom: 44px; scroll-margin-top: 70px; }
+        h1 { font-size: 25px; margin-bottom: 6px; }
+        h2 { font-size: 19px; margin: 0 0 4px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+        h3 { font-size: 15.5px; margin: 22px 0 6px; }
+        h3:first-of-type { margin-top: 10px; }
+        p { margin: 8px 0; color: var(--text-2); }
+        p strong, li strong { color: var(--text); }
+        ul, ol { margin: 8px 0 8px 22px; color: var(--text-2); }
+        li { margin: 3.5px 0; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 12px 0; }
+        th { text-align: left; padding: 8px 12px; background: var(--bg-side); border: 1px solid var(--border); font-size: 12px; }
+        td { padding: 8px 12px; border: 1px solid var(--border); color: var(--text-2); vertical-align: top; }
+
+        .callout { border-left: 3px solid var(--accent); background: var(--accent-soft); border-radius: 0 10px 10px 0;
+            padding: 10px 16px; margin: 12px 0; font-size: 13.5px; color: var(--text-2); }
+        .callout.warn { border-color: var(--warning); background: color-mix(in srgb, var(--warning) 12%, transparent); }
+
+        figure.shot { margin: 14px 0; }
+        figure.shot img { max-width: 100%; border: 1px solid var(--border-strong); border-radius: 12px;
+            box-shadow: 0 4px 16px rgba(15,23,42,.08); display: block; }
+        figure.shot figcaption { font-size: 12px; color: var(--text-3); margin-top: 6px; text-align: center; }
+        figure.shot.missing img { display: none; }
+        figure.shot.missing::before { content: "📷 截图待补：" attr(data-file); display: flex; align-items: center; justify-content: center;
+            min-height: 120px; border: 2px dashed var(--border-strong); border-radius: 12px; color: var(--text-3);
+            font-size: 13px; background: var(--bg-side); }
+
+        .kbd { font-family: var(--mono); font-size: 11.5px; border: 1px solid var(--border-strong);
+            border-bottom-width: 2px; border-radius: 5px; padding: 1px 6px; background: var(--bg); }
+        .arch { font-family: var(--mono); font-size: 12px; line-height: 1.7; }
+
+        @media (max-width: 860px) {
+            nav.toc { display: none; }
+            .layout { padding: 18px 14px 60px; }
+        }
+    </style>
+</head>
+<body>
+<header class="topbar">
+    <svg width="22" height="22" viewBox="0 0 16 16" fill="none" stroke="var(--accent)" stroke-width="1.6"><rect x="2.5" y="3" width="11" height="9" rx="1.5"/><path d="M5.5 6.5L7.5 8l-2 1.5M9 10h2"/></svg>
+    <span class="word">YwMatrix <span style="color:var(--accent)">Docs</span></span>
+    <span class="sub">远程 Agent 管理平台 · 使用文档</span>
+    <span class="spacer"></span>
+    <a href="/">返回对话</a>
+    <a href="/admin">管理后台</a>
+</header>
+
+<div class="layout">
+<nav class="toc">
+    <div class="toc-h">开始</div>
+    <a href="#intro">产品介绍</a>
+    <a href="#arch">架构与概念</a>
+    <a href="#quickstart">快速开始</a>
+    <div class="toc-h">聊天页（/）</div>
+    <a href="#chat-overview">界面总览</a>
+    <a href="#chat-status">在线状态</a>
+    <a href="#chat-features">消息与会话</a>
+    <a href="#chat-confirm">权限确认卡</a>
+    <a href="#chat-group">群组与协作</a>
+    <a href="#chat-mobile">移动端</a>
+    <div class="toc-h">管理后台（/admin）</div>
+    <a href="#admin-overview">总览</a>
+    <a href="#admin-agent">Agent 管理</a>
+    <a href="#admin-brand">品牌管理</a>
+    <a href="#admin-product">产品分发</a>
+    <a href="#admin-key">设备密钥与配对码</a>
+    <div class="toc-h">终端（AgentClient）</div>
+    <a href="#client-intro">本机管理页</a>
+    <a href="#client-product">产品中心</a>
+    <a href="#client-local">本地运行与外部安装</a>
+    <div class="toc-h">其他</div>
+    <a href="#offline">离线部署</a>
+    <a href="#faq">常见问题</a>
+    <a href="#shots">截图补充说明</a>
+</nav>
+
+<main>
+
+<section id="intro">
+    <h1>YwMatrix 产品文档</h1>
+    <p>YwMatrix 是一个<strong>远程 Agent 管理平台</strong>：把散落在各台机器上的 AI Agent（编码助手、本地大模型客户端、自动化工具……）统一接入一个网页对话入口，随时对话、调度、协作，并把它们当作「产品」来安装、升级和分发。</p>
+
+    <h3>它解决什么问题</h3>
+    <ul>
+        <li><strong>一个入口聊所有 Agent</strong>：手机 / 电脑打开网页，就能和任何一台机器上的 Agent 对话，不用 SSH 到那台机器</li>
+        <li><strong>多 Agent 协作</strong>：拉群 @ 多个 Agent 分头干活，管理者 Agent 可以编排调度群成员</li>
+        <li><strong>产品化分发</strong>：Agent 以「品牌 + 产品包」的形式上架，终端一键安装 / 升级，管理端可远程推送更新——像应用商店一样管理你的 Agent 舰队</li>
+        <li><strong>多用户隔离</strong>：每人只能看到自己名下的 Agent 和会话；管理员全局可见</li>
+    </ul>
+
+    <h3>三种使用角色</h3>
+    <table>
+        <tr><th>角色</th><th>入口</th><th>做什么</th></tr>
+        <tr><td>最终用户</td><td><code>/</code>（聊天页）</td><td>选 Agent 对话、拉群、审批工具确认</td></tr>
+        <tr><td>管理员</td><td><code>/admin</code>（管理后台）</td><td>用户 / 品牌 / 产品包 / 设备密钥 / Agent 审批</td></tr>
+        <tr><td>终端机器</td><td>本机管理页 <code>127.0.0.1:9321</code></td><td>接入网关、托管 Agent 实例、安装运行产品</td></tr>
+    </table>
+
+    <figure class="shot" data-file="docs-01-overview.png">
+        <img src="/static/docs-01-overview.png" alt="平台总览" onerror="this.closest('.shot').classList.add('missing')">
+        <figcaption>图 1 · 平台总览（截图放到位后自动替换占位框）</figcaption>
+    </figure>
+</section>
+
+<section id="arch">
+    <h2>架构与核心概念</h2>
+<pre class="arch">┌────────────── 浏览器 ──────────────┐
+│  聊天页 /        管理后台 /admin     │
+└──────────────┬─────────────────────┘
+               │ WebSocket (JWT)
+┌──────────────▼─────────────────────┐
+│              网关 Gateway           │   品牌/产品目录 · 用户与会话存储(MySQL)
+│  会话/消息 · 任务调度 · 产品分发      │   data/products/&lt;品牌&gt;/&lt;版本&gt;/ 安装包仓库
+└──────────────┬─────────────────────┘
+               │ WebSocket (设备密钥)
+┌──────────────▼─────────────────────┐
+│  终端 AgentClient（每台机器一个）     │
+│  · 托管 Agent 实例(stdio/http/ws)   │   ~/.agent-manage/products/ 本机安装目录
+│  · 产品安装/升级/本地运行             │   connector.json 接入凭证与本机覆盖
+└──────────────┬─────────────────────┘
+        ┌──────┼───────────┐
+     Agent1  Agent2      Agent3      （Claude Code / DeepSeek / ywcoder / 自研…）
+</pre>
+    <table>
+        <tr><th>概念</th><th>一句话解释</th></tr>
+        <tr><td><strong>网关</strong></td><td>服务端中枢：聊天消息、任务、账号、品牌与产品目录都在这</td></tr>
+        <tr><td><strong>品牌</strong></td><td>Agent 产品的「身份」：名称、logo、连接方式（stdio / http / ws / web / app）。一个品牌 = 一类产品</td></tr>
+        <tr><td><strong>产品包</strong></td><td>品牌对应的可安装产物（tar.gz + manifest.json），传到网关后终端可一键安装</td></tr>
+        <tr><td><strong>Connector</strong></td><td>每台终端机器上跑的接入进程（AgentClient），网关通过它管理这台机器上的 Agent 实例</td></tr>
+        <tr><td><strong>Agent 实例</strong></td><td>品牌在某台机器上的一个具体运行实例（一个品牌可以多机多实例）</td></tr>
+        <tr><td><strong>会话</strong></td><td>与某个 Agent（或群）的一段对话；可绑定工作目录；消息持久化在服务端</td></tr>
+    </table>
+</section>
+
+<section id="quickstart">
+    <h2>快速开始</h2>
+    <h3>1. 管理员：准备品牌与终端接入</h3>
+    <ol>
+        <li>登录 <code>/admin</code> → 品牌管理 → <strong>新建品牌</strong>（名称、logo、连接方式与启动命令）</li>
+        <li>设备密钥 → <strong>生成配对码</strong>，发给要接入的机器</li>
+    </ol>
+    <h3>2. 终端：安装 AgentClient 并配对</h3>
+    <ol>
+        <li>目标机器解压对应平台的 AgentClient 离线包（或直接 clone 仓库运行）</li>
+        <li>浏览器打开本机 <code>http://127.0.0.1:9321</code>，填网关地址 + 配对码 → 接入</li>
+        <li>管理员在后台「待接入」里<strong>批准</strong></li>
+    </ol>
+    <pre><code># 源码方式启动（Node ≥ 24）
+node src/client.ts --config ~/.agent-manage/connector.json</code></pre>
+    <h3>3. 分配 Agent 实例，开始对话</h3>
+    <ol>
+        <li>后台 Agent 管理 → <strong>注册 Agent</strong>（选在线 Connector + 品牌）；或终端在本机页「添加 Agent」</li>
+        <li>打开 <code>/</code>，左侧选 Agent，发消息即开聊</li>
+    </ol>
+</section>
+
+<section id="chat-overview">
+    <h2>聊天页 · 界面总览</h2>
+    <p>左侧三栏：<strong>消息</strong>（按聊天对象聚合的会话列表）、<strong>Agent</strong>（联系人卡片）、<strong>群组</strong>；右侧为对话区与输入区；顶部为当前对象的状态栏。</p>
+    <figure class="shot" data-file="docs-02-chat.png">
+        <img src="/static/docs-02-chat.png" alt="聊天主界面" onerror="this.closest('.shot').classList.add('missing')">
+        <figcaption>图 2 · 聊天主界面</figcaption>
+    </figure>
+</section>
+
+<section id="chat-status">
+    <h2>在线状态</h2>
+    <ul>
+        <li><strong>会话列表头像右下角小圆点</strong>：绿 = 在线，黄（呼吸）= 忙碌（任务执行中），灰 = 离线</li>
+        <li><strong>对话标题左侧圆点 + 状态徽章</strong>：常显「在线 / 忙碌 / 离线」；群显示「N 个成员 · n 在线」</li>
+        <li>Agent 离线时输入框会提示；上线后自动恢复（终端断网会无限重连，恢复即回）</li>
+        <li>Agent 面板按「在线优先」排序，点名称可看详情（平台、心跳、能力、最近任务）</li>
+    </ul>
+    <figure class="shot" data-file="docs-03-status.png">
+        <img src="/static/docs-03-status.png" alt="在线状态" onerror="this.closest('.shot').classList.add('missing')">
+        <figcaption>图 3 · 头像角标与状态徽章</figcaption>
+    </figure>
+</section>
+
+<section id="chat-features">
+    <h2>消息与会话</h2>
+    <h3>发送与格式</h3>
+    <ul>
+        <li><span class="kbd">Enter</span> 发送，<span class="kbd">Shift+Enter</span> 换行（可在设置中改为 ⌘Enter 发送）</li>
+        <li>支持粘贴 / 拖入图片与文件作为附件；回复支持流式渲染（代码高亮、思考过程折叠、任务产物卡片）</li>
+        <li>斜杠命令：<code>/model</code> 切模型、<code>/permission</code> 切权限模式等（由 Agent 上报，输入 <code>/</code> 弹补全菜单）</li>
+    </ul>
+    <h3>会话管理</h3>
+    <ul>
+        <li>一个对象可多会话：列表行点箭头展开；hover 出现置顶 / 重命名 / 删除；顶部可搜索当前会话消息（命中高亮）</li>
+        <li><strong>工作目录</strong>：会话可绑定一个目录（标题栏 📂 徽章），Agent 在该目录下干活；首个任务后锁定，换目录自动开新会话</li>
+        <li>导出：标题栏下载按钮，把当前会话导出为 Markdown</li>
+    </ul>
+    <div class="callout"><strong>退出页面不中断</strong>：任务归属于会话而不是页面——手机上发出任务后退出，任务照常执行；回来重新打开，流式继续、已完成的记录完整可见（离开期间的结果自动对账补全）。</div>
+</section>
+
+<section id="chat-confirm">
+    <h2>权限确认卡（工具审批）</h2>
+    <p>Agent 执行敏感操作（运行命令、沙箱提权等）时会弹出确认卡：</p>
+    <ul>
+        <li><strong>允许</strong> / <strong>拒绝</strong>：只影响这一步操作；拒绝可附理由</li>
+        <li>同一轮任务可能<strong>连续弹多张确认卡</strong>（每个工具调用一张），逐张审批即可</li>
+        <li>确认<strong>不设超时</strong>——Agent 会一直等你；着急可点输入区「停止」结束任务</li>
+        <li>输入型卡片（选择项 / 填表单）按提示填写提交</li>
+    </ul>
+    <figure class="shot" data-file="docs-04-confirm.png">
+        <img src="/static/docs-04-confirm.png" alt="权限确认卡" onerror="this.closest('.shot').classList.add('missing')">
+        <figcaption>图 4 · 权限确认卡（多个可并存，逐张点击）</figcaption>
+    </figure>
+</section>
+
+<section id="chat-group">
+    <h2>群组与多 Agent 协作</h2>
+    <ul>
+        <li>群组面板 → <strong>新建群组</strong>：勾选成员、可设「管理者 Agent」（★ 标记）</li>
+        <li>群聊发消息需 <code>@成员</code> 或 <code>@全体</code>；离线成员自动跳过（会提示跳过了谁）</li>
+        <li><strong>管理者编排</strong>：@管理者后，它可以自主把子任务派发给群内其他成员，结果汇总回它的回复里；父任务取消会级联取消子任务</li>
+    </ul>
+</section>
+
+<section id="chat-mobile">
+    <h2>移动端（PWA）</h2>
+    <ul>
+        <li>手机浏览器打开站点 →「添加到主屏幕」，即可像原生 App 一样全屏使用</li>
+        <li>任务完成会推系统通知（需授权通知权限）；点通知跳回对应会话</li>
+        <li>弱网 / 断网自动重连；页面被杀掉任务不中断（见上文）</li>
+    </ul>
+</section>
+
+<section id="admin-overview">
+    <h2>管理后台 · 总览</h2>
+    <p><code>/admin</code> 需管理员账号。包含：概览（在线 Agent / 忙碌 / 会话数）、用户管理、Agent 管理、品牌管理（含产品分发）、设备密钥与配对码。普通用户仅有只读品牌目录与自己的密钥管理。</p>
+    <figure class="shot" data-file="docs-05-admin.png">
+        <img src="/static/docs-05-admin.png" alt="管理后台" onerror="this.closest('.shot').classList.add('missing')">
+        <figcaption>图 5 · 管理后台概览</figcaption>
+    </figure>
+</section>
+
+<section id="admin-agent">
+    <h2>Agent 管理</h2>
+    <ul>
+        <li><strong>待接入</strong>：新 Connector 配对请求的审批（批准后终端拿到正式凭证）</li>
+        <li><strong>注册 Agent</strong>：给在线 Connector 分配品牌实例（终端本机页也可自助添加）</li>
+        <li>全量注册表（含离线历史）：实时状态优先；可断开连接 / 移除实例 / 改归属</li>
+    </ul>
+</section>
+
+<section id="admin-brand">
+    <h2>品牌管理</h2>
+    <ul>
+        <li>品牌 = 产品身份：名称、描述、能力标签、logo、<strong>连接方式</strong></li>
+        <li>连接方式五选一：<code>stdio</code> 命令启动 / <code>http</code> / <code>ws</code> 服务地址 / <code>web</code> 产品网页（点「打开」开网址）/ <code>app</code> 独立应用（本机路径）</li>
+        <li>品牌的启动命令写给「默认机器」，各终端可用<strong>本机覆盖</strong>指向自己的路径（见产品中心）</li>
+        <li>不建任何品牌 = 开放模式（Agent 自由注册）；建了第一个品牌即进入<strong>治理模式</strong>（注册必须挂品牌）</li>
+    </ul>
+</section>
+
+<section id="admin-product">
+    <h2>产品分发（安装包仓库）</h2>
+    <p>品牌管理页下半区。把 Agent 产品打成 <code>tar.gz</code>（内含 <code>manifest.json</code>）上传，终端即可在产品中心一键安装。</p>
+    <h3>manifest.json 格式</h3>
+<pre><code>{
+  "format": 1,
+  "brand": "deepseek",              // 必须与已有品牌同名（上架强制挂品牌）
+  "version": "0.1.1-rc.2",          // semver
+  "kind": "stdio",                  // stdio | http | ws | web | app
+  "name": "DeepSeek Harness",
+  "description": "……",
+  "launch_cmd": "node {{install_dir}}/bin.js --config {{install_dir}}/x.yml"
+}</code></pre>
+    <ul>
+        <li><strong>编辑 manifest</strong>：上传后可在线改（launch_cmd、描述等），<strong>服务端版本为准</strong>，终端安装时覆盖包内版本；brand / version 是目录身份不可改</li>
+        <li><strong>推送到终端</strong>：一键把某版本广播给所有在线终端——已纳管的自动升级并切换实例；外部安装的原地更新；没装的忽略</li>
+        <li>服务端自动计算 SHA-256 作为校验锚点，终端下载后强制校验</li>
+    </ul>
+    <figure class="shot" data-file="docs-06-product-admin.png">
+        <img src="/static/docs-06-product-admin.png" alt="产品分发管理" onerror="this.closest('.shot').classList.add('missing')">
+        <figcaption>图 6 · 产品分发：上传 / 编辑 manifest / 推送</figcaption>
+    </figure>
+</section>
+
+<section id="admin-key">
+    <h2>设备密钥与配对码</h2>
+    <ul>
+        <li><strong>配对码</strong>（推荐）：一次性、默认 24h 有效；谁生成的码，终端注册的 Agent 就归谁</li>
+        <li><strong>设备密钥</strong>（<code>amk_</code>）：长期凭证，可吊销（吊销立即踢线）</li>
+        <li>终端在配对页填「网关地址 + 配对码」→ 管理员批准 → 凭证自动写入终端 <code>~/.agent-manage/connector.json</code></li>
+    </ul>
+</section>
+
+<section id="client-intro">
+    <h2>终端 AgentClient · 本机管理页</h2>
+    <p>每台机器跑一个 AgentClient，本机浏览器打开 <code>http://127.0.0.1:9321</code>（仅本机可访问，无需登录）：</p>
+    <ul>
+        <li><strong>连接状态</strong>：网关地址、Connector 名、凭证路径</li>
+        <li><strong>Agent 列表</strong>：本机托管实例的运行状态、生效命令（本机覆盖 / 品牌默认）、失败原因与自动重试；可编辑启动命令覆盖、移除</li>
+    </ul>
+    <figure class="shot" data-file="docs-07-client.png">
+        <img src="/static/docs-07-client.png" alt="本机管理页" onerror="this.closest('.shot').classList.add('missing')">
+        <figcaption>图 7 · AgentClient 本机管理页</figcaption>
+    </figure>
+</section>
+
+<section id="client-product">
+    <h2>产品中心（终端一键安装）</h2>
+    <p>本机管理页的产品中心是一张<strong>统一目录</strong>：一行一个品牌，串起「安装 → 接入网关 / 本地起 → 升级」全流程。</p>
+    <table>
+        <tr><th>操作</th><th>说明</th></tr>
+        <tr><td><strong>安装 / 升级到 vX</strong></td><td>从网关下载产品包（自动 SHA-256 校验），装进本机 <code>~/.agent-manage/products/&lt;品牌&gt;/&lt;版本&gt;/</code>；同品牌已接入的实例自动切到新版本目录并重启</td></tr>
+        <tr><td><strong>纳管安装</strong></td><td>产品当前从外部目录运行时出现：装进产品目录并自动把实例切过来（旧目录保留可回退）</td></tr>
+        <tr><td><strong>接入网关</strong></td><td>为装好的产品创建 Agent 实例（进聊天页可对话）</td></tr>
+        <tr><td><strong>本地起 / 停止本地</strong></td><td>不接网关直接在本机运行（日志：<code>products/&lt;品牌&gt;/local-run.log</code>）；与网关实例双开会有端口 / 数据锁风险，会先提示</td></tr>
+        <tr><td><strong>原地更新此路径</strong></td><td>对「外部安装」直接更新其所在目录：停实例 → 备份(.bak) → 换文件 → 重启；Git 仓库内 / 系统目录会被拒绝</td></tr>
+        <tr><td><strong>卸载</strong></td><td>删除本机安装目录（已接入的实例需先移除）</td></tr>
+        <tr><td><strong>离线安装…</strong></td><td>从 U 盘等本地文件装 tar.gz 包（与远程同格式）</td></tr>
+    </table>
+    <h3>安装目录与外部安装</h3>
+    <ul>
+        <li>安装根目录默认 <code>~/.agent-manage/products</code>，可在产品中心顶部改为数据盘等位置（内部保持 <code>&lt;品牌&gt;/&lt;版本&gt;/</code> 结构以支持升级回滚）</li>
+        <li>不在产品目录里装的（如直接从仓库跑的）会显示<strong>「外部安装 · 运行 vX」</strong>及探测到的路径——版本来自 Agent 运行时自报，路径来自启动命令；实例停了仍可见、可远程更新</li>
+    </ul>
+    <figure class="shot" data-file="docs-08-products.png">
+        <img src="/static/docs-08-products.png" alt="产品中心" onerror="this.closest('.shot').classList.add('missing')">
+        <figcaption>图 8 · 产品中心：统一目录与一条龙操作</figcaption>
+    </figure>
+</section>
+
+<section id="offline">
+    <h2>离线部署</h2>
+    <ul>
+        <li>源码侧打包：<code>npm run bundle &amp;&amp; node scripts/build-offline.mjs</code>，产物在 <code>dist/offline/packages/</code>（服务端 Linux x64 + 三平台 AgentClient，自带 Node 运行时，目标机零依赖）</li>
+        <li>服务端：解压到 <code>/opt/ywmatrix</code>，建 MySQL 库号，改 systemd 单元两处密码后启动（表结构自动迁移）</li>
+        <li>终端：U 盘拷贝 AgentClient 包；产品包也可走「离线安装…」从本地文件装</li>
+        <li>升级 = 停服覆盖 <code>bin/</code> 与 <code>static/</code> 重启；建议先 mysqldump</li>
+</section>
+
+<section id="faq">
+    <h2>常见问题</h2>
+    <h3>手机退出页面，任务会中断吗？记录会丢吗？</h3>
+    <p>不会。任务归属会话而非页面连接：退出后照常执行，结果落库；回来打开会话自动对账，离开期间的输出完整可见。</p>
+    <h3>确认框一直不点会怎样？</h3>
+    <p>Agent 会一直等（审批不设超时，从手机赶回来点也来得及）。不想等了点「停止」。</p>
+    <h3>终端断网 / 网关重启，Agent 会掉吗？</h3>
+    <p>AgentClient 无限自动重连（指数退避，封顶 30 秒一次），恢复后自动重新注册，无需人工干预。</p>
+    <h3>升级产品后旧版本还在吗？</h3>
+    <p>纳管安装保留最近两个历史版本目录（<code>current</code> 指针切换）；外部原地更新会把原目录备份为 <code>&lt;目录&gt;.bak-&lt;时间戳&gt;</code>，出问题改回原名即回滚。</p>
+    <h3>同一个产品能在两台机器上各跑一个实例吗？</h3>
+    <p>可以，这正是「品牌 → 多机多实例」的设计；但<strong>同一台机器</strong>上「网关实例 + 本地起」同时跑一个产品可能端口 / 数据库锁冲突，界面会提示确认。</p>
+    <h3>权限确认想完全不弹？</h3>
+    <p>把品牌启动命令中的 <code>--permission-mode default</code> 改为 <code>bypassPermissions</code>（如 Claude 系 Agent），重启实例生效。</p>
+</section>
+
+<section id="shots">
+    <h2>截图补充说明</h2>
+    <p>文档页所有截图位均为自动占位：把对应文件名的 PNG 放入 <code>static/</code> 目录即自动显示，无需改代码。当前约定的文件名：</p>
+<pre><code>docs-01-overview.png         平台总览
+docs-02-chat.png             聊天主界面
+docs-03-status.png           在线状态（头像角标/状态徽章）
+docs-04-confirm.png          权限确认卡
+docs-05-admin.png            管理后台概览
+docs-06-product-admin.png    产品分发管理
+docs-07-client.png           AgentClient 本机管理页
+docs-08-products.png         产品中心</code></pre>
+    <p>建议尺寸：宽度 1200–1600px，PNG 格式；截图后放到服务器 <code>/opt/agent-manage/static/</code> 并重载页面即可（如网关未重启读缓存，重启 agent-gateway 服务）。</p>
+</section>
+
+</main>
+</div>
+</body>
+</html>

@@ -3383,6 +3383,11 @@ export async function createGatewayServer(cfg: GatewayConfig, staticFile: string
       serveHtml(path.resolve(path.dirname(staticFile), "admin.html"));
       return;
     }
+    if (url.pathname === "/docs" || url.pathname === "/docs.html") {
+      // 产品文档页（公开只读）
+      serveHtml(path.resolve(path.dirname(staticFile), "docs.html"));
+      return;
+    }
     if (url.pathname.startsWith("/static/") && req.method === "GET") {
       // 共享静态资源（如 shared.css）；限制在 static 目录内防路径穿越
       const STATIC_MIME: Record<string, string> = { ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webmanifest": "application/manifest+json", ".webp": "image/webp", ".gif": "image/gif", ".ico": "image/x-icon", ".woff": "font/woff", ".woff2": "font/woff2" };
