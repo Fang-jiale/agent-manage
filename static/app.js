@@ -86,6 +86,16 @@
             let lbItems = [];
             let lbIndex = 0;
 
+            // 附件/图片 URL 可能来自 agent 输出（result chunk 的 url 字段，prompt injection 可控），
+            // 是本页面最不可信的输入：进 innerHTML 前一律 escapeAttr，赋 href 前过协议白名单
+            // （防 javascript: 等危险 scheme）。放行 http(s)/blob/data 与站内相对路径（/files/* 回源）。
+            function safeAttachmentUrl(u) {
+                const s = String(u || '');
+                if (/^(https?:|blob:|data:)/i.test(s)) return s;
+                if (/^\/(?!\/)/.test(s)) return s;
+                return '';
+            }
+
             function openAttachmentPreview(items, startIdx) {
                 lbItems = items.filter(it => it.blob || it.url);
                 if (lbItems.length === 0) return;
@@ -101,14 +111,22 @@
                 els.lightboxCounter.textContent = lbItems.length > 1 ? (lbIndex + 1) + ' / ' + lbItems.length : '';
                 els.lightboxPrev.style.display = lbItems.length > 1 ? '' : 'none';
                 els.lightboxNext.style.display = lbItems.length > 1 ? '' : 'none';
-                const blob = it.blob || it.url;
-                els.lightboxDownload.href = blob;
+                const blob = safeAttachmentUrl(it.blob || it.url);
+                if (blob) {
+                    els.lightboxDownload.href = blob;
+                    els.lightboxDownload.style.display = '';
+                } else {
+                    els.lightboxDownload.removeAttribute('href');
+                    els.lightboxDownload.style.display = 'none';
+                }
                 els.lightboxDownload.download = it.name || '';
                 const mime = it.mime || '';
-                if (mime.startsWith('image/')) {
-                    els.lightboxContent.innerHTML = '<img src="' + blob + '" alt="' + escapeAttr(it.name || '') + '">';
+                if (!blob) {
+                    els.lightboxContent.innerHTML = '<div class="lb-unsupported"><p>该链接无法预览</p></div>';
+                } else if (mime.startsWith('image/')) {
+                    els.lightboxContent.innerHTML = '<img src="' + escapeAttr(blob) + '" alt="' + escapeAttr(it.name || '') + '">';
                 } else if (mime.includes('pdf')) {
-                    els.lightboxContent.innerHTML = '<iframe src="' + blob + '" title="' + escapeAttr(it.name || '') + '"></iframe>';
+                    els.lightboxContent.innerHTML = '<iframe src="' + escapeAttr(blob) + '" title="' + escapeAttr(it.name || '') + '"></iframe>';
                 } else if (mime.startsWith('text/') || mime.includes('json') || mime.includes('xml') ||
                            mime.includes('markdown') || mime.includes('javascript') ||
                            mime.includes('x-yaml') || mime.includes('x-sh')) {
@@ -453,7 +471,7 @@
                 msg.attachments.forEach((a, i) => {
                     const blob = blobs[i] || a.url || a.dataUrl;
                     if (a.mime && a.mime.startsWith('image/') && blob) {
-                        html += '<img class="msg-image" src="' + blob + '" alt="' + escapeAttr(a.name) + '" data-img-idx="' + i + '" loading="lazy" decoding="async">';
+                        html += '<img class="msg-image" src="' + escapeAttr(blob) + '" alt="' + escapeAttr(a.name) + '" data-img-idx="' + i + '" loading="lazy" decoding="async">';
                     } else {
                         const mime = a.mime || '';
                         let kind = 'bin';
@@ -3522,9 +3540,10 @@
                 els.loginOverlay.classList.remove('open');
                 setConnectionStatus('connecting', '连接中…');
                 wsEverOpened = false;
-                ws = new WebSocket(WS_URL + '?token=' + encodeURIComponent(state.token) + '&scope=own');
+                // 凭证走首帧 auth 消息，不再拼进 URL——反代 access log 与浏览器历史不落 token
+                ws = new WebSocket(WS_URL + '?scope=own');
 
-                ws.onopen = () => {
+                const onAuthed = () => {
                     const wasOffline = !!wsWasOnline;
                     wsConnected = true;
                     wsEverOpened = true;
@@ -3545,9 +3564,34 @@
                         if (cur) syncSessionFromServer(cur);
                     }
                 };
+                let wsAuthed = false;
+                const preAuthQueue = [];
+                ws.onopen = () => {
+                    setConnectionStatus('connecting', '认证中…');
+                    ws.send(JSON.stringify({ jsonrpc: '2.0', id: 'auth-1', method: 'auth', params: { token: state.token } }));
+                };
                 ws.onmessage = (event) => {
-                    try { handleMessage(JSON.parse(event.data)); }
-                    catch (e) { console.error('parse error', e); }
+                    let msg = null;
+                    try { msg = JSON.parse(event.data); }
+                    catch (e) { console.error('parse error', e); return; }
+                    if (!wsAuthed) {
+                        if (msg.id === 'auth-1') {
+                            if (msg.error) {
+                                // 认证失败（多半 token 过期）：预置 2 次，onclose 累计到 3 即回登录页并停止重连
+                                wsFailCount = 2;
+                                ws.close();
+                                return;
+                            }
+                            wsAuthed = true;
+                            onAuthed();
+                            for (const m of preAuthQueue) handleMessage(m);
+                            return;
+                        }
+                        // 认证完成前网关不该推别的消息；万一有（竞态）排队等认证后处理
+                        preAuthQueue.push(msg);
+                        return;
+                    }
+                    handleMessage(msg);
                 };
                 ws.onclose = () => {
                     ws = null;

@@ -842,12 +842,8 @@ async function mainConnector(cfg: ClientConfig, connectorID: string, ui: LocalUI
     }
   }
 
-  const gatewayURL = new URL(cfg.gateway);
-  if (cfg.deviceKey !== "") {
-    gatewayURL.searchParams.set("key", cfg.deviceKey);
-  } else {
-    gatewayURL.searchParams.set("token", cfg.token);
-  }
+  const gatewayURL = new URL(cfg.gateway); // 仅日志展示用；凭证走首帧 auth 消息
+  const creds = { token: cfg.token, key: cfg.deviceKey };
 
   let interrupted = false;
   process.on("SIGINT", () => {
@@ -862,11 +858,7 @@ async function mainConnector(cfg: ClientConfig, connectorID: string, ui: LocalUI
   while (!interrupted) {
     logger.info("connecting to gateway", { url: gatewayURL.toString(), connector_id: connectorID });
 
-    const ws = await new Promise<WebSocket | null>((resolve) => {
-      const conn = new WebSocket(gatewayURL.toString());
-      conn.once("open", () => resolve(conn));
-      conn.once("error", () => resolve(null));
-    });
+    const ws = await dialGateway(cfg.gateway, creds);
 
     if (interrupted) break;
     if (!ws) {
@@ -1292,6 +1284,60 @@ function gatewayHttpBase(gateway: string): string {
   return (m[1] === "wss" ? "https" : "http") + "://" + m[2];
 }
 
+// 连网关并完成首帧认证：凭证走第一条 auth 消息而非 URL query——
+// 反代 access log、shell 历史、支持工单都会记录完整 URL，密钥不该出现在那里。
+// 对端是旧网关（不认识首帧、无凭证直接 401/断开）时回退一次 query 凭证，升级窗口期兼容。
+async function dialGateway(gateway: string, creds: { token: string; key: string }): Promise<WebSocket | null> {
+  const bare = new URL(gateway);
+  bare.searchParams.delete("token");
+  bare.searchParams.delete("key");
+  const withQuery = new URL(gateway);
+  if (creds.key !== "") withQuery.searchParams.set("key", creds.key);
+  else withQuery.searchParams.set("token", creds.token);
+
+  const tryDial = async (url: URL, firstFrame: boolean): Promise<WebSocket | null> => {
+    const ws = await new Promise<WebSocket | null>((resolve) => {
+      const conn = new WebSocket(url.toString());
+      conn.once("open", () => resolve(conn));
+      conn.once("error", () => resolve(null));
+    });
+    if (!ws || !firstFrame) return ws;
+    const authed = await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), 12_000);
+      timer.unref();
+      const onMessage = (data: unknown): void => {
+        let msg: proto.Message;
+        try {
+          msg = JSON.parse(typeof data === "string" ? data : (data as Buffer).toString()) as proto.Message;
+        } catch {
+          return;
+        }
+        if (msg.id !== "auth-1") return;
+        clearTimeout(timer);
+        ws.off("close", onClose);
+        resolve(msg.error === undefined);
+      };
+      const onClose = (): void => {
+        clearTimeout(timer);
+        ws.off("message", onMessage);
+        resolve(false);
+      };
+      ws.once("message", onMessage);
+      ws.once("close", onClose);
+      ws.send(JSON.stringify(proto.newRequest("auth-1", proto.METHOD_AUTH, {
+        ...(creds.key !== "" ? { key: creds.key } : { token: creds.token }),
+      } satisfies proto.AuthParams)));
+    });
+    if (!authed) {
+      try { ws.close(); } catch { /* 已断开 */ }
+      return null;
+    }
+    return ws;
+  };
+
+  return (await tryDial(bare, true)) ?? (await tryDial(withQuery, false));
+}
+
 // manifest → 本机 override target（{{install_dir}} 解析）；web/app 返回 null（不托管）
 function overrideTargetFor(manifest: ProductManifest, installDir: string): { conn_type: string; target: string } | null {
   if (manifest.kind === "stdio") {
@@ -1373,18 +1419,53 @@ function updateInPlace(destDir: string, buf: Buffer, sha256?: string | null): { 
   }
 }
 
-// 从网关取包：目录条目 + 包体（install-remote 与原地更新共用语义）
+// 从网关取包：目录条目 + 包体（install-remote 与原地更新共用语义）。
+// 供应链基线：明文信道仅限本机回环（远程必须 wss/https）；
+// 目录条目必须带有效 sha256 并对下载体强校验；按目录 size 限制内存缓冲。
 async function fetchRemotePackage(cfg: ClientConfig, brand: string, version: string): Promise<{
   buf: Buffer; entry: Record<string, unknown>;
 }> {
   const base = gatewayHttpBase(cfg.gateway);
+  if (base.startsWith("http://")) {
+    const host = base.slice("http://".length).split(/[/:]/)[0].toLowerCase();
+    const loopback = host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host === "::1" || host.endsWith(".localhost");
+    if (!loopback) {
+      throw new Error("网关为明文 http 且非本机地址：拒绝下载产品包（请改用 wss:// 网关地址）");
+    }
+  }
   const cr = await fetch(base + "/products/catalog", { signal: AbortSignal.timeout(8000) });
   const catalog = cr.ok ? ((await cr.json()) as { products?: Array<Record<string, unknown>> }).products || [] : [];
   const entry = catalog.find(x => x.brand === brand && x.version === version);
   if (!entry) throw new Error("网关目录里没有 " + brand + " " + version);
+  const sha256 = typeof entry.sha256 === "string" ? entry.sha256 : "";
+  if (!/^[0-9a-f]{64}$/i.test(sha256)) {
+    throw new Error("目录条目缺少有效 sha256：拒绝下载（完整性无法校验，请检查网关产品目录）");
+  }
+  // 缓冲上限：目录声明 size + 1MB 余量；目录没给 size 时退 512MB 硬顶（与服务端上传上限一致）
+  const expectedSize = typeof entry.size === "number" && entry.size > 0 ? entry.size : 0;
+  const sizeCap = expectedSize > 0 ? expectedSize + 1024 * 1024 : 512 * 1024 * 1024;
   const dr = await fetch(base + "/products/" + brand + "/" + version + "/download", { signal: AbortSignal.timeout(300_000) });
   if (!dr.ok) throw new Error("下载失败（HTTP " + dr.status + "）");
-  return { buf: Buffer.from(await dr.arrayBuffer()), entry };
+  if (!dr.body) throw new Error("下载响应无 body");
+  const reader = dr.body.getReader();
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > sizeCap) {
+      await reader.cancel().catch(() => {});
+      throw new Error("下载体积超过目录声明（上限 " + sizeCap + " 字节）：疑似异常，已中止");
+    }
+    chunks.push(Buffer.from(value));
+  }
+  const buf = Buffer.concat(chunks);
+  const actual = crypto.createHash("sha256").update(buf).digest("hex");
+  if (actual !== sha256.toLowerCase()) {
+    throw new Error("包 sha256 校验失败：内容与目录不符（可能被篡改或损坏），已丢弃");
+  }
+  return { buf, entry };
 }
 
 // ---- 本地运行（不接网关）：把已装产品按 manifest 命令拉起，日志落文件，可停 ----
@@ -1628,6 +1709,38 @@ async function handleUIRequest(
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
   const p = url.pathname;
+  // 回环边界校验（本地管理页能触发下载/换目录/起进程，不能只靠"绑了 127.0.0.1"）：
+  // 1) Host 只认本机——防 DNS rebinding（他人域名解析到 127.0.0.1 后直连本页）；
+  // 2) 带 Origin 的请求必须是回环 origin——防恶意网页跨站 fetch 本机 API；
+  // 3) 带 body 的非 GET 请求必须 application/json——text/plain 的跨站 POST 无需
+  //    CORS 预检就能携带任意 body，是绕过 2) 的常见通道。
+  const hostName = (req.headers.host ?? "").toLowerCase().split(":")[0];
+  if (hostName !== "localhost" && hostName !== "127.0.0.1" && hostName !== "[::1]" && hostName !== "::1") {
+    sendJSON(res, 403, { error: "Host 不被接受（本地管理页仅限本机访问）" });
+    return;
+  }
+  const origin = req.headers.origin;
+  if (origin !== undefined && origin !== "") {
+    let originOk = false;
+    try {
+      const o = new URL(origin);
+      originOk = (o.protocol === "http:" || o.protocol === "https:")
+        && (o.hostname === "localhost" || o.hostname === "127.0.0.1" || o.hostname === "::1" || o.hostname === "[::1]");
+    } catch { originOk = false; }
+    if (!originOk) {
+      sendJSON(res, 403, { error: "跨站请求被拒绝" });
+      return;
+    }
+  }
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    const contentLength = Number(req.headers["content-length"] ?? 0);
+    const ct = (req.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase();
+    // 白名单：JSON API + 本页的二进制包上传（octet-stream 跨站会触发 CORS 预检，到不了这里）
+    if (contentLength > 0 && ct !== "application/json" && ct !== "application/octet-stream") {
+      sendJSON(res, 415, { error: "Content-Type 不被接受（application/json）" });
+      return;
+    }
+  }
   if (req.method === "GET" && (p === "/" || p === "/index.html")) {
     const html = await fsp.readFile(uiPagePath(), "utf8");
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
@@ -2138,12 +2251,8 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const gatewayURL = new URL(cfg.gateway);
-  if (cfg.deviceKey !== "") {
-    gatewayURL.searchParams.set("key", cfg.deviceKey);
-  } else {
-    gatewayURL.searchParams.set("token", cfg.token);
-  }
+  const gatewayURL = new URL(cfg.gateway); // 仅日志展示用；凭证走首帧 auth 消息
+  const creds = { token: cfg.token, key: cfg.deviceKey };
 
   const tasks = new TaskRegistry(cfg.taskTimeoutMs);
   let interrupted = false;
@@ -2172,11 +2281,7 @@ async function main(): Promise<void> {
   while (!interrupted) {
     logger.info("connecting to gateway", { url: gatewayURL.toString() });
 
-    const ws = await new Promise<WebSocket | null>((resolve) => {
-      const conn = new WebSocket(gatewayURL.toString());
-      conn.once("open", () => resolve(conn));
-      conn.once("error", () => resolve(null));
-    });
+    const ws = await dialGateway(cfg.gateway, creds);
 
     if (interrupted) break;
     if (!ws) {

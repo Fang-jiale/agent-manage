@@ -99,6 +99,19 @@ WebSocket 连接通过 URL Query 参数携带 JWT：
 
 JWT 为 HS256 签名（密钥：`AGENT_MANAGE_JWT_SECRET`），`sub` 即用户 ID，有效期由 `AGENT_MANAGE_JWT_TTL` 控制（默认 7 天）。Token 缺失、签名错误或过期，网关返回 `401 Unauthorized`。
 
+### 3.1.0.1 WebSocket 首帧认证（推荐）
+
+query 凭证（`?token=` / `?key=`）会随完整 URL 落进反向代理 access log、shell 历史与浏览器记录。新客户端应改用**首帧认证**：不带 query 凭证升级连接，第一条消息必须是 `auth` 请求（10s 内未完成即被断开，close code `4001`）：
+
+```json
+{ "jsonrpc": "2.0", "id": "auth-1", "method": "auth", "params": { "token": "<JWT>" } }
+```
+
+- `/ws/agent` 可用 `token`（JWT）或 `key`（设备密钥）二选一；`/ws/admin` 仅接受 `token`
+- 认证通过收到正常响应后，连接才进入已认证状态，之后的消息按常规处理
+- 认证失败收到 `-32004` 错误响应并断开（`4001 invalid credentials`）；首帧不是 `auth` 同样断开
+- query 凭证路径保留（存量终端兼容），新代码不应再使用
+
 ### 3.1.1 设备密钥（Device Key）
 
 长期运行的 AgentClient 可不用 JWT，改用设备密钥接入（管理后台「设备密钥」页或 `device_key.create` 创建）：

@@ -117,7 +117,11 @@ async function startFixture(t: import("node:test").TestContext): Promise<Fixture
   }
   await db.setUserRole(ADMIN, "admin");
   // 清理上次残留
-  for (const [id, owner] of [["perm-a1", OWNER], ["perm-a2", OWNER], ["perm-b1", OTHER]] as const) {
+  for (const [id, owner] of [
+    ["perm-a1", OWNER], ["perm-a2", OWNER], ["perm-b1", OTHER],
+    ["perm-hijack-1", OWNER], ["perm-prog-a", OWNER], ["perm-prog-b", OTHER],
+    ["perm-ffa-1", OWNER],
+  ] as const) {
     await db.unassignAgent(id).catch(() => {});
     await db.setNickname(owner, id, null).catch(() => {});
   }
@@ -274,6 +278,215 @@ test("brand.list readable by normal user, writes and approvals admin-only", asyn
     assert.equal((await userConn.next()).error?.code, proto.ERR_UNAUTHORIZED);
   } finally {
     for (const c of conns) c.close();
+    await fx.close();
+  }
+});
+
+// 归属校验：他人持自己的有效凭据抢注已有 agent_id，必须被拒且不踢正主连接、不改归属
+test("agent.register cannot hijack another user's agent_id", async (t) => {
+  const fx = await startFixture(t);
+  if (!fx) return;
+  const { db, base } = fx;
+  await upsertAgentRow(db, "perm-hijack-1", OWNER);
+  const owner = await Conn.dial(`${base}/ws/agent?token=${jwtFor(OWNER)}`);
+  try {
+    owner.send(proto.newRequest("reg-ok", proto.METHOD_REGISTER, {
+      agent_id: "perm-hijack-1", name: "perm-hijack-1",
+      capabilities: [{ type: "chat", name: "general" }],
+    } satisfies proto.RegisterParams));
+    const ok = await owner.next();
+    assert.equal(ok.error, undefined, JSON.stringify(ok.error));
+
+    const attacker = await Conn.dial(`${base}/ws/agent?token=${jwtFor(OTHER)}`);
+    try {
+      attacker.send(proto.newRequest("reg-bad", proto.METHOD_REGISTER, {
+        agent_id: "perm-hijack-1", name: "stolen", capabilities: [],
+      } satisfies proto.RegisterParams));
+      const denied = await attacker.next();
+      assert.equal(denied.error?.code, proto.ERR_UNAUTHORIZED, JSON.stringify(denied.error));
+
+      // 正主连接未被踢（4001/4002 都会关 ws）：心跳仍能得到响应，归属未变
+      owner.send(proto.newRequest("hb-1", proto.METHOD_HEARTBEAT, {
+        agent_id: "perm-hijack-1", timestamp: new Date().toISOString(),
+      } satisfies proto.HeartbeatParams));
+      const hb = await owner.next();
+      assert.equal(hb.error, undefined, JSON.stringify(hb.error));
+      const row = await db.getAgentRow("perm-hijack-1");
+      assert.equal(row?.owner_id, OWNER);
+    } finally {
+      attacker.close();
+    }
+  } finally {
+    owner.close();
+    await fx.close();
+  }
+});
+
+// product.push 是管理动作：非 admin 拒绝；admin 也只能推目录里真实存在的包
+test("product.push is admin-only and catalog-checked", async (t) => {
+  const fx = await startFixture(t);
+  if (!fx) return;
+  const { base } = fx;
+  const userConn = await Conn.dial(`${base}/ws/admin?token=${jwtFor(OTHER)}`);
+  const adminConn = await Conn.dial(`${base}/ws/admin?token=${jwtFor(ADMIN)}`);
+  try {
+    await userConn.next(proto.METHOD_ADMIN_AGENT_LIST);
+    await adminConn.next(proto.METHOD_ADMIN_AGENT_LIST);
+
+    userConn.send(proto.newRequest("push-1", proto.METHOD_PRODUCT_PUSH, {
+      brand: "no-such-brand", version: "9.9.9",
+    }));
+    const denied = await userConn.next();
+    assert.equal(denied.error?.code, proto.ERR_UNAUTHORIZED, JSON.stringify(denied.error));
+
+    adminConn.send(proto.newRequest("push-2", proto.METHOD_PRODUCT_PUSH, {
+      brand: "no-such-brand", version: "9.9.9",
+    }));
+    const missing = await adminConn.next();
+    assert.equal(missing.error?.code, proto.ERR_INVALID_PARAMS, JSON.stringify(missing.error));
+  } finally {
+    userConn.close();
+    adminConn.close();
+    await fx.close();
+  }
+});
+
+// 连接鉴权 ≠ 内容鉴权：payload 里的 agent_id / task_id 不属于本连接托管时，进度必须被忽略
+test("progress with foreign agent_id or task_id is ignored", async (t) => {
+  const fx = await startFixture(t);
+  if (!fx) return;
+  const { db, base } = fx;
+  const conns: Conn[] = [];
+  try {
+    await upsertAgentRow(db, "perm-prog-a", OWNER);
+    const agentA = await Conn.dial(`${base}/ws/agent?token=${jwtFor(OWNER)}`);
+    const agentB = await Conn.dial(`${base}/ws/agent?token=${jwtFor(OTHER)}`);
+    conns.push(agentA, agentB);
+    for (const [conn, id] of [[agentA, "perm-prog-a"], [agentB, "perm-prog-b"]] as const) {
+      conn.send(proto.newRequest("reg-" + id, proto.METHOD_REGISTER, {
+        agent_id: id, name: id, capabilities: [{ type: "chat", name: "general" }],
+      } satisfies proto.RegisterParams));
+      const r = await conn.next();
+      assert.equal(r.error, undefined, JSON.stringify(r.error));
+    }
+    // 等注册广播的 1s 防抖落定，避免后续 next() 抓到 agent.list 推送
+    await new Promise((r) => setTimeout(r, 1300));
+
+    const userConn = await Conn.dial(`${base}/ws/admin?token=${jwtFor(OWNER)}`);
+    conns.push(userConn);
+    await userConn.next(proto.METHOD_ADMIN_AGENT_LIST);
+
+    const taskID = "perm-task-1";
+    userConn.send(proto.newRequest("t-1", proto.METHOD_TASK_CREATE, {
+      agent_id: "perm-prog-a", task_id: taskID, type: "chat", content: "hi",
+    } satisfies proto.TaskCreateParams));
+    const chat = await agentA.next(proto.METHOD_AGENT_CHAT);
+    assert.equal(chat.id, "t-1");
+    agentA.send(proto.newResponse("t-1", { status: "accepted", task_id: taskID } satisfies proto.TaskAcceptResult));
+    const accept = await userConn.next();
+    assert.equal(accept.id, "t-1");
+
+    // B 用自己的 agent_id 配 A 的 task_id：任务不属于 B → 忽略
+    agentB.send(proto.newNotification(proto.METHOD_PROGRESS, {
+      token: taskID,
+      value: {
+        kind: proto.PROGRESS_KIND_END, type: proto.CHUNK_TYPE_TEXT,
+        agent_id: "perm-prog-b", task_id: taskID,
+        content: proto.textContent("forged-by-b"), done: true,
+      },
+    } satisfies proto.ProgressParams));
+    // B 直接伪造 A 的 agent_id：非本连接托管 → 忽略
+    agentB.send(proto.newNotification(proto.METHOD_PROGRESS, {
+      token: taskID,
+      value: {
+        kind: proto.PROGRESS_KIND_END, type: proto.CHUNK_TYPE_TEXT,
+        agent_id: "perm-prog-a", task_id: taskID,
+        content: proto.textContent("forged-as-a"), done: true,
+      },
+    } satisfies proto.ProgressParams));
+    // B 谎报 A 下线 → 忽略，A 仍在线
+    agentB.send(proto.newRequest("st-1", proto.METHOD_STATUS, {
+      agent_id: "perm-prog-a", status: proto.AGENT_STATUS_OFFLINE,
+    } satisfies proto.StatusParams));
+
+    const leaked = await userConn.next(proto.METHOD_ADMIN_PROGRESS, 500).then(
+      () => "leaked", () => "none");
+    assert.equal(leaked, "none", "forged progress must not reach the task owner");
+
+    // 正主 A 的 done 正常送达，任务正常收尾
+    const chatParams = proto.decodeParams<proto.AgentChatParams>(chat);
+    agentA.send(proto.newNotification(proto.METHOD_PROGRESS, {
+      token: taskID,
+      value: {
+        kind: proto.PROGRESS_KIND_END, type: proto.CHUNK_TYPE_TEXT,
+        agent_id: "perm-prog-a", task_id: taskID,
+        session_id: chatParams.session_id,
+        content: proto.textContent("real done"), done: true,
+      },
+    } satisfies proto.ProgressParams));
+    const progress = proto.decodeParams<proto.AdminProgressParams>(await userConn.next(proto.METHOD_ADMIN_PROGRESS));
+    assert.equal(progress.done, true);
+
+    userConn.send(proto.newRequest("al-9", proto.METHOD_AGENT_LIST, {}));
+    const listed = await userConn.next();
+    assert.equal(listed.error, undefined, JSON.stringify(listed.error));
+    const agents = (listed.result as proto.AdminAgentListResult).agents;
+    assert.equal(agents.find((a) => a.id === "perm-prog-a")?.status, proto.AGENT_STATUS_ONLINE,
+      "spoofed offline status must not unregister the victim agent");
+
+    await db.deleteSession(OWNER, chatParams.session_id || `${taskID}-session`).catch(() => {});
+    await db.unassignAgent("perm-prog-a").catch(() => {});
+    await db.unassignAgent("perm-prog-b").catch(() => {});
+  } finally {
+    for (const c of conns) c.close();
+    await fx.close();
+  }
+});
+
+// 首帧认证：凭证走第一条 auth 消息而非 URL query（反代日志/浏览器历史不再记录 token）
+test("first-frame auth: credentials via auth message, not URL", async (t) => {
+  const fx = await startFixture(t);
+  if (!fx) return;
+  const { db, base } = fx;
+  const conn = await Conn.dial(`${base}/ws/agent`); // 无 query 凭证
+  try {
+    conn.send(proto.newRequest("auth-1", proto.METHOD_AUTH, { token: jwtFor(OWNER) } satisfies proto.AuthParams));
+    const authResp = await conn.next();
+    assert.equal(authResp.error, undefined, JSON.stringify(authResp.error));
+    assert.equal((authResp.result as { status?: string }).status, "ok");
+
+    // 认证通过后正常注册（身份 = 首帧 token 的属主）
+    conn.send(proto.newRequest("reg-1", proto.METHOD_REGISTER, {
+      agent_id: "perm-ffa-1", name: "perm-ffa-1", capabilities: [{ type: "chat", name: "general" }],
+    } satisfies proto.RegisterParams));
+    const reg = await conn.next();
+    assert.equal(reg.error, undefined, JSON.stringify(reg.error));
+
+    // 伪造 token 首帧 → 拒绝并断开
+    const bad = await Conn.dial(`${base}/ws/agent`);
+    try {
+      bad.send(proto.newRequest("auth-1", proto.METHOD_AUTH, { token: "forged.jwt.sig" } satisfies proto.AuthParams));
+      const denied = await bad.next();
+      assert.equal(denied.error?.code, proto.ERR_UNAUTHORIZED, JSON.stringify(denied.error));
+    } finally {
+      bad.close();
+    }
+
+    // 首帧不是 auth → 拒绝并断开
+    const bad2 = await Conn.dial(`${base}/ws/agent`);
+    try {
+      bad2.send(proto.newRequest("reg-x", proto.METHOD_REGISTER, {
+        agent_id: "perm-ffa-2", name: "x", capabilities: [],
+      } satisfies proto.RegisterParams));
+      const denied2 = await bad2.next();
+      assert.equal(denied2.error?.code, proto.ERR_UNAUTHORIZED, JSON.stringify(denied2.error));
+    } finally {
+      bad2.close();
+    }
+
+    await db.unassignAgent("perm-ffa-1").catch(() => {});
+  } finally {
+    conn.close();
     await fx.close();
   }
 });

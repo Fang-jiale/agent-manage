@@ -11,13 +11,56 @@ LOCAL_AGENT_PORT=19001
 JWT_SECRET=e2e-secret
 
 PIDS=()
+BRANDS_SNAPSHOT="$(mktemp)"
+DB_URL="${AGENT_MANAGE_TEST_DATABASE_URL:-mysql://ywmatrix:ywmatrix_dev@localhost:3306/ywmatrix}"
+
+restore_brands() {
+    # 恢复被清空的品牌目录（治理模式下裸注册会被拒，e2e 需要开放模式）
+    node --input-type=module - "$ROOT" "$BRANDS_SNAPSHOT" "$DB_URL" <<'NODE' || echo "WARN: 品牌恢复失败，请手动检查 agent_brands 表"
+const path = await import("node:path");
+const root = process.argv[2];
+const snapshotFile = process.argv[3];
+const dbUrl = process.argv[4];
+const { Db } = await import(path.join(root, "src/db.ts"));
+const raw = (await import("node:fs")).readFileSync(snapshotFile, "utf8").trim();
+if (!raw) process.exit(0);
+const brands = JSON.parse(raw);
+const db = new Db(dbUrl);
+await db.init();
+for (const b of brands) {
+  await db.createBrand({
+    id: b.id, name: b.name, description: b.description, logo_url: b.logo_url,
+    capabilities: b.capabilities, launch_cmd: b.launch_cmd, conn_type: b.conn_type, endpoint: b.endpoint,
+  }).catch(() => {});
+}
+await db.close();
+NODE
+}
+
 cleanup() {
     echo "cleaning up..."
     for pid in "${PIDS[@]}"; do
         kill "$pid" 2>/dev/null || true
     done
+    [ -s "$BRANDS_SNAPSHOT" ] && restore_brands
+    rm -f "$BRANDS_SNAPSHOT"
 }
 trap cleanup EXIT
+
+# 品牌目录非空会开启治理模式导致注册被拒：快照后清空（开放模式），结束后恢复
+node --input-type=module - "$ROOT" "$BRANDS_SNAPSHOT" "$DB_URL" <<'NODE'
+const path = await import("node:path");
+const root = process.argv[2];
+const snapshotFile = process.argv[3];
+const dbUrl = process.argv[4];
+const { Db } = await import(path.join(root, "src/db.ts"));
+const db = new Db(dbUrl);
+await db.init();
+const brands = await db.listBrands();
+for (const b of brands) await db.deleteBrand(b.id);
+(await import("node:fs")).writeFileSync(snapshotFile, JSON.stringify(brands));
+await db.close();
+NODE
 
 echo "starting local-agent on $LOCAL_AGENT_PORT..."
 node "$ROOT/src/local-agent.ts" -addr ":$LOCAL_AGENT_PORT" &

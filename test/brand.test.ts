@@ -135,8 +135,8 @@ async function setup(t: import("node:test").TestContext): Promise<Fixture | unde
   const suffix = crypto.randomUUID();
   const adminID = `adm-${suffix}`;
   const aliceID = `alice-${suffix}`;
-  await db.createUser({ id: adminID, name: adminID, password_hash: hashPassword("pw"), role: "admin" });
-  await db.createUser({ id: aliceID, name: aliceID, password_hash: hashPassword("pw") });
+  await db.createUser({ id: adminID, name: adminID, password_hash: await hashPassword("pw"), role: "admin" });
+  await db.createUser({ id: aliceID, name: aliceID, password_hash: await hashPassword("pw") });
 
   const { server } = await createGatewayServer(testConfig(), STATIC_FILE, db);
   await new Promise<void>((resolve) => server.listen(0, resolve));

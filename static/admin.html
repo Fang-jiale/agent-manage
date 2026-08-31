@@ -467,18 +467,37 @@
                 if (ws) return;
                 setConnectionStatus('connecting', '连接中…');
                 wsEverOpened = false;
-                ws = new WebSocket(WS_URL + '?token=' + encodeURIComponent(token));
+                // 凭证走首帧 auth 消息，不再拼进 URL——反代 access log 与浏览器历史不落 token
+                ws = new WebSocket(WS_URL);
+                let wsAuthed = false;
                 ws.onopen = () => {
-                    document.getElementById("bootSpinner")?.remove();
-                    wsEverOpened = true;
-                    wsFailCount = 0;
-                    reconnectDelay = 1000;
-                    setConnectionStatus('connected', '已连接');
-                    switchTab(currentTab);
+                    setConnectionStatus('connecting', '认证中…');
+                    ws.send(JSON.stringify({ jsonrpc: '2.0', id: 'auth-1', method: 'auth', params: { token } }));
                 };
                 ws.onmessage = (event) => {
-                    try { handleMessage(JSON.parse(event.data)); }
-                    catch (e) { console.error('parse error', e); }
+                    let msg = null;
+                    try { msg = JSON.parse(event.data); }
+                    catch (e) { console.error('parse error', e); return; }
+                    if (!wsAuthed) {
+                        if (msg.id === 'auth-1') {
+                            if (msg.error) {
+                                // 认证失败（token 过期）：预置 2 次，onclose 累计到 3 即回登录页并停止重连
+                                wsFailCount = 2;
+                                ws.close();
+                                return;
+                            }
+                            wsAuthed = true;
+                            document.getElementById("bootSpinner")?.remove();
+                            wsEverOpened = true;
+                            wsFailCount = 0;
+                            reconnectDelay = 1000;
+                            setConnectionStatus('connected', '已连接');
+                            switchTab(currentTab);
+                            return;
+                        }
+                        return; // 认证前忽略其余消息（正常不会出现）
+                    }
+                    handleMessage(msg);
                 };
                 ws.onclose = () => {
                     ws = null;

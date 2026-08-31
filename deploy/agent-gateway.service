@@ -12,6 +12,8 @@ TimeoutStopSec=15
 User=agent
 Group=agent
 WorkingDirectory=/opt/agent-manage
+# 生产模式：弱默认值（开发库凭据/admin123/minioadmin/短 jwt secret）会拒绝启动
+Environment=NODE_ENV=production
 Environment=AGENT_MANAGE_DATABASE_URL=mysql://ywmatrix:CHANGE_ME@127.0.0.1:3306/ywmatrix
 # JWT secret：默认从 /opt/agent-manage/data/jwt-secret 自动生成并持久化（推荐）；
 # 如要强制指定或与其它实例共享，再取消下一行注释（至少 32 字节随机串）：

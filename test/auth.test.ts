@@ -1,22 +1,42 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { hashPassword, verifyPassword, signJwt, verifyJwt } from "../src/auth.ts";
+import crypto from "node:crypto";
+import { hashPassword, verifyPassword, passwordNeedsRehash, signJwt, verifyJwt } from "../src/auth.ts";
 
-test("password hash roundtrip", () => {
-  const stored = hashPassword("s3cret");
-  assert.ok(stored.startsWith("scrypt:"));
-  assert.equal(verifyPassword("s3cret", stored), true);
-  assert.equal(verifyPassword("wrong", stored), false);
+test("password hash roundtrip (scrypt2 with embedded params)", async () => {
+  const stored = await hashPassword("s3cret");
+  const parts = stored.split(":");
+  assert.equal(parts[0], "scrypt2");
+  assert.equal(Number(parts[1]), 2 ** 17); // OWASP 级参数入格式
+  assert.equal(Number(parts[2]), 8);
+  assert.equal(Number(parts[3]), 1);
+  assert.equal(await verifyPassword("s3cret", stored), true);
+  assert.equal(await verifyPassword("wrong", stored), false);
+  assert.equal(passwordNeedsRehash(stored), false);
 });
 
-test("verifyPassword rejects malformed stored hash", () => {
-  assert.equal(verifyPassword("x", ""), false);
-  assert.equal(verifyPassword("x", "plain"), false);
-  assert.equal(verifyPassword("x", "bcrypt:aa:bb"), false);
+test("legacy scrypt format still verifies and is flagged for rehash", async () => {
+  // 旧格式（Node 默认参数 N=16384）：历史库存量条目，验证通过后登录路径会静默升级
+  const salt = crypto.randomBytes(16).toString("hex");
+  const hash = crypto.scryptSync("s3cret", salt, 64).toString("hex");
+  const stored = `scrypt:${salt}:${hash}`;
+  assert.equal(await verifyPassword("s3cret", stored), true);
+  assert.equal(await verifyPassword("wrong", stored), false);
+  assert.equal(passwordNeedsRehash(stored), true);
 });
 
-test("same password produces different salts", () => {
-  assert.notEqual(hashPassword("pw"), hashPassword("pw"));
+test("verifyPassword rejects malformed stored hash", async () => {
+  assert.equal(await verifyPassword("x", ""), false);
+  assert.equal(await verifyPassword("x", "plain"), false);
+  assert.equal(await verifyPassword("x", "bcrypt:aa:bb"), false);
+  assert.equal(await verifyPassword("x", "scrypt2:not:num:eric:aa:bb"), false);
+  // 参数越界（防库里被塞入天文数字参数卡死线程池）
+  assert.equal(await verifyPassword("x", "scrypt2:999999999:8:1:aa:bb"), false);
+  assert.equal(await verifyPassword("x", "scrypt2:1048576:8:1:aa:bb"), false);
+});
+
+test("same password produces different salts", async () => {
+  assert.notEqual(await hashPassword("pw"), await hashPassword("pw"));
 });
 
 test("jwt sign/verify roundtrip", () => {

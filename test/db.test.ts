@@ -25,7 +25,7 @@ test("user/session/message roundtrip", async (t) => {
   const uid = "test-" + crypto.randomUUID();
   const sid = crypto.randomUUID();
   try {
-    await db.createUser({ id: uid, name: uid, password_hash: hashPassword("pw") });
+    await db.createUser({ id: uid, name: uid, password_hash: await hashPassword("pw") });
     const u = await db.getUserByName(uid);
     assert.equal(u?.id, uid);
     assert.equal((await db.getUserById(uid))?.name, uid);
@@ -81,7 +81,7 @@ test("user management", async (t) => {
   if (!db) return;
   const uid = "test-" + crypto.randomUUID();
   try {
-    await db.createUser({ id: uid, name: uid, password_hash: hashPassword("pw1"), role: "admin" });
+    await db.createUser({ id: uid, name: uid, password_hash: await hashPassword("pw1"), role: "admin" });
     let u = await db.getUserById(uid);
     assert.equal(u?.role, "admin");
     assert.equal(u?.disabled, 0);
@@ -91,7 +91,7 @@ test("user management", async (t) => {
     assert.equal(u?.disabled, 1);
     assert.equal(await db.setUserDisabled("nonexistent", true), false);
 
-    assert.equal(await db.setUserPassword(uid, hashPassword("pw2")), true);
+    assert.equal(await db.setUserPassword(uid, await hashPassword("pw2")), true);
     assert.notEqual((await db.getUserById(uid))?.password_hash, u?.password_hash);
 
     const users = await db.listUsers();
@@ -107,7 +107,7 @@ test("user management", async (t) => {
 
     // 分页 + 搜索
     const uid2 = "test-" + crypto.randomUUID();
-    await db.createUser({ id: uid2, name: uid2, password_hash: hashPassword("pw") });
+    await db.createUser({ id: uid2, name: uid2, password_hash: await hashPassword("pw") });
     const all = await db.listUsersPaged({ limit: 100, offset: 0 });
     assert.ok(all.users.some((x) => x.id === uid));
     assert.ok(all.total >= 2);

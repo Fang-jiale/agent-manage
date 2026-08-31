@@ -32,6 +32,16 @@ export const METHOD_HEARTBEAT = "system.heartbeat";
 export const METHOD_STATUS = "system.status";
 export const METHOD_CAPABILITIES_UPDATED = "system.capabilities_updated";
 
+// 首帧认证：连接建立后第一条消息（query 凭证之外的安全通道，
+// 避免 token/设备密钥进反代 access log 与浏览器历史）
+export const METHOD_AUTH = "auth";
+export const AUTH_TIMEOUT_MS = 10_000;
+
+export interface AuthParams {
+  token?: string; // JWT（/ws/admin 与 /ws/agent 均可）
+  key?: string; // 设备密钥（仅 /ws/agent）
+}
+
 export const METHOD_AGENT_CHAT = "agent.chat";
 export const METHOD_AGENT_CANCEL = "agent.cancel";
 export const METHOD_AGENT_RESPOND = "agent.respond";

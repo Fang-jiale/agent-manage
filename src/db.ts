@@ -497,6 +497,12 @@ export class Db {
     return (res as mysql.ResultSetHeader).affectedRows > 0;
   }
 
+  // 测试夹具清理用：按属主删 agent 行（agent.register 现在拒绝覆写他人归属，
+  // 固定 agent_id 的测试必须自己清掉上一轮留下的行）
+  async deleteAgentsByOwner(ownerID: string): Promise<void> {
+    await this.pool.query("DELETE FROM agents WHERE owner_id = ?", [ownerID]);
+  }
+
   async setAgentApproval(id: string, status: "approved" | "pending" | "rejected"): Promise<boolean> {
     const [res] = await this.pool.query("UPDATE agents SET approval_status = ? WHERE id = ?", [status, id]);
     return (res as mysql.ResultSetHeader).affectedRows > 0;

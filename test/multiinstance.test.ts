@@ -133,7 +133,7 @@ test("two instances route tasks via redis bus", async (t) => {
     return;
   }
   const uid = "mi-" + crypto.randomUUID();
-  await db.createUser({ id: uid, name: uid, password_hash: hashPassword("pw") });
+  await db.createUser({ id: uid, name: uid, password_hash: await hashPassword("pw") });
   const token = signJwt({ sub: uid, name: uid }, JWT_SECRET, 60_000);
   const taskID = "mi-task-" + crypto.randomUUID().slice(0, 8);
   // 品牌目录非空会开启治理模式导致注册被拒：快照后清空（开放模式），结束后恢复
@@ -147,12 +147,14 @@ test("two instances route tasks via redis bus", async (t) => {
     gw1 = await startGw("mi-gw-1", db); // agent 侧
     gw2 = await startGw("mi-gw-2", db); // 用户侧
 
-    // agent 注册到 gw-1
+    // agent 注册到 gw-1（agent_id 带随机 uid：注册不再覆写他人归属，
+    // 固定 id 会撞上次运行留下的行而被拒）
+    const agentID = "mi-agent-" + uid.slice(3);
     const agent = await Conn.dial(`${gw1.base}/ws/agent?token=${token}`);
     conns.push(agent);
     agent.send(proto.newRequest("reg-1", proto.METHOD_REGISTER, {
-      agent_id: "mi-agent",
-      name: "mi-agent",
+      agent_id: agentID,
+      name: agentID,
       capabilities: [{ type: "chat", name: "general" }],
     } satisfies proto.RegisterParams));
     const regResp = await agent.next();
@@ -162,11 +164,11 @@ test("two instances route tasks via redis bus", async (t) => {
     const admin = await Conn.dial(`${gw2.base}/ws/admin?token=${token}`);
     conns.push(admin);
     const list = proto.decodeParams<proto.AgentListParams>(await admin.next(proto.METHOD_ADMIN_AGENT_LIST));
-    assert.ok(list.agents.some((a) => a.id === "mi-agent"), `agent list: ${JSON.stringify(list.agents)}`);
+    assert.ok(list.agents.some((a) => a.id === agentID), `agent list: ${JSON.stringify(list.agents)}`);
 
     // task.create 到达 gw-2，经总线路由到 gw-1 的 agent
     admin.send(proto.newRequest("req-1", proto.METHOD_TASK_CREATE, {
-      agent_id: "mi-agent",
+      agent_id: agentID,
       task_id: taskID,
       type: "chat",
       content: "hello across instances",
@@ -192,7 +194,7 @@ test("two instances route tasks via redis bus", async (t) => {
       value: {
         kind: proto.PROGRESS_KIND_END,
         type: proto.CHUNK_TYPE_TEXT,
-        agent_id: "mi-agent",
+        agent_id: agentID,
         task_id: taskID,
         session_id: chatParams.session_id,
         content: proto.textContent("done"),
@@ -207,7 +209,7 @@ test("two instances route tasks via redis bus", async (t) => {
     const deadline = Date.now() + 3000;
     let roles: string[] = [];
     while (Date.now() < deadline) {
-      const session = (await db.listSessions(uid)).find((s) => s.agent_id === "mi-agent");
+      const session = (await db.listSessions(uid)).find((s) => s.agent_id === agentID);
       if (session) {
         roles = (await db.listMessages(uid, session.id, 50)).map((m) => m.role).sort();
         if (roles.length === 2) break;
@@ -225,6 +227,7 @@ test("two instances route tasks via redis bus", async (t) => {
         capabilities: b.capabilities, launch_cmd: b.launch_cmd, conn_type: b.conn_type, endpoint: b.endpoint,
       }).catch(() => {});
     }
+    await db.deleteAgentsByOwner(uid).catch(() => {});
     await db.deleteUser(uid).catch(() => {});
     await db.close();
   }

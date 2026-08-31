@@ -16,7 +16,7 @@ import {
   createS3AttachmentStore,
   sanitizeFileName,
 } from "./storage.ts";
-import { hashPassword, verifyPassword, signJwt, verifyJwt } from "./auth.ts";
+import { hashPassword, verifyPassword, passwordNeedsRehash, signJwt, verifyJwt } from "./auth.ts";
 import { OIDCProvider } from "./oidc.ts";
 import { readTarEntry } from "./tar.ts";
 import { Metrics } from "./metrics.ts";
@@ -134,6 +134,7 @@ export class Hub {
   db?: Db;
   bus?: Bus;
   attachments?: AttachmentStore;
+  productsDir?: string; // 产品分发目录；product.push 用它校验 brand/version 真实存在
   metrics = new Metrics();
   taskLimiter = new RateLimiter(30, 60_000); // 每用户每分钟 30 个任务
   deviceKeyLimiter = new RateLimiter(10, 60_000); // 每用户每分钟 10 次密钥创建
@@ -1351,7 +1352,7 @@ async function handleUserCreate(hub: Hub, user: UserConn, msg: proto.Message, db
   const u: DbUser = {
     id,
     name: params.name,
-    password_hash: hashPassword(params.password),
+    password_hash: await hashPassword(params.password),
     role: params.role === "admin" ? "admin" : "user",
     disabled: 0,
     created_at: Date.now(),
@@ -1414,7 +1415,7 @@ async function handleUserResetPassword(hub: Hub, user: UserConn, msg: proto.Mess
     sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "id and password required");
     return;
   }
-  if (!(await db.setUserPassword(params.id, hashPassword(params.password)))) {
+  if (!(await db.setUserPassword(params.id, await hashPassword(params.password)))) {
     sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "user not found");
     return;
   }
@@ -1425,7 +1426,7 @@ async function handleUserResetPassword(hub: Hub, user: UserConn, msg: proto.Mess
 async function handleUserChangePassword(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
   const params = proto.decodeParams<proto.UserChangePasswordParams>(msg);
   const me = await db.getUserById(user.userID);
-  if (!me || !verifyPassword(params.old_password ?? "", me.password_hash)) {
+  if (!me || !(await verifyPassword(params.old_password ?? "", me.password_hash))) {
     sendError(user.ws, msg.id, proto.ERR_UNAUTHORIZED, "old password incorrect");
     return;
   }
@@ -1433,7 +1434,7 @@ async function handleUserChangePassword(hub: Hub, user: UserConn, msg: proto.Mes
     sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "new password too short (>=6)");
     return;
   }
-  await db.setUserPassword(me.id, hashPassword(params.new_password));
+  await db.setUserPassword(me.id, await hashPassword(params.new_password));
   sendMsg(user.ws, proto.newResponse(msg.id ?? "", { status: "ok" }));
 }
 
@@ -2006,13 +2007,22 @@ async function handleBrandUpdate(hub: Hub, user: UserConn, msg: proto.Message, d
 }
 
 // 远程推送产品更新：广播给所有在线 connector，各端自行决定纳管升级/原地更新/忽略
-async function handleProductPush(hub: Hub, user: UserConn, msg: proto.Message, _db: Db): Promise<void> {
-  void _db;
+async function handleProductPush(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  // 升级指令会洒向全部在线 connector、触发终端侧下载替换，必须与其他管理动作
+  // 一致走 admin 校验（此前是唯一漏掉 requireAdmin 的变更类方法）。
+  if (!(await requireAdmin(hub, user, msg, db))) return;
   const params = proto.decodeParams<{ brand?: string; version?: string }>(msg);
   const brand = String(params.brand ?? "");
   const version = String(params.version ?? "");
   if (!brand || !version) {
     sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "brand/version required");
+    return;
+  }
+  // 只允许推送目录中真实存在的包：任意 brand/version 字符串会让所有终端
+  // 白跑一轮下载/替换。先过格式白名单再拼路径，防目录穿越探测。
+  if (hub.productsDir && validProductBrand(brand) && validProductVersion(version)
+    && !fs.existsSync(path.join(hub.productsDir, brand, version, "manifest.json"))) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "brand/version not in catalog");
     return;
   }
   const note = proto.newNotification(proto.METHOD_PRODUCT_PUSH, { brand, version });
@@ -2209,6 +2219,16 @@ async function handleAgentRegister(hub: Hub, base: AgentConn, params: proto.Regi
   }
   let approval = "approved";
   const row = hub.db ? await hub.db.getAgentRow(params.agent_id) : undefined;
+  // 已存在的 agent 归属他人时拒绝注册：upsert 的 ON DUPLICATE KEY 会用当前凭据
+  // 覆写 owner_id，不拦的话任何持有效 token 的用户都能抢注他人 agent_id、
+  // 踢掉正主连接并接管路由。admin 转移归属后，旧属主重连同样走此拒绝。
+  if (row && row.owner_id !== base.ownerID) {
+    logger.warn("agent register rejected: owned by another user", {
+      agent_id: params.agent_id, owner: row.owner_id, caller: base.ownerID,
+    });
+    reject(proto.ERR_UNAUTHORIZED, "agent_id owned by another user");
+    return;
+  }
   if (hub.governanceOn() && hub.db) {
     if (row?.approval_status === "rejected") {
       reject(proto.ERR_UNAUTHORIZED, "registration rejected");
@@ -2397,6 +2417,14 @@ export function handleAgentMessage(hub: Hub, agent: AgentConn, raw: string): voi
     case proto.METHOD_CAPABILITIES_UPDATED: {
       const params = proto.decodeParams<proto.CapabilitiesUpdatedParams>(msg);
       const a = hub.agents.get(params.agent_id || agent.id);
+      // payload 里的 agent_id 只认本连接托管的 agent：连接鉴权 ≠ 内容鉴权，
+      // 信任他人 agent_id 会覆盖对方能力声明并刷新对方注册表
+      if (a && a.ws !== agent.ws) {
+        logger.warn("capabilities update for agent not served by this connection, ignored", {
+          from: agent.id, agent_id: a.id,
+        });
+        break;
+      }
       if (params.session_id) {
         // C1 两级作用域：带 session_id 的是该 session/workdir 的命令与技能快照，
         // 不覆盖 Agent 全局能力（admin.agentList 仍反映全局层），仅推给页面做两层合并。
@@ -2430,7 +2458,7 @@ export function handleAgentMessage(hub: Hub, agent: AgentConn, raw: string): voi
       const targets = new Set<AgentConn>();
       if (params.agent_id) {
         const a = hub.agents.get(params.agent_id);
-        if (a) targets.add(a);
+        if (a && a.ws === agent.ws) targets.add(a);
       }
       for (const a of hub.agents.values()) {
         if (a.ws === agent.ws) targets.add(a);
@@ -2450,6 +2478,13 @@ export function handleAgentMessage(hub: Hub, agent: AgentConn, raw: string): voi
       agent.lastHeartbeat = Date.now();
       const params = proto.decodeParams<proto.StatusParams>(msg);
       const a = hub.agents.get(params.agent_id || agent.id);
+      // 同上：自报下线/改状态只对本连接托管的 agent 生效，否则可把他人 agent 注销下线
+      if (a && a.ws !== agent.ws) {
+        logger.warn("status update for agent not served by this connection, ignored", {
+          from: agent.id, agent_id: a.id, status: params.status,
+        });
+        break;
+      }
       if (a && params.status === proto.AGENT_STATUS_OFFLINE) {
         // Agent 自报下线（本地服务死亡）：注销而非只改状态。connector 连接还活着时
         // 心跳会给同 ws 的所有 agent 续命，不注销会永远显示在线
@@ -2480,8 +2515,32 @@ export function handleAgentMessage(hub: Hub, agent: AgentConn, raw: string): voi
       const value = params.value;
       if (!value) break;
       if (!value.agent_id) value.agent_id = agent.id;
-      // 多 agent 共享连接（connector）：归属/缓冲按进度里的 agent_id 定位
-      const src = hub.agents.get(value.agent_id) ?? agent;
+      // 多 agent 共享连接（connector）：归属/缓冲按进度里的 agent_id 定位。
+      // agent_id 必须指向本连接托管的 agent（或本连接自身）：伪造他人 agent_id
+      // 会把进度 chunk 写进对方会话缓冲、甚至提前完结对方任务，必须忽略。
+      // 自身 id 允许注册表 miss（自报下线后补发 done 的竞态），保持原兜底语义。
+      let src: AgentConn;
+      if (value.agent_id === agent.id) {
+        src = hub.agents.get(value.agent_id) ?? agent;
+      } else {
+        const hosted = hub.agents.get(value.agent_id);
+        if (!hosted || hosted.ws !== agent.ws) {
+          logger.warn("progress for agent not served by this connection, ignored", {
+            from: agent.id, agent_id: value.agent_id, task_id: value.task_id,
+          });
+          break;
+        }
+        src = hosted;
+      }
+      // 进度还必须来自服务该任务的 agent：拿自己的 agent_id 配他人 task_id
+      // 同样会污染对方任务缓冲并把伪造内容转发给任务发起者
+      const ts = hub.tasks.get(value.task_id);
+      if (ts && ts.agentID !== src.id) {
+        logger.warn("progress task not served by this agent, ignored", {
+          from: src.id, task_id: value.task_id, task_agent: ts.agentID,
+        });
+        break;
+      }
       const progress: proto.AdminProgressParams = {
         task_id: value.task_id,
         type: value.type,
@@ -2502,7 +2561,6 @@ export function handleAgentMessage(hub: Hub, agent: AgentConn, raw: string): voi
         reason: value.reason,
       };
       const notif = proto.newNotification(proto.METHOD_ADMIN_PROGRESS, progress);
-      const ts = hub.tasks.get(value.task_id);
       if (ts?.groupID) progress.group_id = ts.groupID;
       if (ts?.parentTaskID) progress.parent_task_id = ts.parentTaskID;
       hub.forwardToUsers(src.ownerID, notif);
@@ -3238,10 +3296,11 @@ export async function createGatewayServer(cfg: GatewayConfig, staticFile: string
   hub.attachments = attachments;
   if (db) await hub.reloadBrands();
   const productsDir = cfg.productsDir ?? "data/products"; // 产品分发目录（测试夹层不传时用默认）
+  hub.productsDir = productsDir; // product.push 推送前用来校验包真实存在
   const loginLimiter = new RateLimiter(10, 60_000); // 每 IP 每分钟 10 次登录尝试
   const uploadLimiter = new RateLimiter(20, 60_000); // 每用户每分钟 20 次上传
   // 用户不存在时也跑一次 scrypt，拉齐登录接口时序，防用户名枚举
-  const dummyPasswordHash = hashPassword(crypto.randomBytes(16).toString("hex"));
+  const dummyPasswordHash = await hashPassword(crypto.randomBytes(16).toString("hex"));
 
   // OIDC 四项全配才启用；未启用时 /auth/oidc/* 返回 404
   const oidc = (cfg.oidcIssuer && cfg.oidcClientID && cfg.oidcClientSecret && cfg.oidcRedirectURL)
@@ -3494,7 +3553,7 @@ export async function createGatewayServer(cfg: GatewayConfig, staticFile: string
               id: "u-" + crypto.randomUUID(),
               name,
               // OIDC 账号无本地密码：随机哈希占位，密码登录永远不匹配
-              password_hash: hashPassword(crypto.randomBytes(32).toString("hex")),
+              password_hash: await hashPassword(crypto.randomBytes(32).toString("hex")),
               role: "user",
               disabled: 0,
               created_at: Date.now(),
@@ -3564,10 +3623,16 @@ location.replace('/');
         };
         const user = body.name ? await db.getUserByName(body.name) : undefined;
         // 无论用户是否存在都执行一次 scrypt，拉齐响应时序（|| 短路会前功尽弃）
-        const passwordOk = verifyPassword(body.password ?? "", user?.password_hash ?? dummyPasswordHash);
+        const passwordOk = await verifyPassword(body.password ?? "", user?.password_hash ?? dummyPasswordHash);
         if (!user || user.disabled === 1 || !body.password || !passwordOk) {
           fail();
           return;
+        }
+        // 旧格式/弱参数哈希在登录成功后静默升级为当前参数（不影响登录结果）
+        if (passwordNeedsRehash(user.password_hash)) {
+          const upgraded = await hashPassword(body.password);
+          db.setUserPassword(user.id, upgraded).catch((e) =>
+            logger.warn("password rehash failed", { user: user.id, error: String(e) }));
         }
         const token = signJwt({ sub: user.id, name: user.name }, cfg.jwtSecret, cfg.jwtTtlMs);
         db.touchLastLogin(user.id).catch((e) => logger.warn("touch last login failed", { error: String(e) }));
@@ -3804,7 +3869,6 @@ location.replace('/');
   server.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     const token = url.searchParams.get("token") ?? "";
-    const claims = token ? verifyJwt(token, cfg.jwtSecret) : undefined;
 
     if (url.pathname !== "/ws/agent" && url.pathname !== "/ws/admin") {
       socket.destroy();
@@ -3825,48 +3889,39 @@ location.replace('/');
       : "";
     const pairing = url.pathname === "/ws/agent" && token === "" && deviceKey === ""
       && url.searchParams.get("pair") === "1";
-    if (claims === undefined && deviceKey === "" && !pairing) {
-      unauthorized();
-      return;
-    }
 
-    void (async () => {
+    // query 凭证与首帧凭证共用的解析逻辑
+    const resolveCreds = async (t: string, k: string): Promise<
+      { userID: string; deviceKeyID?: string; isAdmin: boolean } | undefined
+    > => {
       let userID = "";
       let deviceKeyID: string | undefined;
-      if (pairing) {
-        // 无凭证配对连接：只允许 connector.pair，审批下发密钥后重连
-      } else if (claims) {
+      if (t !== "") {
+        const claims = verifyJwt(t, cfg.jwtSecret);
+        if (!claims) return undefined;
         userID = claims.sub;
-      } else {
-        // 设备密钥认证：未知/禁用/属主禁用统一裸 401，防探测
-        if (!hub.db) {
-          unauthorized();
-          return;
-        }
-        const key = await hub.db.getDeviceKeyByHash(hashDeviceKey(deviceKey)).catch(() => undefined);
-        if (!key || key.disabled === 1) {
-          unauthorized();
-          return;
-        }
+      } else if (k !== "" && url.pathname === "/ws/agent") {
+        // 设备密钥认证：未知/禁用统一拒绝，防探测
+        if (!hub.db) return undefined;
+        const key = await hub.db.getDeviceKeyByHash(hashDeviceKey(k)).catch(() => undefined);
+        if (!key || key.disabled === 1) return undefined;
         userID = key.owner_id;
         deviceKeyID = key.id;
+      } else {
+        return undefined;
       }
-
-      // 禁用账号即时生效（JWT 未过期也拒绝新连接）；顺带缓存 admin 角色
-      let isAdmin = false;
-      if (!pairing && hub.db) {
+      // 禁用账号即时生效（JWT 未过期也拒绝新连接）；顺带取 admin 角色
+      if (hub.db) {
         const u = await hub.db.getUserById(userID).catch(() => undefined);
-        if (!u || u.disabled === 1) {
-          unauthorized();
-          return;
-        }
-        isAdmin = u.role === "admin";
+        if (!u || u.disabled === 1) return undefined;
+        return { userID, deviceKeyID, isAdmin: u.role === "admin" };
       }
-      if (deviceKeyID !== undefined && hub.db) {
-        hub.db.touchDeviceKeyUsed(deviceKeyID).catch(() => {});
-      }
+      return { userID, deviceKeyID, isAdmin: false };
+    };
 
-      wss.handleUpgrade(req, socket, head, (ws) => {
+    // 认证通过后建立连接（query 路径与首帧路径共用）
+    const establish = (ws: WebSocket, userID: string, deviceKeyID: string | undefined, isAdmin: boolean): void => {
+      const ip = clientIp(req.headers, req.socket.remoteAddress, cfg.trustProxy);
       if (url.pathname === "/ws/agent") {
         const agent: AgentConn = {
           id: "",
@@ -3878,8 +3933,8 @@ location.replace('/');
           lastHeartbeat: Date.now(),
           alive: true,
           deviceKeyID,
-          ip: clientIp(req.headers, req.socket.remoteAddress, cfg.trustProxy),
-          pairing,
+          ip,
+          pairing: false,
         };
         const ticker = watchPong(ws, agent, () => {
           // pong = 连接活着：connector 模式一条 ws 托管多 agent，全部续命
@@ -3896,10 +3951,6 @@ location.replace('/');
           const ids = [...hub.agents.values()].filter((a) => a.ws === ws).map((a) => a.id);
           for (const id of ids) hub.unregisterAgent(id);
           if (agent.connectorID) hub.unregisterConnector(agent.connectorID, ws);
-          // 配对挂起连接断开：移出待接入列表
-          for (const [cid, p] of hub.pendingPairs) {
-            if (p.conn.ws === ws) hub.pendingPairs.delete(cid);
-          }
         });
         ws.on("error", () => ws.close());
       } else {
@@ -3920,6 +3971,98 @@ location.replace('/');
         });
         ws.on("error", () => ws.close());
       }
+    };
+
+    // 无凭证配对连接（?pair=1）：只允许 connector.pair，审批下发密钥后重连
+    if (pairing) {
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        const agent: AgentConn = {
+          id: "",
+          ownerID: "",
+          name: "",
+          ws,
+          capabilities: [],
+          status: proto.AGENT_STATUS_ONLINE,
+          lastHeartbeat: Date.now(),
+          alive: true,
+          ip: clientIp(req.headers, req.socket.remoteAddress, cfg.trustProxy),
+          pairing: true,
+        };
+        const ticker = watchPong(ws, agent, () => {
+          hub.livenessProbes.delete(ws);
+        });
+        ws.on("message", (data) => handleAgentMessage(hub, agent, data.toString()));
+        ws.on("close", () => {
+          clearInterval(ticker);
+          hub.livenessProbes.delete(ws);
+          // 配对挂起连接断开：移出待接入列表
+          for (const [cid, p] of hub.pendingPairs) {
+            if (p.conn.ws === ws) hub.pendingPairs.delete(cid);
+          }
+        });
+        ws.on("error", () => ws.close());
+      });
+      return;
+    }
+
+    // 首帧认证：无 query 凭证时也接受升级，连接挂起等第一条 auth 消息。
+    // 凭证不再进 URL（反代 access log / 浏览器历史是真实泄露面）；
+    // 10s 未完成认证即断开。query 路径（?token=/?key=）保留兼容存量终端。
+    if (token === "" && deviceKey === "") {
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        let authed = false;
+        const timer = setTimeout(() => {
+          if (!authed) ws.close(4001, "auth timeout");
+        }, proto.AUTH_TIMEOUT_MS);
+        timer.unref();
+        ws.on("message", (data) => {
+          if (authed) return;
+          let msg: proto.Message;
+          try {
+            msg = JSON.parse(data.toString()) as proto.Message;
+          } catch {
+            ws.close(4001, "malformed message");
+            return;
+          }
+          if (msg.method !== proto.METHOD_AUTH) {
+            sendError(ws, msg.id, proto.ERR_UNAUTHORIZED, "first message must be auth");
+            ws.close(4001, "auth required");
+            return;
+          }
+          const params = (msg.params ?? {}) as proto.AuthParams;
+          void resolveCreds(String(params.token ?? ""), String(params.key ?? "")).then((identity) => {
+            if (authed) return;
+            if (!identity) {
+              sendError(ws, msg.id, proto.ERR_UNAUTHORIZED, "invalid credentials");
+              ws.close(4001, "invalid credentials");
+              return;
+            }
+            authed = true;
+            clearTimeout(timer);
+            if (identity.deviceKeyID !== undefined && hub.db) {
+              hub.db.touchDeviceKeyUsed(identity.deviceKeyID).catch(() => {});
+            }
+            sendMsg(ws, proto.newResponse(msg.id ?? "", { status: "ok" }));
+            establish(ws, identity.userID, identity.deviceKeyID, identity.isAdmin);
+          }).catch(() => ws.close(4001, "auth failed"));
+        });
+        ws.on("error", () => ws.close());
+      });
+      return;
+    }
+
+    // query 凭证路径（兼容存量终端）
+    void (async () => {
+      const identity = await resolveCreds(token, deviceKey);
+      if (!identity) {
+        unauthorized();
+        return;
+      }
+      if (identity.deviceKeyID !== undefined && hub.db) {
+        hub.db.touchDeviceKeyUsed(identity.deviceKeyID).catch(() => {});
+      }
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        establish(ws, identity.userID, identity.deviceKeyID, identity.isAdmin);
       });
     })().catch(() => socket.destroy());
   });
@@ -3977,6 +4120,30 @@ if (isMain) {
 async function main(): Promise<void> {
   const cfg = loadGatewayConfig();
   setLogLevel(cfg.logLevel);
+  // 生产环境（NODE_ENV=production）对弱默认值 fail-fast：
+  // 默认库凭据/默认 admin 密码/默认 S3 密钥/过短 JWT secret 直接拒启，
+  // 避免"按默认值静默连上开发库 / admin123 挂在公网"。开发环境保持原行为。
+  if (process.env.NODE_ENV === "production") {
+    const problems: string[] = [];
+    if (cfg.databaseURL === "mysql://ywmatrix:ywmatrix_dev@localhost:3306/ywmatrix") {
+      problems.push("-database-url 仍是开发默认值（AGENT_MANAGE_DATABASE_URL）");
+    }
+    if (cfg.adminPassword === "admin123") {
+      problems.push("-admin-password 仍是 admin123（AGENT_MANAGE_ADMIN_PASSWORD）");
+    }
+    if (cfg.s3Endpoint && (cfg.s3AccessKey === "minioadmin" || cfg.s3SecretKey === "minioadmin")) {
+      problems.push("S3 密钥仍是 minioadmin（AGENT_MANAGE_S3_ACCESS_KEY / _SECRET_KEY）");
+    }
+    if (cfg.jwtSecret !== "" && cfg.jwtSecret.length < 32) {
+      problems.push("-jwt-secret 长度 < 32（AGENT_MANAGE_JWT_SECRET，建议 >= 随机 32 字节 hex）");
+    }
+    if (problems.length > 0) {
+      logger.error("生产环境配置检查未通过，拒绝启动：\n  " + problems.join("\n  "));
+      process.exit(1);
+    }
+  } else if (cfg.jwtSecret !== "" && cfg.jwtSecret.length < 32) {
+    logger.warn("jwt-secret 长度 < 32，建议使用随机 32 字节 hex");
+  }
   if (cfg.jwtSecret === "") {
     if (process.env.AGENT_MANAGE_JWT_SECRET && process.env.AGENT_MANAGE_JWT_SECRET !== "") {
       // 理论上 loadGatewayConfig 已注入；保险一行
@@ -3999,7 +4166,7 @@ async function main(): Promise<void> {
     await db.createUser({
       id: crypto.randomUUID(),
       name: "admin",
-      password_hash: hashPassword(cfg.adminPassword),
+      password_hash: await hashPassword(cfg.adminPassword),
       role: "admin",
     });
     logger.warn("已创建初始 admin 账号，请尽快修改默认密码（AGENT_MANAGE_ADMIN_PASSWORD）");

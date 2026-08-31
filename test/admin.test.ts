@@ -151,9 +151,9 @@ async function setup(t: import("node:test").TestContext): Promise<Fixture | unde
   const adminID = `adm-${suffix}`;
   const aliceID = `alice-${suffix}`;
   const bobID = `bob-${suffix}`;
-  await db.createUser({ id: adminID, name: adminID, password_hash: hashPassword("pw"), role: "admin" });
-  await db.createUser({ id: aliceID, name: aliceID, password_hash: hashPassword("pw") });
-  await db.createUser({ id: bobID, name: bobID, password_hash: hashPassword("pw") });
+  await db.createUser({ id: adminID, name: adminID, password_hash: await hashPassword("pw"), role: "admin" });
+  await db.createUser({ id: aliceID, name: aliceID, password_hash: await hashPassword("pw") });
+  await db.createUser({ id: bobID, name: bobID, password_hash: await hashPassword("pw") });
 
   // 品牌目录非空会开启治理模式导致注册被拒：快照后清空（开放模式），结束后恢复
   const savedBrands = await db.listBrands();
@@ -176,6 +176,11 @@ async function setup(t: import("node:test").TestContext): Promise<Fixture | unde
           capabilities: b.capabilities, launch_cmd: b.launch_cmd, conn_type: b.conn_type, endpoint: b.endpoint,
         }).catch(() => {});
       }
+      // 注册不再覆写他人归属：固定 agent_id 的测试必须清掉本轮留下的行，
+      // 否则下一轮（随机用户）注册同 id 会被归属校验拒绝
+      await db.deleteAgentsByOwner(adminID).catch(() => {});
+      await db.deleteAgentsByOwner(aliceID).catch(() => {});
+      await db.deleteAgentsByOwner(bobID).catch(() => {});
       await db.deleteUser(adminID).catch(() => {});
       await db.deleteUser(aliceID).catch(() => {});
       await db.deleteUser(bobID).catch(() => {});
@@ -463,8 +468,18 @@ test("device key full lifecycle", async (t) => {
     // 未知密钥同样裸 401
     await expectDial401(`${fx.base}/ws/agent?key=amk_deadbeefdeadbeefdeadbeef`);
 
-    // /ws/admin 不接受设备密钥
-    await expectDial401(`${fx.base}/ws/admin?key=${created.key}`);
+    // /ws/admin 不接受设备密钥：无 query 凭证的升级会成功（首帧认证挂起），
+    // 但用 key 做首帧 auth 会被拒绝并断开
+    const adminKey = new WebSocket(`${fx.base}/ws/admin`);
+    await new Promise<void>((resolve) => adminKey.once("open", () => resolve()));
+    const keyRejection = await new Promise<proto.Message | null>((resolve) => {
+      adminKey.once("message", (d) => { try { resolve(JSON.parse(d.toString()) as proto.Message); } catch { resolve(null); } });
+      adminKey.once("close", () => resolve(null));
+      adminKey.send(JSON.stringify(proto.newRequest("auth-1", proto.METHOD_AUTH, {
+        key: created.key,
+      } satisfies proto.AuthParams)));
+    });
+    assert.equal(keyRejection?.error?.code, proto.ERR_UNAUTHORIZED, JSON.stringify(keyRejection));
   } finally {
     for (const c of conns) c.close();
     await fx.close();
@@ -488,9 +503,9 @@ test("admin can create key for another user; non-admin cannot", async (t) => {
 
     const agentConn = await Conn.dial(`${fx.base}/ws/agent?key=${created.key}`);
     conns.push(agentConn);
-    await registerAgent(agentConn, "agent-for-alice");
+    await registerAgent(agentConn, "agent-for-alice-" + fx.aliceID.slice(6));
     const push = proto.decodeParams<proto.AgentListParams>(await adminConn.next(proto.METHOD_ADMIN_AGENT_LIST));
-    assert.equal(push.agents.find((a) => a.id === "agent-for-alice")?.owner_id, fx.aliceID);
+    assert.equal(push.agents.find((a) => a.id === "agent-for-alice-" + fx.aliceID.slice(6))?.owner_id, fx.aliceID);
 
     // 非 admin 代他人创建 → ERR_UNAUTHORIZED
     const bobConn = await Conn.dial(`${fx.base}/ws/admin?token=${jwtFor(fx.bobID)}`);
