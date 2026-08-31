@@ -17,6 +17,7 @@ import {
   sanitizeFileName,
 } from "./storage.ts";
 import { hashPassword, verifyPassword, passwordNeedsRehash, signJwt, verifyJwt } from "./auth.ts";
+import { startSignIn as aamStartSignIn, verifySignIn as aamVerifySignIn, RedirectError as AamRedirectError, type AAMConfig } from "./aam.ts";
 import { OIDCProvider } from "./oidc.ts";
 import { readTarEntry } from "./tar.ts";
 import { Metrics } from "./metrics.ts";
@@ -3199,6 +3200,14 @@ export interface GatewayConfig {
   oidcClientSecret: string;
   oidcRedirectURL: string;
   oidcEmployeeClaim: string;
+  // 工行 AAM 统一认证（aam-sm-2.0.jar；server/serviceName/smPublicKey/keyPass/bridge 五项全配才启用，见 package/aam/README.md）
+  aamServer?: string; // AAM 服务器（setServerName，如 aam.icbc）
+  aamVersion?: string; // 默认 SM2
+  aamServiceName?: string; // 应用标识（setServiceName，AAM 注册时发）
+  aamServiceURL?: string; // 回调地址（setServiceURL；留空按请求 Host 推导）
+  aamSmPublicKey?: string; // SM2 公钥 JSON（注册时发）
+  aamSmKeyPass?: string; // 公钥保护口令
+  aamBridgeCmd?: string; // 例：java -cp /opt/ywmatrix/aam:/opt/ywmatrix/aam/* AamBridge
 }
 
 export function loadGatewayConfig(): GatewayConfig {
@@ -3231,6 +3240,13 @@ export function loadGatewayConfig(): GatewayConfig {
     { name: "oidc-client-secret", type: "string" as const, default: envString("AGENT_MANAGE_OIDC_CLIENT_SECRET", "") },
     { name: "oidc-redirect-url", type: "string" as const, default: envString("AGENT_MANAGE_OIDC_REDIRECT_URL", "") },
     { name: "oidc-employee-claim", type: "string" as const, default: envString("AGENT_MANAGE_OIDC_EMPLOYEE_CLAIM", "employee_id") },
+    { name: "aam-server", type: "string" as const, default: envString("AGENT_MANAGE_AAM_SERVER", "") },
+    { name: "aam-version", type: "string" as const, default: envString("AGENT_MANAGE_AAM_VERSION", "SM2") },
+    { name: "aam-service-name", type: "string" as const, default: envString("AGENT_MANAGE_AAM_SERVICE_NAME", "") },
+    { name: "aam-service-url", type: "string" as const, default: envString("AGENT_MANAGE_AAM_SERVICE_URL", "") },
+    { name: "aam-sm-public-key", type: "string" as const, default: envString("AGENT_MANAGE_AAM_SM_PUBLIC_KEY", "") },
+    { name: "aam-sm-key-pass", type: "string" as const, default: envString("AGENT_MANAGE_AAM_SM_KEY_PASS", "") },
+    { name: "aam-bridge-cmd", type: "string" as const, default: envString("AGENT_MANAGE_AAM_BRIDGE_CMD", "") },
   ];
   const values = parseFlags(specs);
   const toMs = (v: string, def: number): number => {
@@ -3268,7 +3284,78 @@ export function loadGatewayConfig(): GatewayConfig {
     oidcClientSecret: values["oidc-client-secret"],
     oidcRedirectURL: values["oidc-redirect-url"],
     oidcEmployeeClaim: values["oidc-employee-claim"],
+    aamServer: values["aam-server"],
+    aamVersion: values["aam-version"],
+    aamServiceName: values["aam-service-name"],
+    aamServiceURL: values["aam-service-url"],
+    aamSmPublicKey: values["aam-sm-public-key"],
+    aamSmKeyPass: values["aam-sm-key-pass"],
+    aamBridgeCmd: values["aam-bridge-cmd"],
   };
+}
+
+// 统一认证（OIDC / 工行 AAM）共用收尾：按工号关联账号（首次自动建号）→ 签发 JWT
+// → 回调页写 localStorage 跳转。已知登录类错误（存储未配置/账号禁用）经 fail 渲染
+// 400 失败页；其余异常向上抛，由调用方兜底 500。
+async function ssoLoginResponse(
+  hub: Hub, cfg: GatewayConfig, res: http.ServerResponse,
+  employeeID: string, displayName: string, source: string,
+  fail: (message: string) => void,
+): Promise<void> {
+  if (!hub.db) {
+    fail("存储未配置");
+    return;
+  }
+  let user = await hub.db.getUserByEmployeeID(employeeID);
+  if (!user) {
+    // name 与 employee_id 均有唯一约束，并发首次登录时撞哪边处理哪边：
+    // 撞 employee_id 直接复用已建账号，撞 name 换后缀重试
+    for (let attempt = 0; attempt < 5 && !user; attempt++) {
+      let name = displayName;
+      for (let i = 0; await hub.db.getUserByName(name); i++) {
+        name = `${displayName}-${i + 2}`;
+      }
+      const candidate = {
+        id: "u-" + crypto.randomUUID(),
+        name,
+        // 统一认证账号无本地密码：随机哈希占位，密码登录永远不匹配
+        password_hash: await hashPassword(crypto.randomBytes(32).toString("hex")),
+        role: "user",
+        disabled: 0,
+        created_at: Date.now(),
+        last_login_at: null,
+        employee_id: employeeID,
+        display_name: displayName,
+      };
+      try {
+        await hub.db.createUser(candidate);
+        user = candidate;
+        logger.info(source + " user provisioned", { user_id: candidate.id, name: candidate.name, employee_id: employeeID });
+      } catch (e) {
+        if ((e as { errno?: number }).errno !== 1062) throw e;
+        user = await hub.db.getUserByEmployeeID(employeeID);
+      }
+    }
+    if (!user) throw new Error(source + " user provisioning failed");
+  }
+  if (user.disabled === 1) {
+    fail("账号已被禁用，请联系管理员");
+    return;
+  }
+  hub.db.touchLastLogin(user.id).catch(() => {});
+  const token = signJwt({ sub: user.id, name: user.name }, cfg.jwtSecret, cfg.jwtTtlMs);
+  // 回调页与 SPA 同源，直接写 localStorage 后跳转（该页无 JS 回写，不会冲突）
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+  res.end(`<!doctype html><meta charset="utf-8"><title>登录成功</title><p>登录成功，正在跳转…</p><script>
+try {
+  var s = JSON.parse(localStorage.getItem('agent_manage_v1') || '{}');
+  s.token = ${JSON.stringify(token)};
+  s.user = ${JSON.stringify({ id: user.id, name: user.name, role: user.role })};
+  localStorage.setItem('agent_manage_v1', JSON.stringify(s));
+  sessionStorage.removeItem('ywmAamBounce'); // 登录成功清 AAM 自动弹跳计数
+} catch (e) {}
+location.replace('/');
+</script>`);
 }
 
 function escapeHtmlText(s: string): string {
@@ -3335,6 +3422,20 @@ export async function createGatewayServer(cfg: GatewayConfig, staticFile: string
       }, cfg.jwtSecret)
     : undefined;
   if (oidc) logger.info("oidc enabled", { issuer: cfg.oidcIssuer, client_id: cfg.oidcClientID });
+  // AAM 五项核心全配才启用；未启用时 /auth/aam/* 返回 404（跳转 URL 由 SDK 内部构造）
+  const aam: AAMConfig | undefined = (cfg.aamServer && cfg.aamServiceName && cfg.aamSmPublicKey
+    && cfg.aamSmKeyPass && cfg.aamBridgeCmd)
+    ? {
+        server: cfg.aamServer,
+        version: cfg.aamVersion || "SM2",
+        serviceName: cfg.aamServiceName,
+        serviceURL: cfg.aamServiceURL ?? "",
+        smPublicKey: cfg.aamSmPublicKey,
+        smKeyPass: cfg.aamSmKeyPass,
+        bridgeCmd: cfg.aamBridgeCmd,
+      }
+    : undefined;
+  if (aam) logger.info("aam enabled", { server: aam.server, service: aam.serviceName });
 
   let bus: Bus | undefined;
   if (cfg.redisURL !== "") {
@@ -3516,9 +3617,9 @@ export async function createGatewayServer(cfg: GatewayConfig, staticFile: string
       return;
     }
     if (url.pathname === "/auth/config" && req.method === "GET") {
-      // 登录页据此决定是否展示统一认证入口
+      // 登录页据此决定是否展示统一认证入口（AAM 优先于 OIDC，二者机制互斥展示一个入口）
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ oidc: oidc !== undefined }));
+      res.end(JSON.stringify({ oidc: oidc !== undefined, aam: aam !== undefined }));
       return;
     }
     if (url.pathname === "/auth/oidc/login" && req.method === "GET") {
@@ -3565,60 +3666,95 @@ export async function createGatewayServer(cfg: GatewayConfig, staticFile: string
           fail(e instanceof Error ? e.message : String(e));
           return;
         }
-        // 按工号关联账号；首次登录自动建号（用户名冲突时追加后缀）
-        let user = await hub.db.getUserByEmployeeID(identity.employeeID);
-        if (!user) {
-          // name 与 employee_id 均有唯一约束，并发首次登录时撞哪边处理哪边：
-          // 撞 employee_id 直接复用已建账号，撞 name 换后缀重试
-          for (let attempt = 0; attempt < 5 && !user; attempt++) {
-            let name = identity.displayName;
-            for (let i = 0; await hub.db.getUserByName(name); i++) {
-              name = `${identity.displayName}-${i + 2}`;
-            }
-            const candidate = {
-              id: "u-" + crypto.randomUUID(),
-              name,
-              // OIDC 账号无本地密码：随机哈希占位，密码登录永远不匹配
-              password_hash: await hashPassword(crypto.randomBytes(32).toString("hex")),
-              role: "user",
-              disabled: 0,
-              created_at: Date.now(),
-              last_login_at: null,
-              employee_id: identity.employeeID,
-              display_name: identity.displayName,
-            };
-            try {
-              await hub.db.createUser(candidate);
-              user = candidate;
-              logger.info("oidc user provisioned", { user_id: candidate.id, name: candidate.name, employee_id: identity.employeeID });
-            } catch (e) {
-              if ((e as { errno?: number }).errno !== 1062) throw e;
-              user = await hub.db.getUserByEmployeeID(identity.employeeID);
-            }
-          }
-          if (!user) throw new Error("oidc user provisioning failed");
-        }
-        if (user.disabled === 1) {
-          fail("账号已被禁用，请联系管理员");
-          return;
-        }
-        hub.db.touchLastLogin(user.id).catch(() => {});
-        const token = signJwt({ sub: user.id, name: user.name }, cfg.jwtSecret, cfg.jwtTtlMs);
-        // 回调页与 SPA 同源，直接写 localStorage 后跳转（该页无 JS 回写，不会冲突）
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        res.end(`<!doctype html><meta charset="utf-8"><title>登录成功</title><p>登录成功，正在跳转…</p><script>
-try {
-  var s = JSON.parse(localStorage.getItem('agent_manage_v1') || '{}');
-  s.token = ${JSON.stringify(token)};
-  s.user = ${JSON.stringify({ id: user.id, name: user.name, role: user.role })};
-  localStorage.setItem('agent_manage_v1', JSON.stringify(s));
-} catch (e) {}
-location.replace('/');
-</script>`);
+        await ssoLoginResponse(hub, cfg, res, identity.employeeID, identity.displayName, "oidc", fail);
       })().catch((e) => {
         logger.error("oidc callback failed", { error: String(e) });
-        res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
-        res.end("internal error");
+        if (!res.headersSent) {
+          res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
+          res.end("internal error");
+        }
+      });
+      return;
+    }
+
+    // ---- 工行 AAM 统一认证（CAS 式 ticket：跳转授权页 → 回调带 ticket → java 桥验签换工号） ----
+    // ---- 工行 AAM 统一认证（ssiAuth/ssiSign 回跳参数 → Java 桥验签换工号） ----
+    // 回调地址按请求 Host 推导（反代场景取 X-Forwarded-Host，trustProxy 已校验）
+    const aamRequestBase = (): { proto: string; host: string } => {
+      const host = cfg.trustProxy
+        ? (Array.isArray(req.headers["x-forwarded-host"]) ? req.headers["x-forwarded-host"][0] : req.headers["x-forwarded-host"]) ?? req.headers.host
+        : req.headers.host;
+      const proto = cfg.trustProxy
+        ? ((Array.isArray(req.headers["x-forwarded-proto"]) ? req.headers["x-forwarded-proto"][0] : req.headers["x-forwarded-proto"]) ?? "https")
+        : "http";
+      return { proto, host: host ?? "" };
+    };
+
+    if (url.pathname === "/auth/aam/login" && req.method === "GET") {
+      if (!aam) {
+        res.writeHead(404).end("not found");
+        return;
+      }
+      void (async () => {
+        // 空参数调桥：SDK 内部 sendRedirect 到 AAM 授权页（地址由 SDK 构造，不配置模板）
+        const { proto, host } = aamRequestBase();
+        const serviceURL = aam.serviceURL !== "" ? aam.serviceURL : `${proto}://${host}/auth/aam/callback`;
+        const target = await aamStartSignIn(aam, serviceURL);
+        res.writeHead(302, { Location: target });
+        res.end();
+      })().catch((e) => {
+        logger.error("aam login failed", { error: String(e) });
+        res.writeHead(502, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(`<!doctype html><meta charset="utf-8"><title>登录失败</title><p>统一认证服务暂时不可用：${escapeHtmlText(e instanceof Error ? e.message : String(e))}</p><p><a href="/">返回登录页</a></p>`);
+      });
+      return;
+    }
+    if (url.pathname === "/auth/aam/callback" && req.method === "GET") {
+      if (!aam) {
+        res.writeHead(404).end("not found");
+        return;
+      }
+      void (async () => {
+        const fail = (message: string) => {
+          res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
+          res.end(`<!doctype html><meta charset="utf-8"><title>登录失败</title><p>统一认证登录失败：${escapeHtmlText(message)}</p><p><a href="/">返回登录页</a></p>`);
+        };
+        // AAM 回跳携带 ssiAuth / ssiSign（对接文档 3.2：来自回跳 URL 的 query 参数）
+        const ssiAuth = url.searchParams.get("ssiAuth") ?? "";
+        const ssiSign = url.searchParams.get("ssiSign") ?? "";
+        if (!ssiAuth || !ssiSign) {
+          fail("缺少 ssiAuth/ssiSign 参数");
+          return;
+        }
+        if (!hub.db) {
+          fail("存储未配置");
+          return;
+        }
+        // setServiceURL：显式配置优先，否则按本请求 Host 推导（与注册到 AAM 的回调一致）
+        const { proto, host } = aamRequestBase();
+        const serviceURL = aam.serviceURL !== "" ? aam.serviceURL : `${proto}://${host}/auth/aam/callback`;
+        let identity;
+        try {
+          identity = await aamVerifySignIn(aam, serviceURL, ssiAuth, ssiSign);
+        } catch (e) {
+          if (e instanceof AamRedirectError) {
+            // 验签失败但 SDK 指了重登地址（如会话失效）：带浏览器重走
+            res.writeHead(302, { Location: e.redirect });
+            res.end();
+            return;
+          }
+          logger.warn("aam verify failed", { error: String(e) });
+          fail(e instanceof Error ? e.message : String(e));
+          return;
+        }
+        // 工号（employeeNo）关联账号，姓名做显示名
+        await ssoLoginResponse(hub, cfg, res, identity.employeeNo, identity.name || identity.username, "aam", fail);
+      })().catch((e) => {
+        logger.error("aam callback failed", { error: String(e) });
+        if (!res.headersSent) {
+          res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
+          res.end("internal error");
+        }
       });
       return;
     }

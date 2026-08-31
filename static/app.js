@@ -3531,10 +3531,33 @@
             let wsFailCount = 0;
             let wsWasOnline = false;
 
+            // AAM 模式的登录入口：未登录时不经本页表单，直接弹 AAM 统一认证（内网免密体验）。
+            // 防循环：sessionStorage 弹跳计数，AAM 连续未成功 3 次后兜底回密码表单；
+            // ?login=1 强制本页表单（admin 本地密码入口）。主动退出不走这里（logout 直接开表单）。
+            async function showLoginEntry() {
+                const forceLocal = new URLSearchParams(location.search).get('login') === '1';
+                if (!forceLocal) {
+                    try {
+                        const cfg = await fetch('/auth/config').then(r => r.ok ? r.json() : null);
+                        if (cfg && cfg.aam) {
+                            const bounces = Number(sessionStorage.getItem('ywmAamBounce') || '0');
+                            if (bounces < 3) {
+                                sessionStorage.setItem('ywmAamBounce', String(bounces + 1));
+                                location.replace('/auth/aam/login');
+                                return;
+                            }
+                            showToast('统一认证未成功，可改用账号密码登录', 'warning');
+                        }
+                    } catch (e) { /* 配置查询失败按本页表单走 */ }
+                }
+                els.loginOverlay.classList.add('open');
+                hideBoot();
+            }
+
             function connect() {
                 if (ws) return;
                 if (!state.token) {
-                    els.loginOverlay.classList.add('open'); hideBoot();
+                    void showLoginEntry();
                     return;
                 }
                 els.loginOverlay.classList.remove('open');
@@ -3607,10 +3630,10 @@
                     if (!wsEverOpened) {
                         wsFailCount++;
                         if (wsFailCount >= 3) {
-                            // 连续失败：多半是 token 过期，回到登录页
-                            els.loginOverlay.classList.add('open'); hideBoot();
+                            // 连续失败：多半是 token 过期——AAM 模式直接弹统一认证，否则回登录页
                             showToast('连接失败或登录已过期，请重新登录', 'warning');
                             wsFailCount = 0;
+                            void showLoginEntry();
                             return;
                         }
                     }
@@ -4489,6 +4512,7 @@
                     els.passwordInput.value = '';
                     updateAdminBtn();
                     saveState();
+                    try { sessionStorage.removeItem('ywmAamBounce'); } catch (e) { /* 无痕模式等 */ }
                     connect();
                 } catch (e) {
                     showToast('登录失败：' + e.message, 'error');
@@ -4534,10 +4558,12 @@
 
             function setupEvents() {
                 els.loginBtn.addEventListener('click', login);
-                els.oidcLoginBtn.addEventListener('click', () => { location.href = '/auth/oidc/login'; });
-                // 网关掉 OIDC 时展示统一认证入口（失败静默保持账号密码登录）
+                // 网关开启统一认证时展示入口（AAM 优先于 OIDC，互斥展示一个入口；失败静默保持账号密码登录）
+                let ssoLoginHref = '/auth/oidc/login';
+                els.oidcLoginBtn.addEventListener('click', () => { location.href = ssoLoginHref; });
                 fetch('/auth/config').then(r => r.ok ? r.json() : null).then(cfg => {
-                    if (cfg && cfg.oidc) els.oidcLoginBtn.style.display = '';
+                    if (cfg && cfg.aam) { ssoLoginHref = '/auth/aam/login'; els.oidcLoginBtn.style.display = ''; }
+                    else if (cfg && cfg.oidc) els.oidcLoginBtn.style.display = '';
                 }).catch(() => {});
                 els.nameInput.addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
                 els.passwordInput.addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
@@ -4981,6 +5007,7 @@
                             els.nameInput.value = data.user.name || '';
                             updateAdminBtn();
                             saveState();
+                            try { sessionStorage.removeItem('ywmAamBounce'); } catch (e) { /* 无痕模式等 */ }
                         }
                     }
                 } catch (e) {

@@ -127,6 +127,7 @@ node src/gateway.ts
 - `-s3-region` / `-s3-bucket` / `-s3-access-key` / `-s3-secret-key` / `-s3-public-url`: 对象存储参数，bucket 默认 `ywmatrix`
 - `-oidc-issuer` / `-oidc-client-id` / `-oidc-client-secret` / `-oidc-redirect-url`: OIDC 统一认证（授权码 + PKCE），四项全配才启用；启用后登录页出现「使用统一认证登录」，按工号自动建号
 - `-oidc-employee-claim`: 工号所在 claim 名，默认 `employee_id`（缺失时回退 `sub`）
+- `-aam-server` / `-aam-service-name` / `-aam-sm-public-key` / `-aam-sm-key-pass` / `-aam-bridge-cmd`: 工行 AAM 统一认证（aam-sm-2.0.jar），五项全配才启用；授权页跳转由 SDK 内部构造，Java 桥见 `package/aam/README.md`（需 JDK 与官方 SDK jar），按工号（employeeNo）自动建号，与 OIDC 同款收尾
 
 附件存储两级策略：默认写本地盘并由网关 `GET /files/*` 回源；配置 `-s3-endpoint` 后走 S3 SDK（自动建 bucket、匿名可读），换云厂商 OSS 时无需改代码。两种都未启用时页面退化为消息内嵌 base64。单文件上限 20MB。
 

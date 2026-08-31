@@ -268,6 +268,13 @@ const server = assemble("ywmatrix-server-linux-x64", [
   (d) => cp(path.join(RUNTIME, "linux-x64", "node"), path.join(d, "runtime", "node")),
   (d) => write(path.join(d, "ywmatrix-gateway.service"), GATEWAY_SERVICE),
   (d) => write(path.join(d, "INSTALL.md"), SERVER_INSTALL),
+  // 工行 AAM 统一认证桥（SDK jar 由现场放入 aam/ 后按其 README 编译）
+  (d) => {
+    const aamSrc = path.join(ROOT, "package", "aam");
+    if (fs.existsSync(aamSrc)) {
+      for (const f of fs.readdirSync(aamSrc)) cp(path.join(aamSrc, f), path.join(d, "aam", f));
+    }
+  },
 ]);
 
 // ---- 客户端（Linux x64 / arm64，Windows x64）----
