@@ -251,6 +251,7 @@ Content-Type: application/json
 | `device_key.*` | 设备密钥管理（见 3.7） |
 | `task.*` | 任务相关（创建、取消、进度；`group_id` 群路由见 10.5） |
 | `group.*` | 群组管理（含 `group.set_delegates` 授权矩阵，见 10.5） |
+| `group.run` | 声明式运行模板：round_robin / debate / pipeline（见 10.7） |
 | `run.list` | 编排子任务运行记录查询（派发树/审计，见 10.6） |
 | `agent.task.*` | 管理者编排：`agent.task.invoke` 请求 / `agent.task.result` 结果回推（见 10.6） |
 
