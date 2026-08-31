@@ -950,6 +950,32 @@ connector 的凭证不落启动参数，走一次性配对码换发设备密钥�
 - 子任务回复落库归因到 worker agent，会话内完整可审计。
 - `agent_id` 为接收方管理者 id：connector 多实例托管（共享一条 WS）时，client 据此路由到对应本地实例转发 `task.subtask_result`。
 
+## 10.7 声明式运行模板（group.run）
+
+常见协作模式一次配置跑完——**网关就是编排器**，无需管理者 Agent 参与。网关按步骤顺序向成员派发 `agent.chat`、等待终态、把上一步输出注入下一步输入；每个步骤即普通群任务（归因落库、进度推送、群聊气泡、可取消）。
+
+```json
+{
+  "method": "group.run",
+  "params": {
+    "group_id": "<gid>",
+    "preset": "debate",
+    "topic": "是否采用微服务",
+    "rounds": 1
+  }
+}
+```
+
+| 字段 | 语义 |
+|---|---|
+| `preset` | `round_robin`（成员轮流发言，后者看到前者的全部发言）；`debate`（前两个在线成员任正反方交替 `rounds` 轮，最后由管理者/首成员裁决）；`pipeline`（自定义 `steps`） |
+| `topic` | preset 模式的主题（必填） |
+| `rounds` | round_robin/debate 轮数，默认 2，1~4 |
+| `steps` | pipeline 自定义步骤（与 preset 二选一）：`[{run: "agent-id"|["a","b"], content, collect?, timeout_ms?}]`，≤12 步；`content` 支持 `{{prev}}`（上一步输出）与 `{{all}}`（此前全部输出）占位 |
+| `session_id` | 复用群会话；缺省新建 |
+
+响应立即返回 `{run_id, status:"running", task_ids:[]}`；步骤任务 id 为 `<run_id>:<n>`（fan-out 派生 `<run_id>:<n>#<m>`），按 `run_id` 做 `task.cancel` 即取消整个家族。某步全部目标无输出（失败/超时）即中止后续步骤。`collect:"first"` 的多目标步骤在首个成功后收割其余。
+
 ## 11. 消息时序图
 
 ### 11.1 用户发送聊天消息

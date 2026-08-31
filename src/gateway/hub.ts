@@ -12,7 +12,7 @@ import { RateLimiter } from "../ratelimit.ts";
 import {
   type AgentConn, type PendingPair, type UserConn, type TaskState, type InvocationRecord,
   type PendingEntry, type TaskBuffer, type BufferedInteractionChunk,
-  isInteractionChunk, matchesInteractionChunk, finalOnlyChunks,
+  isInteractionChunk, matchesInteractionChunk, finalOnlyChunks, textOfChunk,
   MAX_TASK_BUFFER_BYTES, SEND_BUFFER_SOFT, SEND_BUFFER_HARD,
 } from "./types.ts";
 
@@ -24,6 +24,8 @@ export class Hub {
   pendingRequests = new Map<string, PendingEntry>();
   tasks = new Map<string, TaskState>();
   taskBuffers = new Map<string, TaskBuffer>();
+  // 模板引擎（group.run）等待任务终结的回调队列；settleWaiters 在终态 funnel 唤醒
+  taskWaiters = new Map<string, Array<(r: { error?: string; text: string }) => void>>();
   // 编排续聊线程：(groupID, invoker, target, thread_id) → 目标 agent 所见的稳定子会话 id。
   // 内存态：网关重启后同线程再调用会拿到新 id（目标 agent 侧上下文重新开始）
   invocationThreads = new Map<string, string>();
@@ -698,6 +700,7 @@ export class Hub {
     if (ts) this.notifySubtaskResult(p.taskID, ts, reason);
     this.finishRun(p.taskID, "failed", reason);
     this.observeTaskEnd(p.taskID, "failed");
+    this.settleWaiters(p.taskID, reason);
     this.untrackTask(p.taskID);
   }
 
@@ -717,6 +720,35 @@ export class Hub {
       // 父任务终结：其名下 invocation 记录一并消亡（子任务的记录引用同Map，无需单独清理）
       if (ts.invocations) ts.invocations.clear();
     }
+    // 兜底：任务以非标准路径移除时唤醒还在等的模板引擎
+    if (this.taskWaiters.has(taskID)) this.settleWaiters(taskID, "task ended");
+  }
+
+  // ---- 声明式运行模板（group.run）的完成等待 ----
+
+  // 等待任务终结（done/error/timeout/拒绝任一）；任务不存在立即回错误
+  waitTaskDone(taskID: string): Promise<{ error?: string; text: string }> {
+    return new Promise((resolve) => {
+      if (!this.tasks.has(taskID)) {
+        resolve({ error: "task not found", text: "" });
+        return;
+      }
+      const list = this.taskWaiters.get(taskID) ?? [];
+      list.push(resolve);
+      this.taskWaiters.set(taskID, list);
+    });
+  }
+
+  // 终态 funnel 的一站：提取 final_only 终态文本并唤醒等待者。
+  // 须在 flushTaskBuffer 之前调用（缓冲还在才有全文）
+  settleWaiters(taskID: string, error?: string): void {
+    const waiters = this.taskWaiters.get(taskID);
+    if (!waiters) return;
+    this.taskWaiters.delete(taskID);
+    let chunks: proto.LocalAgentChunk[] = [...(this.taskBuffers.get(taskID)?.chunks ?? [])];
+    if (error) chunks.push({ type: proto.CHUNK_TYPE_TEXT, content: proto.textContent(error) });
+    const text = finalOnlyChunks(chunks).map(textOfChunk).join("");
+    for (const w of waiters) w({ error, text });
   }
 
   // ---- 消息持久化（db 未配置时静默跳过，保持纯转发模式可运行） ----
@@ -937,6 +969,7 @@ export class Hub {
     if (!ts) return;
     this.observeTaskEnd(taskID, "timeout");
     this.finishRun(taskID, "timeout", "任务超时");
+    this.settleWaiters(taskID, "任务超时");
     this.tasks.delete(taskID);
     logger.warn("task timeout", { task_id: taskID, agent_id: ts.agentID });
     this.notifySubtaskResult(taskID, ts, "任务超时");

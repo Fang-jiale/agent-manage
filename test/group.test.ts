@@ -1259,3 +1259,133 @@ test("delegates authorization and multi-level orchestration budget", async (t) =
     await fx.close();
   }
 });
+
+// 声明式运行模板：round_robin 把上一步输出注入下一步输入
+test("group.run round_robin threads outputs between members", async (t) => {
+  const fx = await startFixture(t);
+  if (!fx) return;
+  const { db, base } = fx;
+  const rid = crypto.randomUUID().slice(0, 8);
+  const a1 = `rr-${rid}-a1`;
+  const a2 = `rr-${rid}-a2`;
+  const conns: Conn[] = [];
+  let groupID = "";
+  try {
+    const c1 = await Conn.dial(`${base}/ws/agent?token=${jwtFor(OWNER)}`);
+    const c2 = await Conn.dial(`${base}/ws/agent?token=${jwtFor(OWNER)}`);
+    conns.push(c1, c2);
+    await registerAgent(c1, a1);
+    await registerAgent(c2, a2);
+    await upsertAgentRow(db, a1, OWNER);
+    await upsertAgentRow(db, a2, OWNER);
+    const userConn = await Conn.dial(`${base}/ws/admin?token=${jwtFor(OWNER)}`);
+    conns.push(userConn);
+    await userConn.next(proto.METHOD_ADMIN_AGENT_LIST);
+    groupID = (await rpc<proto.GroupCreateResult>(userConn, "gc", proto.METHOD_GROUP_CREATE, {
+      name: "rr", agent_ids: [a1, a2],
+    } satisfies proto.GroupCreateParams)).group_id;
+
+    const run = (await rpc<proto.GroupRunResult>(userConn, "gr", proto.METHOD_GROUP_RUN, {
+      group_id: groupID, preset: "round_robin", topic: "预算方案", rounds: 1,
+    } satisfies proto.GroupRunParams));
+    assert.equal(run.status, "running");
+    assert.ok(run.run_id.startsWith("run-"));
+
+    const chat1 = proto.decodeParams<proto.AgentChatParams>(await c1.next(proto.METHOD_AGENT_CHAT));
+    assert.equal(chat1.task_id, `${run.run_id}:0`);
+    assert.ok(chat1.content?.includes("预算方案"));
+    assert.ok(chat1.content?.includes("共 1 轮"));
+    completeTask(c1, a1, chat1.task_id, "甲的方案A");
+
+    // 第二位能看到第一位的发言（黑板由引擎注入，不靠 recent_turns）
+    const chat2 = proto.decodeParams<proto.AgentChatParams>(await c2.next(proto.METHOD_AGENT_CHAT));
+    assert.equal(chat2.task_id, `${run.run_id}:1`);
+    assert.ok(chat2.content?.includes("甲的方案A"), chat2.content);
+    completeTask(c2, a2, chat2.task_id, "乙的补充B");
+
+    // 落库：1 条 user（group 归因）+ 2 条 assistant
+    const sessionID = chat1.session_id ?? "";
+    await waitFor(async () => (await db.countMessages(OWNER, sessionID)) >= 3);
+    const msgs = await db.listMessages(OWNER, sessionID, 50);
+    assert.equal(msgs.filter((m) => m.role === "user")[0]?.agent_id, `group:${groupID}`);
+    assert.equal(msgs.filter((m) => m.role === "assistant").length, 2);
+  } finally {
+    for (const c of conns) c.close();
+    if (groupID) await db.deleteGroup(OWNER, groupID).catch(() => {});
+    await fx.close();
+  }
+});
+
+// 声明式运行模板：debate（正反+裁决）与 pipeline 自定义步骤（{{prev}} 注入、失败中止）
+test("group.run debate and pipeline custom steps", async (t) => {
+  const fx = await startFixture(t);
+  if (!fx) return;
+  const { db, base } = fx;
+  const rid = crypto.randomUUID().slice(0, 8);
+  const w1 = `db-${rid}-w1`;
+  const w2 = `db-${rid}-w2`;
+  const conns: Conn[] = [];
+  let groupID = "";
+  try {
+    const c1 = await Conn.dial(`${base}/ws/agent?token=${jwtFor(OWNER)}`);
+    const c2 = await Conn.dial(`${base}/ws/agent?token=${jwtFor(OWNER)}`);
+    conns.push(c1, c2);
+    await registerAgent(c1, w1);
+    await registerAgent(c2, w2);
+    await upsertAgentRow(db, w1, OWNER);
+    await upsertAgentRow(db, w2, OWNER);
+    const userConn = await Conn.dial(`${base}/ws/admin?token=${jwtFor(OWNER)}`);
+    conns.push(userConn);
+    await userConn.next(proto.METHOD_ADMIN_AGENT_LIST);
+    groupID = (await rpc<proto.GroupCreateResult>(userConn, "gc", proto.METHOD_GROUP_CREATE, {
+      name: "tpl", agent_ids: [w1, w2], manager_agent_id: w1,
+    } satisfies proto.GroupCreateParams)).group_id;
+
+    // debate：成员序 [w1, w2] → 正方 w1、反方 w2、裁决 = 管理者 w1
+    const run = (await rpc<proto.GroupRunResult>(userConn, "gr", proto.METHOD_GROUP_RUN, {
+      group_id: groupID, preset: "debate", topic: "是否采用微服务", rounds: 1,
+    } satisfies proto.GroupRunParams));
+    const pro = proto.decodeParams<proto.AgentChatParams>(await c1.next(proto.METHOD_AGENT_CHAT));
+    assert.ok(pro.content?.includes("正方") && pro.content?.includes("是否采用微服务"));
+    completeTask(c1, w1, pro.task_id, "正方论点P");
+    const con = proto.decodeParams<proto.AgentChatParams>(await c2.next(proto.METHOD_AGENT_CHAT));
+    assert.ok(con.content?.includes("正方论点P"), "反方应看到正方论述");
+    completeTask(c2, w2, con.task_id, "反方反驳C");
+    const verdict = proto.decodeParams<proto.AgentChatParams>(await c1.next(proto.METHOD_AGENT_CHAT));
+    assert.ok(verdict.content?.includes("正方论点P") && verdict.content?.includes("反方反驳C"));
+    assert.ok(verdict.content?.includes("裁判"));
+    completeTask(c1, w1, verdict.task_id, "裁决结论");
+
+    // pipeline 自定义步骤：{{prev}} 注入上一步输出
+    const run2 = (await rpc<proto.GroupRunResult>(userConn, "gr2", proto.METHOD_GROUP_RUN, {
+      group_id: groupID,
+      steps: [
+        { run: w1, content: "第一步：列出要点" },
+        { run: w2, content: "第二步：基于以下要点做汇总：\n{{prev}}" },
+      ],
+    } satisfies proto.GroupRunParams));
+    void run2;
+    const p1 = proto.decodeParams<proto.AgentChatParams>(await c1.next(proto.METHOD_AGENT_CHAT));
+    completeTask(c1, w1, p1.task_id, "要点一二三");
+    const p2 = proto.decodeParams<proto.AgentChatParams>(await c2.next(proto.METHOD_AGENT_CHAT));
+    assert.ok(p2.content?.includes("要点一二三"), "第二步应注入第一步输出");
+
+    // 失败中止：超时步骤后不再派发后续步骤
+    const run3 = (await rpc<proto.GroupRunResult>(userConn, "gr3", proto.METHOD_GROUP_RUN, {
+      group_id: groupID,
+      steps: [
+        { run: w2, content: "永远不回", timeout_ms: 1000 },
+        { run: w1, content: "不应执行" },
+      ],
+    } satisfies proto.GroupRunParams));
+    void run3;
+    const stuck = proto.decodeParams<proto.AgentChatParams>(await c2.next(proto.METHOD_AGENT_CHAT));
+    const cancel = proto.decodeParams<proto.AgentCancelParams>(await c2.next(proto.METHOD_AGENT_CANCEL, 10_000));
+    assert.equal(cancel.task_id, stuck.task_id);
+    await expectSilence(c1, 1500); // 第二步未派发
+  } finally {
+    for (const c of conns) c.close();
+    if (groupID) await db.deleteGroup(OWNER, groupID).catch(() => {});
+    await fx.close();
+  }
+});

@@ -467,9 +467,10 @@ export async function handleRunList(hub: Hub, user: UserConn, msg: proto.Message
 // 逐个下发 agent.cancel；任务清理仍由 agent 的 done 进度驱动（与单 agent 取消一致）
 export function handleGroupTaskCancel(hub: Hub, user: UserConn, msg: proto.Message, params: proto.TaskCancelParams): void {
   const prefix = `${params.task_id}#`;
+  const runPrefix = `${params.task_id}:`; // 运行模板步骤：<run-id>:<n>（含其 #m fan-out 派生）
   const matches: Array<[string, TaskState]> = [];
   for (const [tid, ts] of hub.tasks) {
-    const inFamily = tid === params.task_id || tid.startsWith(prefix)
+    const inFamily = tid === params.task_id || tid.startsWith(prefix) || tid.startsWith(runPrefix)
       || (ts.parentTaskID !== undefined && (ts.parentTaskID === params.task_id || ts.parentTaskID.startsWith(prefix)));
     if (inFamily && (ts.ownerID === user.userID || user.isAdmin)) matches.push([tid, ts]);
   }
@@ -509,5 +510,259 @@ export async function handleTaskForward(
   for (const id of await hub.resolveOwnerAgentIDs(user.userID)) {
     hub.forwardToAgent(id, req);
   }
+}
+
+// ---- 声明式运行模板（group.run）：round_robin / debate / pipeline ----
+// 常见协作模式一次配置跑完：网关按步骤顺序派发 agent.chat、等终态、把上一步输出
+// 注入下一步输入。步骤即普通群任务（归因落库、进度推送、可按 run_id 家族取消），
+// 无需管理者 agent 参与——网关就是编排器。
+
+const GROUP_RUN_MAX_STEPS = 12;
+const GROUP_RUN_DEFAULT_STEP_TIMEOUT_MS = 300_000;
+const GROUP_RUN_OUTPUT_CHAR_MAX = 800; // 单个成员输出注入下一步时的截断
+
+interface RunStepSpec {
+  label: string;
+  targets: string[];
+  content: string; // 支持 {{prev}}（上一步输出）与 {{all}}（此前全部输出）占位
+  collect: "all" | "first";
+  timeoutMs: number;
+}
+
+function clampTimeoutMs(v: number | undefined, fallback: number): number {
+  if (v === undefined) return fallback;
+  return Math.min(Math.max(Math.floor(v), INVOKE_TIMEOUT_MIN_MS), INVOKE_TIMEOUT_MAX_MS);
+}
+
+// 把上一步各目标输出拼成注入文本（带成员名，截断防爆）
+function renderPrevOutputs(prev: Array<{ target: string; text: string }>): string {
+  if (prev.length === 0) return "";
+  return prev.map((p) => `【${p.target}】${p.text.slice(0, GROUP_RUN_OUTPUT_CHAR_MAX)}`).join("\n\n");
+}
+
+// 预设展开：round_robin（轮流发言）/ debate（正反辩+裁决）/ pipeline（自定义步骤）
+function expandRunSteps(
+  params: proto.GroupRunParams, members: string[], online: string[], manager: string | null,
+): RunStepSpec[] {
+  if (params.steps !== undefined) {
+    if (params.preset !== undefined && params.preset !== "pipeline") {
+      throw new ProtocolError(-32602, "steps 与 preset 只能二选一（steps 属 pipeline 模式）");
+    }
+    if (params.steps.length === 0 || params.steps.length > GROUP_RUN_MAX_STEPS) {
+      throw new ProtocolError(-32602, `steps 需 1..${GROUP_RUN_MAX_STEPS} 步`);
+    }
+    return params.steps.map((s, i) => {
+      const targets = Array.isArray(s.run) ? [...new Set(s.run)] : [s.run];
+      if (targets.length === 0) throw new ProtocolError(-32602, `step ${i}: run 不能为空`);
+      for (const t of targets) {
+        if (!members.includes(t)) throw new ProtocolError(-32602, `step ${i}: 非群成员 ${t}`);
+      }
+      if (typeof s.content !== "string" || s.content.trim() === "") {
+        throw new ProtocolError(-32602, `step ${i}: content 不能为空`);
+      }
+      return {
+        label: `step-${i}`,
+        targets,
+        content: s.content,
+        collect: s.collect === "first" ? "first" : "all",
+        timeoutMs: clampTimeoutMs(s.timeout_ms, GROUP_RUN_DEFAULT_STEP_TIMEOUT_MS),
+      };
+    });
+  }
+  const preset = params.preset;
+  const topic = (params.topic ?? "").trim();
+  if (preset === undefined) throw new ProtocolError(-32602, "preset 或 steps 必填其一");
+  if (topic === "") throw new ProtocolError(-32602, "preset 模式必须提供 topic");
+  const rounds = Math.min(Math.max(Math.floor(params.rounds ?? 2), 1), 4);
+  if (preset === "round_robin") {
+    if (online.length === 0) throw new ProtocolError(-32000, "群内无在线成员");
+    const steps: RunStepSpec[] = [];
+    let first = true;
+    for (let r = 1; r <= rounds; r++) {
+      for (const p of online) {
+        steps.push({
+          label: `round-${r}-${p}`,
+          targets: [p],
+          content: first
+            ? `【圆桌讨论 · 共 ${rounds} 轮】主题：${topic}\n请给出你的观点。`
+            : `【圆桌讨论 · 共 ${rounds} 轮】主题：${topic}\n\n【此前发言】\n{{all}}\n\n请结合此前发言给出你的观点（可补充、反驳或收敛）。`,
+          collect: "all",
+          timeoutMs: GROUP_RUN_DEFAULT_STEP_TIMEOUT_MS,
+        });
+        first = false;
+      }
+    }
+    return steps;
+  }
+  if (preset === "debate") {
+    if (online.length < 2) throw new ProtocolError(-32000, "debate 需要至少 2 个在线成员（正方/反方）");
+    const [pro, con] = online;
+    const judge = manager !== null && online.includes(manager) ? manager : online[0];
+    const steps: RunStepSpec[] = [];
+    for (let r = 1; r <= rounds; r++) {
+      steps.push({
+        label: `debate-${r}-pro`,
+        targets: [pro],
+        content: `【辩论 · 第 ${r}/${rounds} 轮 · 正方】辩题：${topic}\n${r === 1 ? "请陈述正方立场与论据。" : "【对方上一轮论述】\n{{prev}}\n请反驳并强化正方立场。"}`,
+        collect: "all",
+        timeoutMs: GROUP_RUN_DEFAULT_STEP_TIMEOUT_MS,
+      });
+      steps.push({
+        label: `debate-${r}-con`,
+        targets: [con],
+        content: `【辩论 · 第 ${r}/${rounds} 轮 · 反方】辩题：${topic}\n【对方上一轮论述】\n{{prev}}\n请反驳并陈述反方立场。`,
+        collect: "all",
+        timeoutMs: GROUP_RUN_DEFAULT_STEP_TIMEOUT_MS,
+      });
+    }
+    steps.push({
+      label: "debate-verdict",
+      targets: [judge],
+      content: `【辩论裁决】辩题：${topic}\n\n【双方全部论述】\n{{all}}\n\n请作为裁判总结双方观点并给出结论与建议。`,
+      collect: "all",
+      timeoutMs: GROUP_RUN_DEFAULT_STEP_TIMEOUT_MS,
+    });
+    return steps;
+  }
+  throw new ProtocolError(-32602, `未知 preset: ${preset}`);
+}
+
+// 简易协议错误（模板参数校验用）
+class ProtocolError extends Error {
+  code: number;
+  constructor(code: number, message: string) {
+    super(message);
+    this.code = code;
+  }
+}
+
+// group.run 入口：校验+展开 → 立即回 {run_id, status:"running"} → 异步逐步执行
+export async function handleGroupRun(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  const params = proto.decodeParams<proto.GroupRunParams>(msg);
+  const group = await db.getGroup(user.userID, params.group_id ?? "");
+  if (!group) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "group not found");
+    return;
+  }
+  const members = await db.listGroupMembers(group.id);
+  const online: string[] = [];
+  for (const m of members) {
+    if (await hub.resolveAgent(m)) online.push(m);
+  }
+  let steps: RunStepSpec[];
+  try {
+    steps = expandRunSteps(params, members, online, group.manager_agent_id);
+  } catch (e) {
+    const err = e as ProtocolError;
+    sendError(user.ws, msg.id, err.code ?? proto.ERR_INVALID_PARAMS, err.message);
+    return;
+  }
+  if (!hub.taskLimiter.allow(user.userID)) {
+    sendError(user.ws, msg.id, proto.ERR_RATE_LIMITED, "too many tasks, please slow down");
+    return;
+  }
+  // 会话：复用传入的，或新建群会话
+  let sessionID = params.session_id || "";
+  if (sessionID !== "") {
+    const sess = await db.getSession(user.userID, sessionID).catch(() => undefined);
+    if (!sess || sess.agent_id !== `group:${group.id}`) {
+      sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "session_id 不是本群的会话");
+      return;
+    }
+  } else {
+    sessionID = crypto.randomUUID();
+    const title = ((params.topic ?? params.preset ?? "运行模板").trim().replace(/\s+/g, " ").slice(0, 20)) || "运行模板";
+    await db.createSession({ id: sessionID, owner_id: user.userID, agent_id: `group:${group.id}`, title });
+  }
+  const runID = `run-${crypto.randomUUID().slice(0, 8)}`;
+  hub.persistUserMessage({
+    task_id: runID, session_id: sessionID, group_id: group.id, agent_id: `group:${group.id}`,
+    type: "chat", content: `【${params.preset ?? "pipeline"}】${params.topic ?? "自定义流程"}`,
+  } as proto.TaskCreateParams, sessionID, user.userID);
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", {
+    run_id: runID, status: "running", task_ids: [],
+  } satisfies proto.GroupRunResult));
+  // 异步执行：步骤即普通群任务，进度/落库走既有链路；失败即中止后续步骤
+  const delegates = await db.listGroupDelegates(group.id);
+  void executeGroupRun(hub, user.userID, { ...group, delegates }, members, sessionID, runID, steps, params).catch((e) => {
+    logger.error("group.run failed", { run_id: runID, error: String(e) });
+  });
+}
+
+async function executeGroupRun(
+  hub: Hub, ownerID: string,
+  group: { id: string; name: string; manager_agent_id: string | null; delegates: string[] },
+  members: string[], sessionID: string, runID: string,
+  steps: RunStepSpec[], params: proto.GroupRunParams,
+): Promise<void> {
+  let prev: Array<{ target: string; text: string }> = [];
+  const all: Array<{ target: string; text: string }> = [];
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    const content = step.content
+      .replaceAll("{{prev}}", renderPrevOutputs(prev))
+      .replaceAll("{{all}}", renderPrevOutputs(all));
+    const meta = await buildGroupMetadata(
+      hub, ownerID, group, members, step.targets, params.metadata, sessionID, runID);
+    const ids: string[] = [];
+    step.targets.forEach((target, n) => {
+      const id = step.targets.length === 1 ? `${runID}:${i}` : `${runID}:${i}#${n}`;
+      ids.push(id);
+      hub.trackTask(id, target, ownerID, sessionID, { groupID: group.id, timeoutMs: step.timeoutMs });
+      hub.forwardToAgent(target, proto.newRequest("", proto.METHOD_AGENT_CHAT, {
+        task_id: id, session_id: sessionID, type: "chat", content, metadata: meta,
+      } satisfies proto.AgentChatParams));
+    });
+    logger.info("group.run step dispatched", { run_id: runID, step: step.label, targets: step.targets });
+    // collect:first = 首个成功即收割其余；all = 等全部
+    const results = step.collect === "first" && ids.length > 1
+      ? await waitFirstAndHarvest(hub, ids, step.targets)
+      : await Promise.all(ids.map((id, n) => hub.waitTaskDone(id).then((r) => ({ ...r, target: step.targets[n] }))));
+    prev = results.map((r) => ({ target: r.target, text: r.text }));
+    all.push(...prev);
+    const allFailed = results.every((r) => r.error !== undefined || r.text === "");
+    if (allFailed) {
+      logger.warn("group.run aborted: step produced no output", { run_id: runID, step: step.label });
+      return;
+    }
+  }
+  logger.info("group.run completed", { run_id: runID, steps: steps.length });
+}
+
+// collect:first：等第一个成功结果，取消收割其余运行中任务
+async function waitFirstAndHarvest(
+  hub: Hub, ids: string[], targets: string[],
+): Promise<Array<{ target: string; error?: string; text: string }>> {
+  const results = new Map<number, { target: string; error?: string; text: string }>();
+  await new Promise<void>((resolve) => {
+    let pending = ids.length;
+    let settled = false;
+    ids.forEach((id, n) => {
+      void hub.waitTaskDone(id).then((r) => {
+        if (settled) {
+          results.set(n, { target: targets[n], error: r.error ?? "collected", text: "" });
+          return;
+        }
+        results.set(n, { target: targets[n], error: r.error, text: r.text });
+        if (r.error === undefined) {
+          settled = true;
+          resolve();
+        } else if (--pending === 0) resolve();
+      });
+    });
+  });
+  for (const [n, id] of ids.entries()) {
+    if (results.has(n)) continue;
+    const ts = hub.tasks.get(id);
+    if (ts) {
+      hub.forwardToAgent(ts.agentID, proto.newNotification(proto.METHOD_AGENT_CANCEL, {
+        task_id: id, session_id: ts.sessionID || undefined,
+      } satisfies proto.AgentCancelParams));
+      hub.untrackTask(id); // 未决任务直接回收（模板步骤无 run 行/子任务回投）
+      hub.flushTaskBuffer(id, "cancelled: collect condition met");
+    }
+    results.set(n, { target: targets[n], error: "cancelled: collect condition met", text: "" });
+  }
+  return ids.map((_id, n) => results.get(n)!);
 }
 

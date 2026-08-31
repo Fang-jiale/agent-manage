@@ -75,6 +75,7 @@ export const METHOD_GROUP_RENAME = "group.rename";
 export const METHOD_GROUP_SET_MANAGER = "group.set_manager";
 export const METHOD_GROUP_SET_DELEGATES = "group.set_delegates";
 export const METHOD_GROUP_DELETE = "group.delete";
+export const METHOD_GROUP_RUN = "group.run"; // 声明式运行模板（round_robin/debate/pipeline）
 
 // 管理者 agent 编排（A2A）：管理者 agent 经 agent 通道调用群内其他 agent
 export const METHOD_AGENT_TASK_INVOKE = "agent.task.invoke";  // manager agent → gateway
@@ -955,6 +956,33 @@ export interface GroupSetManagerParams {
 export interface GroupSetDelegatesParams {
   group_id: string;
   agent_ids: string[]; // 整组替换；须为群成员；空数组 = 清空全部授权
+}
+
+// ---- 声明式运行模板（group.run）：常见协作模式一次配置跑完 ----
+
+// 自定义步骤：pipeline 模式或 preset 展开后的执行单元
+export interface GroupRunStep {
+  run: string | string[]; // 目标成员（单个或多个，多个 = fan-out 并行）
+  content: string; // 本步指令（ preset 模式由网关生成）
+  collect?: "all" | "first"; // 多目标时的收集策略（缺省 all）
+  timeout_ms?: number; // 本步超时覆盖
+}
+
+export interface GroupRunParams {
+  group_id: string;
+  session_id?: string; // 复用群会话（缺省新建）
+  preset?: "round_robin" | "debate" | "pipeline"; // 预设模板
+  topic?: string; // preset 模式的主题/任务描述
+  rounds?: number; // round_robin/debate 轮数（默认 2，1~4）
+  steps?: GroupRunStep[]; // pipeline 模式的自定义步骤（与 preset 二选一）
+  metadata?: Record<string, unknown>;
+}
+
+export interface GroupRunResult {
+  run_id: string;
+  status: "running" | "completed" | "failed";
+  task_ids: string[]; // 全部步骤任务 id（按执行顺序）
+  error?: string; // 失败原因（哪个步骤、什么错误）
 }
 
 export interface GroupDeleteParams {

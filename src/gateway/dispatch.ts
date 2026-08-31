@@ -15,6 +15,7 @@ import {
   handleGroupRename, handleGroupSetManager, handleGroupSetDelegates, handleGroupDelete,
   handleAgentSetNickname,
 } from "./groups.ts";
+import { handleGroupRun } from "./orchestration.ts";
 import {
   handleUserList, handleUserSetRole, handleUserCreate, handleUserDelete,
   handleUserDisable, handleUserResetPassword, handleUserChangePassword,
@@ -336,6 +337,7 @@ export function handleAgentMessage(hub: Hub, agent: AgentConn, raw: string): voi
         if (ts) hub.notifySubtaskResult(value.task_id, ts, value.error);
         hub.finishRun(value.task_id, value.error !== undefined && value.error !== "" ? "failed" : "completed", value.error);
         hub.observeTaskEnd(value.task_id, value.error !== undefined && value.error !== "" ? "failed" : "completed");
+        hub.settleWaiters(value.task_id, value.error); // 模板引擎等待者（缓冲 flush 前唤醒）
         hub.untrackTask(value.task_id);
         hub.flushTaskBuffer(value.task_id, value.error);
       }
@@ -470,6 +472,10 @@ export function handleUserMessage(hub: Hub, user: UserConn, raw: string): void {
 
     case proto.METHOD_GROUP_DELETE:
       withDb(hub, user, msg, (db) => handleGroupDelete(hub, user, msg, db));
+      break;
+
+    case proto.METHOD_GROUP_RUN:
+      withDb(hub, user, msg, (db) => handleGroupRun(hub, user, msg, db));
       break;
 
     case proto.METHOD_RUN_LIST:
