@@ -209,6 +209,56 @@ CREATE TABLE IF NOT EXISTS agent_nicknames (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 `;
 
+// 版本化迁移清单（init 按序应用并记账到 schema_migrations）。
+// 0001~0006 为历史 ad-hoc ALTER 的收编（升级库/新库都安全：列已存在时 1060 静默）；
+// 之后的新条目按序号递增，只应执行一次，失败直接抛出阻止启动。
+const MIGRATIONS: { version: string; note: string; stmts: string[] }[] = [
+  {
+    version: "0001-users-role-disabled-login-employee",
+    note: "users 角色/禁用/登录时间/工号/显示名",
+    stmts: [
+      "ALTER TABLE users ADD COLUMN role VARCHAR(16) NOT NULL DEFAULT 'user'",
+      "ALTER TABLE users ADD COLUMN disabled TINYINT(1) NOT NULL DEFAULT 0",
+      "ALTER TABLE users ADD COLUMN last_login_at BIGINT NULL",
+      "ALTER TABLE users ADD COLUMN employee_id VARCHAR(16) NULL UNIQUE",
+      "ALTER TABLE users ADD COLUMN display_name VARCHAR(128) NULL",
+    ],
+  },
+  {
+    version: "0002-agents-last-ip",
+    note: "agents 最近上线 IP",
+    stmts: ["ALTER TABLE agents ADD COLUMN last_ip VARCHAR(64) NULL"],
+  },
+  {
+    version: "0003-agents-brand-connector-approval",
+    note: "品牌治理：agents 品牌/连接器归属 + 审批状态",
+    stmts: [
+      "ALTER TABLE agents ADD COLUMN brand_id VARCHAR(64) NULL",
+      "ALTER TABLE agents ADD COLUMN connector_id VARCHAR(128) NULL",
+      "ALTER TABLE agents ADD COLUMN approval_status VARCHAR(16) NOT NULL DEFAULT 'approved'",
+    ],
+  },
+  {
+    version: "0004-brands-launch-conn-endpoint",
+    note: "品牌托管实例启动命令",
+    stmts: [
+      "ALTER TABLE agent_brands ADD COLUMN launch_cmd VARCHAR(512) NULL",
+      "ALTER TABLE agent_brands ADD COLUMN conn_type VARCHAR(16) NOT NULL DEFAULT 'stdio'",
+      "ALTER TABLE agent_brands ADD COLUMN endpoint VARCHAR(512) NULL",
+    ],
+  },
+  {
+    version: "0005-agents-is-manager",
+    note: "群组编排：管理者标记（展示用，权限以 agent_groups.manager_agent_id 为准）",
+    stmts: ["ALTER TABLE agents ADD COLUMN is_manager TINYINT(1) NOT NULL DEFAULT 0"],
+  },
+  {
+    version: "0006-sessions-workdir",
+    note: "会话绑定工作目录",
+    stmts: ["ALTER TABLE sessions ADD COLUMN workdir VARCHAR(512) NULL"],
+  },
+];
+
 export class Db {
   private pool: mysql.Pool;
 
@@ -216,67 +266,59 @@ export class Db {
     this.pool = mysql.createPool({ uri: url, connectionLimit: 10, timezone: "Z" });
   }
 
+  // 事务助手：多语句删除/级联清理必须原子——中途失败整体回滚，不再留孤儿数据
+  // （此前的"DELETE 会话再 DELETE 消息"两步分离，崩溃窗口会留永久孤儿消息行）
+  async withTransaction<T>(fn: (conn: mysql.PoolConnection) => Promise<T>): Promise<T> {
+    const conn = await this.pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      const result = await fn(conn);
+      await conn.commit();
+      return result;
+    } catch (e) {
+      try { await conn.rollback(); } catch { /* 连接已断 */ }
+      throw e;
+    } finally {
+      conn.release();
+    }
+  }
+
+  // 已应用迁移清单（运维排查用）
+  async listMigrations(): Promise<{ version: string; applied_at: number; note: string | null }[]> {
+    const [rows] = await this.pool.query(
+      "SELECT version, applied_at, note FROM schema_migrations ORDER BY version ASC");
+    return rows as { version: string; applied_at: number; note: string | null }[];
+  }
+
   async init(): Promise<void> {
     for (const stmt of SCHEMA.split(";").map((s) => s.trim()).filter((s) => s !== "")) {
       await this.pool.query(stmt);
     }
-    // 存量库迁移：补 role/disabled 列，原有 admin 账号提升为管理员
-    for (const col of [
-      "role VARCHAR(16) NOT NULL DEFAULT 'user'",
-      "disabled TINYINT(1) NOT NULL DEFAULT 0",
-      "last_login_at BIGINT NULL",
-      "employee_id VARCHAR(16) NULL UNIQUE", // 内联 UNIQUE：重复迁移同样报 1060
-      "display_name VARCHAR(128) NULL",
-    ]) {
-      try {
-        await this.pool.query(`ALTER TABLE users ADD COLUMN ${col}`);
-      } catch (e) {
-        if ((e as { errno?: number }).errno !== 1060) throw e; // 1060 = duplicate column
+    // 版本化迁移：schema_migrations 记录已应用版本，新迁移只跑一次。
+    // 历史条目（0001~0006）沿用 ALTER 的 1060 幂等语义——从任意旧版本二进制升级
+    // 上来的库都能安全收编进版本表；此后的新迁移应写成一次性 SQL，失败即报错。
+    await this.pool.query(`CREATE TABLE IF NOT EXISTS schema_migrations (
+      version VARCHAR(64) PRIMARY KEY,
+      applied_at BIGINT NOT NULL,
+      note VARCHAR(255) NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    const [appliedRows] = await this.pool.query("SELECT version FROM schema_migrations");
+    const applied = new Set((appliedRows as { version: string }[]).map((r) => r.version));
+    for (const m of MIGRATIONS) {
+      if (applied.has(m.version)) continue;
+      for (const stmt of m.stmts) {
+        try {
+          await this.pool.query(stmt);
+        } catch (e) {
+          if ((e as { errno?: number }).errno !== 1060) throw e; // 1060 = duplicate column（历史条目幂等）
+        }
       }
+      await this.pool.query(
+        "INSERT INTO schema_migrations (version, applied_at, note) VALUES (?, ?, ?)",
+        [m.version, Date.now(), m.note],
+      );
     }
     await this.pool.query("UPDATE users SET role = 'admin' WHERE name = 'admin' AND role <> 'admin'");
-    // 存量 agents 表迁移：补 last_ip 列
-    try {
-      await this.pool.query("ALTER TABLE agents ADD COLUMN last_ip VARCHAR(64) NULL");
-    } catch (e) {
-      if ((e as { errno?: number }).errno !== 1060) throw e;
-    }
-    // 品牌治理迁移：品牌/连接器归属 + 审批状态（存量 agent 默认已批准）
-    for (const col of [
-      "brand_id VARCHAR(64) NULL",
-      "connector_id VARCHAR(128) NULL",
-      "approval_status VARCHAR(16) NOT NULL DEFAULT 'approved'",
-    ]) {
-      try {
-        await this.pool.query(`ALTER TABLE agents ADD COLUMN ${col}`);
-      } catch (e) {
-        if ((e as { errno?: number }).errno !== 1060) throw e; // 1060 = duplicate column
-      }
-    }
-    // 品牌托管实例启动命令（存量 agent_brands 表补列）
-    for (const col of [
-      "launch_cmd VARCHAR(512) NULL",
-      "conn_type VARCHAR(16) NOT NULL DEFAULT 'stdio'",
-      "endpoint VARCHAR(512) NULL",
-    ]) {
-      try {
-        await this.pool.query(`ALTER TABLE agent_brands ADD COLUMN ${col}`);
-      } catch (e) {
-        if ((e as { errno?: number }).errno !== 1060) throw e;
-      }
-    }
-    // 群组编排：管理者标记（展示用辅助字段，实际权限以 agent_groups.manager_agent_id 为准）
-    try {
-      await this.pool.query("ALTER TABLE agents ADD COLUMN is_manager TINYINT(1) NOT NULL DEFAULT 0");
-    } catch (e) {
-      if ((e as { errno?: number }).errno !== 1060) throw e;
-    }
-    // 会话绑定工作目录
-    try {
-      await this.pool.query("ALTER TABLE sessions ADD COLUMN workdir VARCHAR(512) NULL");
-    } catch (e) {
-      if ((e as { errno?: number }).errno !== 1060) throw e;
-    }
   }
 
   async close(): Promise<void> {
@@ -333,31 +375,65 @@ export class Db {
     await this.pool.query("DELETE FROM users WHERE id = ?", [id]);
   }
 
-  // 删除用户时的连带清理：会话/消息/设备密钥/配对码/群组/备注名。
+  // 删除用户时的连带清理：会话/消息/设备密钥/配对码/群组/备注名（单事务，原子）。
   // agents 行由调用方先行逐个移除（需经 hub 注销在线连接），群成员同时清掉指向这些 agent 的行。
   // 不用跨表 JOIN/子查询比较：历史库表 collation 不一致（unicode_ci vs 0900_ai_ci）会报
   // Illegal mix of collations；先 SELECT id 再 IN 常量列表可完全避开。
   async purgeUserOwnedData(id: string): Promise<void> {
-    const [sessRows] = await this.pool.query("SELECT id FROM sessions WHERE owner_id = ?", [id]);
-    const sessionIds = (sessRows as { id: string }[]).map((r) => r.id);
-    if (sessionIds.length > 0) {
-      await this.pool.query("DELETE FROM messages WHERE session_id IN (?)", [sessionIds]);
-    }
-    await this.pool.query("DELETE FROM sessions WHERE owner_id = ?", [id]);
-    const [grpRows] = await this.pool.query("SELECT id FROM agent_groups WHERE owner_id = ?", [id]);
-    const groupIds = (grpRows as { id: string }[]).map((r) => r.id);
-    if (groupIds.length > 0) {
-      await this.pool.query("DELETE FROM agent_group_members WHERE group_id IN (?)", [groupIds]);
-    }
-    const [agentRows] = await this.pool.query("SELECT id FROM agents WHERE owner_id = ?", [id]);
-    const agentIds = (agentRows as { id: string }[]).map((r) => r.id);
-    if (agentIds.length > 0) {
-      await this.pool.query("DELETE FROM agent_group_members WHERE agent_id IN (?)", [agentIds]);
-    }
-    await this.pool.query("DELETE FROM agent_groups WHERE owner_id = ?", [id]);
-    await this.pool.query("DELETE FROM device_keys WHERE owner_id = ?", [id]);
-    await this.pool.query("DELETE FROM pairing_codes WHERE owner_id = ?", [id]);
-    await this.pool.query("DELETE FROM agent_nicknames WHERE owner_id = ?", [id]);
+    await this.withTransaction(async (conn) => {
+      const [sessRows] = await conn.query("SELECT id FROM sessions WHERE owner_id = ?", [id]);
+      const sessionIds = (sessRows as { id: string }[]).map((r) => r.id);
+      if (sessionIds.length > 0) {
+        await conn.query("DELETE FROM messages WHERE session_id IN (?)", [sessionIds]);
+      }
+      await conn.query("DELETE FROM sessions WHERE owner_id = ?", [id]);
+      const [grpRows] = await conn.query("SELECT id FROM agent_groups WHERE owner_id = ?", [id]);
+      const groupIds = (grpRows as { id: string }[]).map((r) => r.id);
+      if (groupIds.length > 0) {
+        await conn.query("DELETE FROM agent_group_members WHERE group_id IN (?)", [groupIds]);
+      }
+      const [agentRows] = await conn.query("SELECT id FROM agents WHERE owner_id = ?", [id]);
+      const agentIds = (agentRows as { id: string }[]).map((r) => r.id);
+      if (agentIds.length > 0) {
+        await conn.query("DELETE FROM agent_group_members WHERE agent_id IN (?)", [agentIds]);
+      }
+      await conn.query("DELETE FROM agent_groups WHERE owner_id = ?", [id]);
+      await conn.query("DELETE FROM device_keys WHERE owner_id = ?", [id]);
+      await conn.query("DELETE FROM pairing_codes WHERE owner_id = ?", [id]);
+      await conn.query("DELETE FROM agent_nicknames WHERE owner_id = ?", [id]);
+    });
+  }
+
+  // 用户删除的全量原子清理：purge 语句 + agents 行 + 用户行，一个事务内完成。
+  // 此前 purge / 逐 agent 删 / 删用户是三段分离的 await，中途崩溃会留下
+  // "数据已清但账号还能登录"的半删除用户。hub 侧注销（踢连接/注册表）由调用方在
+  // 本方法成功后执行——内存态可以重放，数据态必须原子。
+  async deleteUserCompletely(id: string): Promise<void> {
+    await this.withTransaction(async (conn) => {
+      const [sessRows] = await conn.query("SELECT id FROM sessions WHERE owner_id = ?", [id]);
+      const sessionIds = (sessRows as { id: string }[]).map((r) => r.id);
+      if (sessionIds.length > 0) {
+        await conn.query("DELETE FROM messages WHERE session_id IN (?)", [sessionIds]);
+      }
+      await conn.query("DELETE FROM sessions WHERE owner_id = ?", [id]);
+      const [grpRows] = await conn.query("SELECT id FROM agent_groups WHERE owner_id = ?", [id]);
+      const groupIds = (grpRows as { id: string }[]).map((r) => r.id);
+      if (groupIds.length > 0) {
+        await conn.query("DELETE FROM agent_group_members WHERE group_id IN (?)", [groupIds]);
+      }
+      // 群成员清理的子查询依赖 agents 表仍含这些行：先按属主收 id 再删行
+      const [agentRows] = await conn.query("SELECT id FROM agents WHERE owner_id = ?", [id]);
+      const agentIds = (agentRows as { id: string }[]).map((r) => r.id);
+      if (agentIds.length > 0) {
+        await conn.query("DELETE FROM agent_group_members WHERE agent_id IN (?)", [agentIds]);
+      }
+      await conn.query("DELETE FROM agent_groups WHERE owner_id = ?", [id]);
+      await conn.query("DELETE FROM device_keys WHERE owner_id = ?", [id]);
+      await conn.query("DELETE FROM pairing_codes WHERE owner_id = ?", [id]);
+      await conn.query("DELETE FROM agent_nicknames WHERE owner_id = ?", [id]);
+      await conn.query("DELETE FROM agents WHERE owner_id = ?", [id]);
+      await conn.query("DELETE FROM users WHERE id = ?", [id]);
+    });
   }
 
   async touchLastLogin(id: string): Promise<void> {
@@ -643,12 +719,15 @@ export class Db {
     await this.pool.query("UPDATE sessions SET updated_at = ? WHERE id = ?", [updatedAt, id]);
   }
 
+  // 会话与消息同事务删除：两步分离的崩溃窗口会留永久孤儿消息行
   async deleteSession(ownerID: string, id: string): Promise<boolean> {
-    const [res] = await this.pool.query(
-      "DELETE FROM sessions WHERE id = ? AND owner_id = ?", [id, ownerID]);
-    if ((res as mysql.ResultSetHeader).affectedRows === 0) return false;
-    await this.pool.query("DELETE FROM messages WHERE session_id = ?", [id]);
-    return true;
+    return this.withTransaction(async (conn) => {
+      const [res] = await conn.query(
+        "DELETE FROM sessions WHERE id = ? AND owner_id = ?", [id, ownerID]);
+      if ((res as mysql.ResultSetHeader).affectedRows === 0) return false;
+      await conn.query("DELETE FROM messages WHERE session_id = ?", [id]);
+      return true;
+    });
   }
 
   // 保留策略用：找出更新时间早于 cutoff 的会话
@@ -723,12 +802,15 @@ export class Db {
     return (res as mysql.ResultSetHeader).affectedRows > 0;
   }
 
+  // 群组与成员同事务删除（同 deleteSession 的原子性理由）
   async deleteGroup(ownerID: string, id: string): Promise<boolean> {
-    const [res] = await this.pool.query(
-      "DELETE FROM agent_groups WHERE id = ? AND owner_id = ?", [id, ownerID]);
-    if ((res as mysql.ResultSetHeader).affectedRows === 0) return false;
-    await this.pool.query("DELETE FROM agent_group_members WHERE group_id = ?", [id]);
-    return true;
+    return this.withTransaction(async (conn) => {
+      const [res] = await conn.query(
+        "DELETE FROM agent_groups WHERE id = ? AND owner_id = ?", [id, ownerID]);
+      if ((res as mysql.ResultSetHeader).affectedRows === 0) return false;
+      await conn.query("DELETE FROM agent_group_members WHERE group_id = ?", [id]);
+      return true;
+    });
   }
 
   async addGroupMember(groupID: string, agentID: string): Promise<void> {

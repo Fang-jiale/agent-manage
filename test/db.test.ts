@@ -193,3 +193,39 @@ test("device keys roundtrip", async (t) => {
     await db.close();
   }
 });
+// 版本化迁移：schema_migrations 记账 + init 幂等（重复启动不重放、不报错）
+test("schema migrations are recorded and idempotent", async (t) => {
+  const db = await freshDb(t);
+  if (!db) return;
+  try {
+    const first = await db.listMigrations();
+    assert.ok(first.length >= 6, "历史迁移 0001~0006 全部记账: " + first.map((m) => m.version).join(","));
+    // 二次 init：已应用版本不重放、不报错（网关每次启动都会跑）
+    const again = new Db(URL);
+    await again.init();
+    await again.close();
+    const second = await db.listMigrations();
+    assert.deepEqual(second.map((m) => m.version), first.map((m) => m.version), "重复启动不新增记账");
+  } finally {
+    await db.close();
+  }
+});
+
+// 事务助手：中途抛错整体回滚
+test("withTransaction rolls back on error", async (t) => {
+  const db = await freshDb(t);
+  if (!db) return;
+  const uid = "tx-" + crypto.randomUUID();
+  try {
+    await assert.rejects(db.withTransaction(async (conn) => {
+      await conn.query(
+        "INSERT INTO users (id, name, password_hash, role, created_at) VALUES (?, ?, 'x', 'user', 1)",
+        [uid, uid],
+      );
+      throw new Error("boom"); // 已写入的行必须回滚
+    }), /boom/);
+    assert.equal(await db.getUserById(uid), undefined, "回滚后无残留");
+  } finally {
+    await db.close();
+  }
+});

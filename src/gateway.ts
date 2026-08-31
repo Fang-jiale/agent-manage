@@ -96,6 +96,10 @@ interface TaskBuffer {
 // 单任务落库缓冲上限：超出部分丢弃并在最终消息里标注截断
 const MAX_TASK_BUFFER_BYTES = 4 * 1024 * 1024;
 
+// WS 发送背压水位：软水位丢通知（慢消费），硬水位断开（对端停摆，防 OOM）
+const SEND_BUFFER_SOFT = 8 * 1024 * 1024;
+const SEND_BUFFER_HARD = 32 * 1024 * 1024;
+
 // 交互 chunk（confirm/prompt/block）在任务缓冲里的应答/撤销标记，随任务落库
 interface BufferedInteractionChunk {
   type?: string;
@@ -162,6 +166,7 @@ export class Hub {
     this.metrics.counter("ywm_tasks_completed_total", "Tasks finished with done=true");
     this.metrics.counter("ywm_tasks_failed_total", "Tasks finished with error");
     this.metrics.counter("ywm_tasks_timeout_total", "Tasks killed by timeout");
+    this.metrics.counter("ywm_ws_send_dropped_total", "Messages dropped by WS send backpressure");
     this.metrics.counter("ywm_task_duration_seconds_sum", "Total task duration seconds");
     this.metrics.counter("ywm_task_duration_seconds_count", "Duration sample count");
     this.metrics.counter("ywm_messages_persisted_total", "Messages written to MySQL");
@@ -903,19 +908,35 @@ export class Hub {
     this.forwardToUsers(ts.ownerID, notif);
   }
 
-  trySend(ws: WebSocket, msg: proto.Message): void {
-    if (ws.readyState !== WebSocket.OPEN) return;
+  trySend(ws: WebSocket, msg: proto.Message): boolean {
+    if (ws.readyState !== WebSocket.OPEN) return false;
+    // 发送背压：慢消费者（合盖/断网）的发送缓冲会无限堆积直至 OOM。
+    // 软水位丢弃本条消息（通知类可丢，客户端重连后靠对账恢复）；
+    // 硬水位说明对端已停摆，terminate 立即释放内存（close 还会往同一缓冲排队）。
+    if (ws.bufferedAmount >= SEND_BUFFER_SOFT) {
+      this.metrics.inc("ywm_ws_send_dropped_total");
+      if (ws.bufferedAmount >= SEND_BUFFER_HARD) {
+        logger.warn("send buffer overflow, terminating stalled consumer", {
+          buffered: ws.bufferedAmount,
+        });
+        ws.terminate();
+      }
+      return false;
+    }
     ws.send(JSON.stringify(msg));
+    return true;
   }
 }
 
 function sendError(ws: WebSocket, id: string | undefined, code: number, message: string, data?: unknown): void {
   if (ws.readyState !== WebSocket.OPEN) return;
+  if (ws.bufferedAmount >= SEND_BUFFER_SOFT) return; // 背压：丢弃响应，调用方超时兜底
   ws.send(JSON.stringify(proto.newErrorResponse(id ?? "", code, message, data)));
 }
 
 function sendMsg(ws: WebSocket, msg: proto.Message): void {
   if (ws.readyState !== WebSocket.OPEN) return;
+  if (ws.bufferedAmount >= SEND_BUFFER_SOFT) return; // 背压：丢弃响应，调用方超时兜底
   ws.send(JSON.stringify(msg));
 }
 
@@ -1380,12 +1401,13 @@ async function handleUserDelete(hub: Hub, user: UserConn, msg: proto.Message, db
     return;
   }
   const { agents } = await db.listAgentsPaged({ ownerID: params.id, limit: 100_000, offset: 0 });
-  // purge 先于 agents 行删除：群成员清理的子查询依赖 agents 表仍含这些行
-  await db.purgeUserOwnedData(params.id);
+  // 数据清理单事务原子完成（purge + agent 行 + 用户行）：此前三段分离的 await
+  // 中途崩溃会留下"数据已清但账号还能登录"的半删除用户。hub 侧注销在事务成功后执行
+  await db.deleteUserCompletely(params.id);
   for (const row of agents) {
-    await doRemoveAgent(hub, db, row);
+    hub.unregisterAgent(row.id);
+    await hub.pushConnectorSync(row.connector_id ?? "");
   }
-  await db.deleteUser(params.id);
   hub.invalidateAdminCache(params.id);
   hub.kickUser(params.id);
   hub.broadcastAgentList();
@@ -3339,6 +3361,33 @@ export async function createGatewayServer(cfg: GatewayConfig, staticFile: string
     logger.info("redis bus connected", { instance_id: cfg.instanceID });
   }
 
+  // 静态文件内存缓存与 ETag：必须挂在请求 handler 外层（此前声明在每请求闭包里，
+  // 每次请求都是新 Map，缓存从未生效——每个请求都读盘 + SHA1）。
+  // 文件就几个，常驻缓存；重启进程即失效，无需失效机制。
+  const fileCache = new Map<string, Buffer | null>();
+  const readCached = (file: string, cb: (data: Buffer | null) => void) => {
+    const hit = fileCache.get(file);
+    if (hit !== undefined) {
+      cb(hit);
+      return;
+    }
+    fs.readFile(file, (err, data) => {
+      fileCache.set(file, err ? null : data);
+      cb(err ? null : data);
+    });
+  };
+  // ETag（内容哈希，同内容跨重启稳定）+ If-None-Match → 304：
+  // no-cache 策略下重复导航不再重传 HTML/CSS，只回"没变"
+  const fileEtags = new Map<string, string>();
+  const etagOf = (file: string, data: Buffer): string => {
+    let et = fileEtags.get(file);
+    if (!et) {
+      et = `"${crypto.createHash("sha1").update(data).digest("base64url").slice(0, 20)}"`;
+      fileEtags.set(file, et);
+    }
+    return et;
+  };
+
   const server = http.createServer({
     // 显式超时，防慢速请求占住连接（与 Node 18+ 默认值一致，写死防升级漂移）
     headersTimeout: 60_000,
@@ -3388,30 +3437,7 @@ export async function createGatewayServer(cfg: GatewayConfig, staticFile: string
       })().catch(() => res.writeHead(500).end("internal error"));
       return;
     }
-    // 静态文件内存缓存：文件就几个，首次请求后不再读盘（重启进程即失效，无需失效机制）
-    const fileCache = new Map<string, Buffer | null>();
-    const readCached = (file: string, cb: (data: Buffer | null) => void) => {
-      const hit = fileCache.get(file);
-      if (hit !== undefined || fileCache.has(file)) {
-        cb(hit ?? null);
-        return;
-      }
-      fs.readFile(file, (err, data) => {
-        fileCache.set(file, err ? null : data);
-        cb(err ? null : data);
-      });
-    };
-    // ETag（内容哈希，同内容跨重启稳定）+ If-None-Match → 304：
-    // no-cache 策略下重复导航不再重传 HTML/CSS，只回"没变"
-    const fileEtags = new Map<string, string>();
-    const etagOf = (file: string, data: Buffer): string => {
-      let et = fileEtags.get(file);
-      if (!et) {
-        et = `"${crypto.createHash("sha1").update(data).digest("base64url").slice(0, 20)}"`;
-        fileEtags.set(file, et);
-      }
-      return et;
-    };
+    // 静态文件缓存与 ETag 计算已提到 handler 外层（见 createServer 之前）
     const normEtag = (s: string): string => (s.startsWith("W/") ? s.slice(2) : s);
     const isNotModified = (file: string, data: Buffer): boolean => {
       const inm = req.headers["if-none-match"];

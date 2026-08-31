@@ -96,7 +96,12 @@ export class StdioAdapter implements LocalAgentAdapter {
 
     let proc: ChildProcess;
     try {
-      proc = spawn(command, args, { stdio: ["pipe", "pipe", "inherit"] });
+      // POSIX 下 detached 建独立进程组：close() 可用负 pid 组击杀，
+      // 否则 bash/cmd 包装的孙进程会在 kill(shell) 后变孤儿堆积在终端上
+      proc = spawn(command, args, {
+        stdio: ["pipe", "pipe", "inherit"],
+        detached: process.platform !== "win32",
+      });
     } catch (e) {
       throw new Error(`spawn "${command}" failed: ${spawnErrorHint(e)}`);
     }
@@ -429,8 +434,23 @@ export class StdioAdapter implements LocalAgentAdapter {
     if (this.closed) return;
     this.closed = true;
     try {
-      this.proc.stdin!.end();
+      this.proc.stdin!.end(); // 优雅路径：EOF 让守规矩的 agent 自行退出
     } catch { /* already closed */ }
-    this.proc.kill();
+    // 升级击杀（此前只有一发对 shell 本体的 SIGTERM 且不等待退出）：
+    // 1s 退出窗口 → SIGTERM 进程组 → 3s → SIGKILL 进程组。
+    // 注意：leader 退出不取消升级——孙进程（trap 掉 TERM 的 shell 包装）仍挂在组里，
+    // 组已不存在时 kill 抛 ESRCH 静默即可。忽略 SIGTERM 的 wedge 进程由此兜底。
+    const pid = this.proc.pid;
+    const killGroup = (sig: NodeJS.Signals): void => {
+      if (!pid) return;
+      try {
+        if (process.platform === "win32") this.proc.kill(sig);
+        else process.kill(-pid, sig); // 负 pid = 整个进程组（含 shell 包装的孙进程）
+      } catch { /* ESRCH：组已全部退出 */ }
+    };
+    const escalate1 = setTimeout(() => killGroup("SIGTERM"), 1000);
+    const escalate2 = setTimeout(() => killGroup("SIGKILL"), 4000);
+    escalate1.unref();
+    escalate2.unref();
   }
 }

@@ -147,6 +147,11 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// 重连退避：指数 + ±25% 抖动——网关重启时全量终端会在同一时刻醒来形成重连风暴
+function backoffSleep(delayMs: number): Promise<void> {
+  return sleep(Math.round(delayMs * (0.75 + Math.random() * 0.5)));
+}
+
 // translateLifecycleEvent converts a local agent lifecycle event into the
 // corresponding gateway-facing message.
 function translateLifecycleEvent(agentID: string, ev: LocalAgentEvent): proto.Message | undefined {
@@ -855,6 +860,7 @@ async function mainConnector(cfg: ClientConfig, connectorID: string, ui: LocalUI
   });
 
   let reconnectDelay = 1000;
+  let openedAt = 0;
   while (!interrupted) {
     logger.info("connecting to gateway", { url: gatewayURL.toString(), connector_id: connectorID });
 
@@ -863,11 +869,11 @@ async function mainConnector(cfg: ClientConfig, connectorID: string, ui: LocalUI
     if (interrupted) break;
     if (!ws) {
       logger.warn("dial failed", { retry_in: `${reconnectDelay}ms` });
-      await sleep(reconnectDelay);
+      await backoffSleep(reconnectDelay);
       reconnectDelay = Math.min(reconnectDelay * 2, 30_000);
       continue;
     }
-    reconnectDelay = 1000;
+    openedAt = Date.now();
     currentWS = ws;
     ui.connected = true;
 
@@ -1022,11 +1028,18 @@ async function mainConnector(cfg: ClientConfig, connectorID: string, ui: LocalUI
     });
 
     const closeCode = await new Promise<number>((resolve) => {
-      ws.once("close", (code) => resolve(code));
+      // 信号监听随连接关闭一并摘除：每轮重连各挂一对 once，长期运行会堆积出
+      // MaxListenersExceededWarning 且旧 handler 齐发
       const onSigint = (): void => {
         ws.close(1000);
         resolve(1000);
       };
+      const onWsClose = (code: number): void => {
+        process.removeListener("SIGINT", onSigint);
+        process.removeListener("SIGTERM", onSigint);
+        resolve(code);
+      };
+      ws.once("close", onWsClose);
       process.once("SIGINT", onSigint);
       process.once("SIGTERM", onSigint);
     });
@@ -1046,9 +1059,11 @@ async function mainConnector(cfg: ClientConfig, connectorID: string, ui: LocalUI
       for (const id of [...hosted.keys()]) await dropAgent(id);
       return true;
     }
+    // 连接曾稳定运行才重置退避；刚连上就断（网关重启循环）保持退避，避免热循环
+    if (openedAt > 0 && Date.now() - openedAt > 30_000) reconnectDelay = 1000;
     logger.info("connection lost, reconnecting...");
     for (const h of hosted.values()) h.tasks.cancelAll();
-    await sleep(reconnectDelay);
+    await backoffSleep(reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 2, 30_000);
   }
 
@@ -1503,13 +1518,18 @@ function startLocalRun(brand: string): { running: boolean; log_path: string; err
   // tokenizeCommand 与 stdio 适配器同款语义：命令字符串拆 argv
   const log = fs.openSync(logPath, "a");
   fs.writeSync(log, "\n===== local run " + new Date().toISOString() + " =====\n");
+  // POSIX 下 detached 建进程组：shell:true 的孙进程才能按组击杀，stop 不留孤儿
   const child = spawn(ov.target, [], {
     shell: true,                       // 命令字符串原样执行（与品牌 launch_cmd 语义一致）
-    detached: false, stdio: ["ignore", log, log],
+    detached: process.platform !== "win32",
+    stdio: ["ignore", log, log],
     env: { ...process.env },
   });
   child.on("exit", (code, sig) => {
-    try { fs.writeSync(log, "\n===== exited code=" + code + " sig=" + sig + " =====\n"); } catch { /* 日志句柄可能已关 */ }
+    try {
+      fs.writeSync(log, "\n===== exited code=" + code + " sig=" + sig + " =====\n");
+      fs.closeSync(log); // 退出即关：此前每轮 start/stop 泄漏一个 fd
+    } catch { /* 日志句柄可能已关 */ }
   });
   localRuns.set(brand, { child, logPath, startedAt: Date.now() });
   logger.info("product local run started", { brand, pid: child.pid, log: logPath });
@@ -1519,10 +1539,24 @@ function startLocalRun(brand: string): { running: boolean; log_path: string; err
 function stopLocalRun(brand: string): void {
   const r = localRuns.get(brand);
   if (!r) throw new Error("该产品没有在本地运行");
-  if (r.child.exitCode === null) {
-    try { r.child.kill("SIGTERM"); } catch { /* 已退出 */ }
-  }
   localRuns.delete(brand);
+  if (r.child.exitCode !== null) {
+    logger.info("product local run stopped", { brand });
+    return;
+  }
+  // 进程组 SIGTERM → 3s → 组 SIGKILL（同 stdio 适配器语义：leader 退出不取消升级，
+  // 孙进程可能仍在组里；组已消失时 ESRCH 静默）
+  const pid = r.child.pid;
+  const killGroup = (sig: NodeJS.Signals): void => {
+    if (!pid) return;
+    try {
+      if (process.platform === "win32") r.child.kill(sig);
+      else process.kill(-pid, sig);
+    } catch { /* ESRCH：组已全部退出 */ }
+  };
+  killGroup("SIGTERM");
+  const t1 = setTimeout(() => killGroup("SIGKILL"), 3000);
+  t1.unref();
   logger.info("product local run stopped", { brand });
 }
 
@@ -2278,6 +2312,7 @@ async function main(): Promise<void> {
   }
 
   let reconnectDelay = 1000;
+  let openedAt = 0;
   while (!interrupted) {
     logger.info("connecting to gateway", { url: gatewayURL.toString() });
 
@@ -2286,11 +2321,11 @@ async function main(): Promise<void> {
     if (interrupted) break;
     if (!ws) {
       logger.warn("dial failed", { retry_in: `${reconnectDelay}ms` });
-      await sleep(reconnectDelay);
+      await backoffSleep(reconnectDelay);
       reconnectDelay = Math.min(reconnectDelay * 2, 30_000);
       continue;
     }
-    reconnectDelay = 1000;
+    openedAt = Date.now();
     currentWS = ws;
 
     sendRegister(ws, cfg.agentID, adapter.getCapabilities());
@@ -2343,11 +2378,18 @@ async function main(): Promise<void> {
     });
 
     const closeCode = await new Promise<number>((resolve) => {
-      ws.once("close", (code) => resolve(code));
+      // 信号监听随连接关闭一并摘除：每轮重连各挂一对 once，长期运行会堆积出
+      // MaxListenersExceededWarning 且旧 handler 齐发
       const onSigint = (): void => {
         ws.close(1000);
         resolve(1000);
       };
+      const onWsClose = (code: number): void => {
+        process.removeListener("SIGINT", onSigint);
+        process.removeListener("SIGTERM", onSigint);
+        resolve(code);
+      };
+      ws.once("close", onWsClose);
       process.once("SIGINT", onSigint);
       process.once("SIGTERM", onSigint);
     });
@@ -2365,9 +2407,11 @@ async function main(): Promise<void> {
       replaced = true;
       break;
     }
+    // 连接曾稳定运行才重置退避；刚连上就断（网关重启循环）保持退避，避免热循环
+    if (openedAt > 0 && Date.now() - openedAt > 30_000) reconnectDelay = 1000;
     logger.info("connection lost, reconnecting...");
     tasks.cancelAll();
-    await sleep(reconnectDelay);
+    await backoffSleep(reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 2, 30_000);
   }
 

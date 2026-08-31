@@ -3626,11 +3626,12 @@
             function scheduleReconnect() {
                 if (reconnectTimer) return;
                 setConnectionStatus('connecting', '重连中…');
+                // ±25% 抖动：网关重启时所有已连接页签会在同一时刻醒来形成重连风暴
                 reconnectTimer = setTimeout(() => {
                     reconnectTimer = null;
                     connect();
                     reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX);
-                }, reconnectDelay);
+                }, Math.round(reconnectDelay * (0.75 + Math.random() * 0.5)));
             }
 
             function logout() {
