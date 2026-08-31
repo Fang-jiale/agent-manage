@@ -194,9 +194,15 @@
             <p style="color:var(--text-tertiary);font-size:13px;margin:4px 0 10px">勾选你的 Agent 加入群组；@管理者 可让它调度群内其他 Agent 帮你干活</p>
             <input type="text" id="groupNameInput" placeholder="群组名称" style="width:100%;box-sizing:border-box;margin-bottom:10px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text)">
             <div id="groupMemberList" style="max-height:220px;overflow-y:auto;margin-bottom:10px"></div>
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
                 <span style="font-size:13px;color:var(--text-secondary)">管理者</span>
                 <select id="groupManagerSelect" style="flex:1;padding:6px 8px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text)"></select>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+                <span style="font-size:13px;color:var(--text-secondary)" title="授权成员与管理者一样可调度群内其他 Agent（多级编排）">授权成员</span>
+                <select id="groupDelegateSelect" multiple
+                    style="flex:1;min-height:56px;padding:4px 8px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:13px"
+                    title="按住 Ctrl/Cmd 可多选；不选 = 无授权"></select>
             </div>
             <div class="modal-actions">
                 <button class="btn btn-ghost" id="groupCancel">取消</button>
@@ -375,6 +381,6 @@
         <div style="font-size:13px;color:var(--text-tertiary)">YwMatrix 加载中…</div>
     </div>
     <style>@keyframes ywmspin{to{transform:rotate(360deg)}}</style>
-    <script src="/static/app.js?v=2026082904"></script>
+    <script src="/static/app.js?v=2026083102"></script>
 </body>
 </html>

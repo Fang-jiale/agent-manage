@@ -250,7 +250,8 @@ Content-Type: application/json
 | `user.*` | 用户管理（见 3.5） |
 | `device_key.*` | 设备密钥管理（见 3.7） |
 | `task.*` | 任务相关（创建、取消、进度；`group_id` 群路由见 10.5） |
-| `group.*` | 群组管理（见 10.5） |
+| `group.*` | 群组管理（含 `group.set_delegates` 授权矩阵，见 10.5） |
+| `run.list` | 编排子任务运行记录查询（派发树/审计，见 10.6） |
 | `agent.task.*` | 管理者编排：`agent.task.invoke` 请求 / `agent.task.result` 结果回推（见 10.6） |
 
 ## 6. 生命周期消息
@@ -776,14 +777,17 @@ connector 的凭证不落启动参数，走一次性配对码换发设备密钥�
 | `group.list` | `{}` | `{groups: GroupInfo[]}` | 仅返回自己名下的群 |
 | `group.detail` | `{group_id}` | `{group: GroupInfo}` | |
 | `group.add` | `{group_id, agent_id}` | `{status:"ok"}` | 添加成员（须为自有 Agent） |
-| `group.remove` | `{group_id, agent_id}` | `{status:"ok"}` | 移除成员；移除的是管理者时管理者清空 |
+| `group.remove` | `{group_id, agent_id}` | `{status:"ok"}` | 移除成员；移除的是管理者时管理者清空。该成员名下未完成的群任务（含编排子任务）级联 `agent.cancel` |
 | `group.rename` | `{group_id, name}` | `{status:"ok"}` | 改名（trim，≤128 字符） |
 | `group.set_manager` | `{group_id, manager_agent_id}` | `{status:"ok"}` | 设置/更换管理者；`null` 取消；目标必须是群成员 |
-| `group.delete` | `{group_id}` | `{status:"ok"}` | 解散群（连成员关系一并删除；群会话的消息保留在 messages 表） |
+| `group.set_delegates` | `{group_id, agent_ids[]}` | `{status:"ok", delegate_agent_ids}` | **整组替换**授权成员（须为群成员，≤8，空数组=清空）。delegate 与管理者一样可 `agent.task.invoke`（受同样的深度/预算/并发约束）——多级编排的前提 |
+| `group.delete` | `{group_id}` | `{status:"ok"}` | 解散群（连成员关系一并删除；群会话的消息保留在 messages 表）。全部未完成群任务级联 `agent.cancel` |
 
 所有群 RPC 均限属主（他人操作返回 `-32602`，含不存在的 group_id）。
 
-`GroupInfo = {id, name, manager_agent_id, agent_ids[], created_at}`。
+`GroupInfo = {id, name, manager_agent_id, delegate_agent_ids[], agent_ids[], created_at}`。
+
+**运行记录查询**：`run.list` `{parent_task_id? | session_id?, limit?}` → `{runs: RunInfo[]}`（owner 范围，admin 全量）。`RunInfo = {task_id, parent_task_id, group_id, invoker_agent_id, target_agent_id, invocation_id, session_id, status, error, created_at, ended_at}`，`status ∈ running | completed | failed | timeout | cancelled`——编排派发树 / 审计视图的数据源。
 
 ### 群消息路由（task.create 扩展）
 
@@ -821,13 +825,29 @@ connector 的凭证不落启动参数，走一次性配对码换发设备密钥�
     "group_id": "<gid>",
     "group_name": "调研群",
     "manager_agent_id": "leader-1",
-    "members": [{"agent_id": "leader-1", "name": "张三的 MacBook"}, {"agent_id": "worker-a", "name": "A"}],
-    "mentions": ["leader-1"]
+    "delegate_agent_ids": ["worker-a"],
+    "members": [
+      {"agent_id": "leader-1", "name": "张三的 MacBook", "description": "代码评审", "capabilities": [{"type": "chat", "name": "review"}], "online": true},
+      {"agent_id": "worker-a", "name": "A", "online": false}
+    ],
+    "mentions": ["leader-1"],
+    "turn_id": "task-101",
+    "recent_turns": [
+      {
+        "turn_id": "task-99",
+        "user_text": "上一轮用户问题（≤200 字）",
+        "replies": [{"agent_id": "worker-a", "name": "A", "text": "该成员最终回复摘要（≤300 字）"}]
+      }
+    ]
   }
 }
 ```
 
 `mentions` 为本条消息实际命中的目标（`@全体` 已展开为成员列表）。本地 Agent 据此即可感知自己是否为管理者（`manager_agent_id` === 自身 id）、群里有谁、本条 @ 了谁，无需用户在消息文本里重复说明（AgentClient 透传 metadata，见《本地 Agent 接口标准》§6.1）。
+
+**群黑板（recent_turns）**：`turn_id` 为本轮基任务 id；`recent_turns` 为最近 3 轮（不含当前轮）的摘要——每轮含用户问题与各成员最终回复文本（fan-out 回复与编排子任务输出都算，取终态文本而非过程 chunks；总体积上限 8KB，超限丢最旧轮）。首轮无可注入时字段缺省。成员由此"看得见"群里发生过什么，群聊不再是互盲的并行私聊；Agent 不识别则忽略。
+
+**成员档案（Agent Card 内化）**：`members[]` 除 `agent_id/name` 外带 `description`（首个能力描述，≤200 字）、`capabilities`（注册能力，≤8 条，含 type/name/description）、`online`（实时在线态）——管理者/成员可按能力选目标，不必靠用户口头介绍谁会什么。`delegate_agent_ids` 为当前授权可编排的成员。
 - `admin.task.progress` 附加 `group_id`（群内任务）与 `parent_task_id`（编排子任务，见 10.6），前端据此归因渲染群聊气泡。
 - `task.cancel` 携带 `group_id` 时按基任务 id 收敛整个 fan-out 家族（`<tid>`、`<tid>#n` 及编排子任务）逐个下发 `agent.cancel`，立即回 `{status:"cancelling"}`。
 
@@ -848,8 +868,30 @@ connector 的凭证不落启动参数，走一次性配对码换发设备密钥�
     "parent_task_id": "task-101",
     "group_id": "<gid>",
     "target_agent_id": "worker-a",
+    "invocation_id": "step-1",
+    "thread_id": "research",
+    "timeout_ms": 120000,
+    "context_policy": "final_only",
     "type": "chat",
     "content": "查一下数据"
+  }
+}
+```
+
+批量（scatter-gather / 竞速）：`targets` 替代 `target_agent_id`，配合 `collect` 收集策略：
+
+```json
+{
+  "method": "agent.task.invoke",
+  "params": {
+    "parent_task_id": "task-101",
+    "group_id": "<gid>",
+    "target_agent_id": "",
+    "targets": ["worker-a", "worker-b", "worker-c"],
+    "invocation_id": "vote-1",
+    "collect": { "quorum": 2 },
+    "type": "chat",
+    "content": "并行调研"
   }
 }
 ```
@@ -857,11 +899,28 @@ connector 的凭证不落启动参数，走一次性配对码换发设备密钥�
 网关校验（任一不过返回对应错误）：
 
 1. 父任务存在且由**本连接**承载（`-32006`）——多实例下编排要求管理者与任务同实例；
-2. 父任务 depth=0，编排产生的子任务不能再编排（`-32006`，防递归硬限 1 层）；
-3. 调用方 Agent 是该群 `manager_agent_id`（`-32006`）；
-4. 目标是群成员、非管理者自己、与群主同属主（`-32006` / `-32000`）。
+2. 编排深度 < 3：depth 0（用户任务）→1→2→3，第 4 层拒绝（`-32006`，预算制取代旧单层硬限）；
+3. 调用方 Agent 是该群 `manager_agent_id` **或** `delegate_agent_ids` 之一（`-32006`，见 `group.set_delegates`）；
+4. 目标是群成员、非调用方自己、与群主同属主（`-32006` / `-32000`）；批量目标去重后 ≤8；
+5. 同父任务未决子任务并发 ≤ 4（`-32006`，防管理者连发打满目标）；
+6. **每父任务子任务总量预算 ≤16**（含已完成，`-32006`）：多级/重试都不能刷出无限任务。
 
-通过后子任务 task_id 为 `<parent_task_id>@<random8>`，复用父任务会话（群里可见），立即返回 `{task_id, status:"dispatched"}`。
+可选参数（旧调用方全部可省，零兼容性问题）：
+
+| 参数 | 语义 |
+|---|---|
+| `invocation_id` | **幂等键**（`parent_task_id + invocation_id` 去重）。子任务运行中重复调用返回同一 task_id（`status:"dispatched"`）；已结束则**重发终态结果通知**并回 `status:"duplicate"`，不重新派发。要重跑请换新 id |
+| `targets` | **批量目标**：一次逻辑调用派发多个子任务，响应 `tasks[]` 给出明细。同 `invocation_id` 归一组 |
+| `collect` | **收集策略**：`all`（默认，等全部）；`first`（首个成功即收割其余——竞速/speculative）；`{"quorum": n}`（n 个成功即收割其余——多数派）。被收割子任务收到 `agent.cancel`，管理者收到合成 `failed` 结果（error=`cancelled: collect condition met`），真实结果先于合成结果到达 |
+| `thread_id` | **续聊线程**：同 `(group, invoker, target, thread_id)` 的多次调用复用同一子会话 id 下发（目标 Agent 侧上下文连续，响应带 `thread_session_id`）。子会话不落库——进度归因仍落群/父会话。批量时按目标各建线程 |
+| `timeout_ms` | 本次子任务超时覆盖，clamp 1s~1h；缺省用网关全局任务超时 |
+| `context_policy` | 结果回投粒度：`final_only`（**默认**）只回终态文本+artifact 产出；`full` 回全量 chunks |
+
+通过后子任务 task_id 为 `<parent_task_id>@<random8>`，复用父任务会话（群里可见；`thread_id` 模式下目标侧见稳定子会话 id），立即返回：
+
+```json
+{ "result": { "task_id": "task-101@ab12cd34", "status": "dispatched", "context_policy": "final_only", "tasks": [{"target_agent_id": "worker-a", "task_id": "task-101@ab12cd34"}], "thread_session_id": "<uuid>" } }
+```
 
 ### 结果回推（Gateway → 管理者 AgentClient，notification）
 
@@ -878,12 +937,16 @@ connector 的凭证不落启动参数，走一次性配对码换发设备密钥�
     "target_agent_id": "worker-a",
     "status": "completed",
     "chunks": [{"type": "text", "text": "调研结果…"}],
-    "error": null
+    "error": null,
+    "context_policy": "final_only",
+    "invocation_id": "step-1"
   }
 }
 ```
 
+- `chunks` 粒度由发起时的 `context_policy` 决定，回投时原样带回该字段（与 `invocation_id`）供管理者对账。
 - 用户页面同时收到带 `parent_task_id` 的 `admin.task.progress`，与普通群消息归因一致。
+- 所有子任务派发/终态落 `orchestration_runs` 表（durable run tree）：网关重启后本实例残留与超龄孤儿 running 行统一兜底 failed；`run.list` RPC 按 `parent_task_id` / `session_id` 查询派发树（owner 范围，admin 全量）。
 - 子任务回复落库归因到 worker agent，会话内完整可审计。
 - `agent_id` 为接收方管理者 id：connector 多实例托管（共享一条 WS）时，client 据此路由到对应本地实例转发 `task.subtask_result`。
 

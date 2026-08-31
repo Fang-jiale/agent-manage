@@ -73,11 +73,15 @@ export const METHOD_GROUP_ADD = "group.add";
 export const METHOD_GROUP_REMOVE = "group.remove";
 export const METHOD_GROUP_RENAME = "group.rename";
 export const METHOD_GROUP_SET_MANAGER = "group.set_manager";
+export const METHOD_GROUP_SET_DELEGATES = "group.set_delegates";
 export const METHOD_GROUP_DELETE = "group.delete";
 
 // 管理者 agent 编排（A2A）：管理者 agent 经 agent 通道调用群内其他 agent
 export const METHOD_AGENT_TASK_INVOKE = "agent.task.invoke";  // manager agent → gateway
 export const METHOD_AGENT_TASK_RESULT = "agent.task.result";  // gateway → manager agent（notification）
+
+// 编排子任务运行记录（durable run tree）：owner 范围查询派发树/审计
+export const METHOD_RUN_LIST = "run.list";
 
 export const METHOD_USER_LIST = "user.list";
 export const METHOD_USER_CREATE = "user.create";
@@ -901,6 +905,7 @@ export interface GroupInfo {
   id: string;
   name: string;
   manager_agent_id: string | null;
+  delegate_agent_ids: string[]; // 管理者之外可发起编排的成员（授权矩阵）
   agent_ids: string[];
   created_at: number;
 }
@@ -947,23 +952,62 @@ export interface GroupSetManagerParams {
   manager_agent_id: string | null; // null = 取消管理者
 }
 
+export interface GroupSetDelegatesParams {
+  group_id: string;
+  agent_ids: string[]; // 整组替换；须为群成员；空数组 = 清空全部授权
+}
+
 export interface GroupDeleteParams {
   group_id: string;
+}
+
+// 编排子任务运行记录（run.list）
+export interface RunListParams {
+  parent_task_id?: string; // 按父任务查派发树
+  session_id?: string; // 按会话（群会话）查审计
+  limit?: number; // 默认 200，上限 500
+}
+
+export interface RunInfo {
+  task_id: string;
+  parent_task_id: string;
+  group_id: string;
+  invoker_agent_id: string;
+  target_agent_id: string;
+  invocation_id: string | null;
+  session_id: string;
+  status: string; // running | completed | failed | timeout | cancelled
+  error: string | null;
+  created_at: number;
+  ended_at: number | null;
+}
+
+export interface RunListResult {
+  runs: RunInfo[];
 }
 
 // 管理者 agent → 网关：调用群内另一个 agent（子任务）
 export interface AgentTaskInvokeParams {
   parent_task_id: string; // 管理者自己正在处理的任务 id
   group_id: string;
-  target_agent_id: string;
+  target_agent_id: string; // 单目标（群成员，非管理者自己）；批量用 targets，二选一
+  targets?: string[]; // 批量目标：去重后 ≤8、都必须是群成员且非管理者自己。同 invocation_id 一组派发/收集
+  invocation_id?: string; // 幂等键：parent+invocation_id 去重。运行中重复调用返回同一子任务；已结束则重发结果通知。重跑请换新 id
+  thread_id?: string; // 续聊线程：同 (group, invoker, target, thread_id) 的多次调用复用同一子会话 id，目标 agent 保留上下文。trim 后 ≤128 字符
+  timeout_ms?: number; // 本次子任务超时覆盖（clamp 1s~1h），缺省用网关全局任务超时
+  context_policy?: "final_only" | "full"; // 结果回投：final_only=终态文本+产出（默认）；full=全量 chunks
+  collect?: "all" | "first" | { quorum: number }; // 收集策略：all=等全部（默认）；first=首个成功即取消其余；quorum(n)=n 个成功即取消其余。仅批量时有意义
   type: string;
   content: string;
   metadata?: Record<string, unknown>;
 }
 
 export interface AgentTaskInvokeResult {
-  task_id: string;
-  status: "dispatched";
+  task_id: string; // 单目标=该子任务；批量=首个子任务（明细见 tasks）
+  status: "dispatched" | "duplicate"; // duplicate = invocation_id 命中既有调用（子任务仍在跑或结果已重发）
+  context_policy?: "final_only" | "full";
+  thread_session_id?: string; // thread_id 模式下目标 agent 所见的子会话 id（续聊凭据）
+  tasks?: Array<{ target_agent_id: string; task_id: string; thread_session_id?: string }>; // 批量派发明细
 }
 
 // 网关 → 管理者 agent：子任务结果（notification，id:null）
@@ -974,6 +1018,8 @@ export interface AgentTaskResultParams {
   group_id: string;
   target_agent_id: string;
   status: "completed" | "failed";
-  chunks?: LocalAgentChunk[]; // 子任务全量 chunks（失败时缺省/为空）
+  chunks?: LocalAgentChunk[]; // final_only=终态文本+产出 chunks；full=全量 chunks（失败时缺省/为空）
   error?: string;
+  context_policy?: "final_only" | "full"; // 告知接收方 chunks 粒度
+  invocation_id?: string; // 回传调用幂等键，便于管理者对账
 }

@@ -628,6 +628,10 @@ Agent 主动通知任务完成。
     "parent_task_id": "task-001",
     "group_id": "g-xxx",
     "target_agent_id": "worker-a",
+    "invocation_id": "step-1",
+    "thread_id": "research",
+    "timeout_ms": 120000,
+    "context_policy": "final_only",
     "type": "chat",
     "content": "查一下数据",
     "metadata": {}
@@ -636,11 +640,17 @@ Agent 主动通知任务完成。
 ```
 
 - `parent_task_id`：自己正在处理的任务 id（子任务挂在父任务下，群里可见）。
-- `target_agent_id`：群内成员（不能是自己）。
+- `target_agent_id`：群内成员（不能是自己）；批量用 `targets`（≤8，去重）。
+- `targets`（可选）：**批量派发**（scatter-gather）。一次逻辑调用 fan-out 多个子任务，响应 `tasks[]` 给出每个目标的 task_id。
+- `collect`（可选，缺省 `all`）：**收集策略**。`first` = 首个成功即收割其余（竞速）；`{"quorum": n}` = n 个成功即收割其余（多数派）。被收割方收到 `task.cancel`，发起方收到合成 failed 结果。
+- `invocation_id`（可选）：**幂等键**。同一父任务下同 id 重复调用不会重复派发——子任务在跑返回同一 task_id；已结束则重发一次终态 `task.subtask_result` 并回 `status:"duplicate"`。要重跑换新 id。
+- `thread_id`（可选）：**续聊线程**。同 `(group, target, thread_id)` 的多次委派复用同一子会话（响应带 `thread_session_id`），目标 Agent 侧上下文连续——不必每次把全部背景塞进 `content`。
+- `timeout_ms`（可选）：本次子任务超时覆盖（1s~1h），缺省用网关全局超时。
+- `context_policy`（可选，缺省 `final_only`）：`final_only` 只回终态文本+产出；`full` 回全量 chunks。
 - AgentClient 转成网关 `agent.task.invoke`，把网关的 result / error（如 `-32006` 非管理者、嵌套编排）**原样透传**回来：
 
 ```json
-{ "jsonrpc": "2.0", "id": "inv-local-1", "result": { "task_id": "task-001@ab12cd34", "status": "dispatched" } }
+{ "jsonrpc": "2.0", "id": "inv-local-1", "result": { "task_id": "task-001@ab12cd34", "status": "dispatched", "context_policy": "final_only", "thread_session_id": "<uuid>" } }
 ```
 
 **结果回推（AgentClient → Agent，notification）**——子任务终结（completed/failed/timeout）时：
@@ -656,15 +666,20 @@ Agent 主动通知任务完成。
     "target_agent_id": "worker-a",
     "status": "completed",
     "chunks": [{ "type": "text", "text": "调研结果…" }],
-    "error": null
+    "error": null,
+    "context_policy": "final_only",
+    "invocation_id": "step-1"
   }
 }
 ```
 
+`chunks` 粒度由发起时的 `context_policy` 决定（缺省 `final_only`：终态文本+artifact，管理者上下文不被子任务过程噪音撑爆）；`context_policy` / `invocation_id` 原样回带供对账。
+
 约束：
 
 - 仅 **stdio / ws 适配器**支持（需要 AgentClient → Agent 的下行通道）；HTTP 适配器下 `task.invoke` 不可用。
-- 编排深度硬限 1 层：子任务处理中再 invoke 会得到 `-32006`。
+- **授权**：群管理者（`metadata.group.manager_agent_id`）或授权成员（`delegate_agent_ids` 之一，由用户经 `group.set_delegates` 设置）才可 invoke；否则 `-32006`。
+- **预算制多级编排**：编排深度 ≤3（用户任务 depth 0 → 子 → 孙 → 曾孙，第 4 层 `-32006`）；每父任务子任务总量 ≤16（含已完成）；同父任务未决并发 ≤4。子任务的处理者若是 delegate，可继续向下编排（层级式 supervisor）。
 - 子任务与父任务必须同在一条 AgentClient 连接上（多实例部署时网关拒绝跨实例编排）。
 - 网关断线期间未决的 `task.invoke` 会收到 `-32603 gateway connection lost` 错误响应。
 

@@ -502,11 +502,14 @@ function forwardLocalInvoke(
   };
   if (!ev.id) return;
   const p = (ev.params ?? {}) as {
-    parent_task_id?: string; group_id?: string; target_agent_id?: string;
+    parent_task_id?: string; group_id?: string; target_agent_id?: string; targets?: string[];
+    invocation_id?: string; thread_id?: string; timeout_ms?: number;
+    context_policy?: "final_only" | "full";
+    collect?: "all" | "first" | { quorum: number };
     type?: string; content?: string; metadata?: Record<string, unknown>;
   };
-  if (!p.parent_task_id || !p.group_id || !p.target_agent_id) {
-    reply(undefined, [proto.ERR_INVALID_PARAMS, "parent_task_id / group_id / target_agent_id are required"]);
+  if (!p.parent_task_id || !p.group_id || (!p.target_agent_id && !(p.targets?.length))) {
+    reply(undefined, [proto.ERR_INVALID_PARAMS, "parent_task_id / group_id / target_agent_id (or targets) are required"]);
     return;
   }
   const rpcID = `inv-${agentID}-${ev.id}`;
@@ -514,7 +517,13 @@ function forwardLocalInvoke(
   safeSend(ws, proto.newRequest(rpcID, proto.METHOD_AGENT_TASK_INVOKE, {
     parent_task_id: p.parent_task_id,
     group_id: p.group_id,
-    target_agent_id: p.target_agent_id,
+    target_agent_id: p.target_agent_id ?? "",
+    targets: p.targets,
+    invocation_id: p.invocation_id,
+    thread_id: p.thread_id,
+    timeout_ms: p.timeout_ms,
+    context_policy: p.context_policy,
+    collect: p.collect,
     type: p.type || "chat",
     content: p.content ?? "",
     metadata: p.metadata,

@@ -11,7 +11,7 @@ import { Db, type DbAgentBrand } from "../src/db.ts";
 import { setLogLevel } from "../src/util.ts";
 import { signJwt } from "../src/auth.ts";
 
-setLogLevel("error");
+setLogLevel(process.env.YWM_TEST_LOG ?? "error");
 
 const STATIC_FILE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "static", "index.html");
 const JWT_SECRET = "group-test-secret";
@@ -428,7 +428,7 @@ test("manager agent orchestration", async (t) => {
     // 会话绑定的 workdir 对编排子任务同样生效
     assert.equal((subChat.metadata as Record<string, unknown> | undefined)?.workdir, "/tmp/orch-dir");
 
-    // 子任务不能再编排（depth=1 → -32006）；须在子任务完成（untrack）前发起
+    // 子任务不能再编排（未授权：仅管理者/授权 delegate 可 invoke → -32006）；须在子任务完成（untrack）前发起
     worker.send(proto.newRequest("inv-2", proto.METHOD_AGENT_TASK_INVOKE, {
       parent_task_id: childTaskID, group_id: groupID, target_agent_id: "mgr-1",
       type: "chat", content: "nested",
@@ -606,3 +606,656 @@ async function waitFor(fn: () => Promise<boolean>, timeoutMs = 5000): Promise<vo
     await new Promise((r) => setTimeout(r, 50));
   }
 }
+
+// 断言一段时间内没有任何消息到达（验证幂等去重没有产生重复派发）
+async function expectSilence(conn: Conn, ms = 300): Promise<void> {
+  await assert.rejects(() => conn.next(undefined, ms), /timeout/);
+}
+
+// 按 id 等待 RPC 响应（跳过路上插进来的通知帧，如防抖后的 admin.agentList）
+async function rpc<T>(conn: Conn, id: string, method: string, params: object): Promise<T> {
+  conn.send(proto.newRequest(id, method, params));
+  for (;;) {
+    const m = await conn.next(undefined, 5000);
+    if (m.id === id) return (m.error ? m : m.result) as T;
+  }
+}
+
+// 编排夹具：管理者 + 单 worker 群，@管理者发一轮任务
+async function orchestrationFixture(
+  base: string, db: InstanceType<typeof Db>, prefix: string,
+): Promise<{ groupID: string; parentTaskID: string; manager: Conn; worker: Conn; userConn: Conn; conns: Conn[] }> {
+  const manager = await Conn.dial(`${base}/ws/agent?token=${jwtFor(OWNER)}`);
+  const worker = await Conn.dial(`${base}/ws/agent?token=${jwtFor(OWNER)}`);
+  const userConn = await Conn.dial(`${base}/ws/admin?token=${jwtFor(OWNER)}`);
+  const conns = [manager, worker, userConn];
+  await registerAgent(manager, `${prefix}-mgr`);
+  await registerAgent(worker, `${prefix}-wrk`);
+  await upsertAgentRow(db, `${prefix}-mgr`, OWNER);
+  await upsertAgentRow(db, `${prefix}-wrk`, OWNER);
+  await userConn.next(proto.METHOD_ADMIN_AGENT_LIST);
+  const groupID = (await rpc<proto.GroupCreateResult>(userConn, `${prefix}-gc`, proto.METHOD_GROUP_CREATE, {
+    name: prefix, agent_ids: [`${prefix}-mgr`, `${prefix}-wrk`], manager_agent_id: `${prefix}-mgr`,
+  } satisfies proto.GroupCreateParams)).group_id;
+  const parentTaskID = `${prefix}-pt`;
+  await rpc(userConn, `${prefix}-t`, proto.METHOD_TASK_CREATE, {
+    group_id: groupID, task_id: parentTaskID, type: "chat", content: "帮我调研", mentions: [`${prefix}-mgr`],
+  } satisfies proto.TaskCreateParams);
+  await manager.next(proto.METHOD_AGENT_CHAT);
+  return { groupID, parentTaskID, manager, worker, userConn, conns };
+}
+
+// worker 用一段 chunks 流终结子任务（thinking 过程 + 终态文本）
+function completeTask(conn: Conn, agentID: string, taskID: string, finalText: string): void {
+  conn.send(proto.newNotification(proto.METHOD_PROGRESS, {
+    token: taskID,
+    value: { kind: proto.PROGRESS_KIND_REPORT, type: proto.CHUNK_TYPE_THINKING, agent_id: agentID, task_id: taskID, content: proto.textContent("思考过程…") },
+  } satisfies proto.ProgressParams));
+  conn.send(proto.newNotification(proto.METHOD_PROGRESS, {
+    token: taskID,
+    value: { kind: proto.PROGRESS_KIND_END, type: proto.CHUNK_TYPE_TEXT, agent_id: agentID, task_id: taskID, content: proto.textContent(finalText), done: true },
+  } satisfies proto.ProgressParams));
+}
+
+// P0-1：invocation_id 幂等（运行中去重 + 结束后重发）、context_policy 默认 final_only
+test("invoke invocation_id idempotency and final_only context policy", async (t) => {
+  const fx = await startFixture(t);
+  if (!fx) return;
+  const { db, base } = fx;
+  const rid = crypto.randomUUID().slice(0, 8);
+  const fx2 = await orchestrationFixture(base, db, `idem-${rid}`);
+  const { groupID, parentTaskID, manager, worker, userConn, conns } = fx2;
+  try {
+    // 首次 invoke（默认 final_only）
+    manager.send(proto.newRequest("inv-a", proto.METHOD_AGENT_TASK_INVOKE, {
+      parent_task_id: parentTaskID, group_id: groupID, target_agent_id: `idem-${rid}-wrk`,
+      invocation_id: "step-1", type: "chat", content: "查数据",
+    } satisfies proto.AgentTaskInvokeParams));
+    const r1 = (await manager.next()).result as proto.AgentTaskInvokeResult;
+    assert.equal(r1.status, "dispatched");
+    assert.equal(r1.context_policy, "final_only");
+    const childTaskID = r1.task_id;
+
+    // 重复 invoke（子任务运行中）→ 同 task_id，不再派发
+    manager.send(proto.newRequest("inv-a2", proto.METHOD_AGENT_TASK_INVOKE, {
+      parent_task_id: parentTaskID, group_id: groupID, target_agent_id: `idem-${rid}-wrk`,
+      invocation_id: "step-1", type: "chat", content: "查数据",
+    } satisfies proto.AgentTaskInvokeParams));
+    const r2 = (await manager.next()).result as proto.AgentTaskInvokeResult;
+    assert.equal(r2.task_id, childTaskID);
+    assert.equal(r2.status, "dispatched");
+
+    const subChat = proto.decodeParams<proto.AgentChatParams>(await worker.next(proto.METHOD_AGENT_CHAT));
+    assert.equal(subChat.task_id, childTaskID);
+    await expectSilence(worker); // 没有第二个 agent.chat
+
+    // 子任务完成（含 thinking 过程 chunk）→ 回投只带终态文本
+    completeTask(worker, `idem-${rid}-wrk`, childTaskID, "最终结论：数据没问题");
+    const result = proto.decodeParams<proto.AgentTaskResultParams>(await manager.next(proto.METHOD_AGENT_TASK_RESULT));
+    assert.equal(result.status, "completed");
+    assert.equal(result.context_policy, "final_only");
+    assert.equal(result.invocation_id, "step-1");
+    assert.ok(JSON.stringify(result.chunks).includes("最终结论"));
+    assert.ok(!JSON.stringify(result.chunks).includes("思考过程"));
+
+    // 子任务已结束后重复 invoke → 重发终态结果 + status=duplicate，不重新派发
+    manager.send(proto.newRequest("inv-a3", proto.METHOD_AGENT_TASK_INVOKE, {
+      parent_task_id: parentTaskID, group_id: groupID, target_agent_id: `idem-${rid}-wrk`,
+      invocation_id: "step-1", type: "chat", content: "查数据",
+    } satisfies proto.AgentTaskInvokeParams));
+    const replay = proto.decodeParams<proto.AgentTaskResultParams>(await manager.next(proto.METHOD_AGENT_TASK_RESULT));
+    assert.ok(JSON.stringify(replay.chunks).includes("最终结论"));
+    const r3 = (await manager.next()).result as proto.AgentTaskInvokeResult;
+    assert.equal(r3.status, "duplicate");
+    assert.equal(r3.task_id, childTaskID);
+    await expectSilence(worker);
+
+    // context_policy=full → 回投全量 chunks（含 thinking）
+    manager.send(proto.newRequest("inv-b", proto.METHOD_AGENT_TASK_INVOKE, {
+      parent_task_id: parentTaskID, group_id: groupID, target_agent_id: `idem-${rid}-wrk`,
+      invocation_id: "step-2", context_policy: "full", type: "chat", content: "再来一次",
+    } satisfies proto.AgentTaskInvokeParams));
+    const rb = (await manager.next()).result as proto.AgentTaskInvokeResult;
+    assert.equal(rb.context_policy, "full");
+    const chatB = proto.decodeParams<proto.AgentChatParams>(await worker.next(proto.METHOD_AGENT_CHAT));
+    completeTask(worker, `idem-${rid}-wrk`, chatB.task_id, "第二次结论");
+    const resultB = proto.decodeParams<proto.AgentTaskResultParams>(await manager.next(proto.METHOD_AGENT_TASK_RESULT));
+    assert.equal(resultB.context_policy, "full");
+    assert.ok(JSON.stringify(resultB.chunks).includes("思考过程"));
+    assert.ok(JSON.stringify(resultB.chunks).includes("第二次结论"));
+    void userConn;
+  } finally {
+    for (const c of conns) c.close();
+    if (groupID) await db.deleteGroup(OWNER, groupID).catch(() => {});
+    await fx.close();
+  }
+});
+
+// P0-1：thread_id 续聊（同线程复用子会话 id，落库归因仍在群会话）+ timeout_ms 覆盖
+test("invoke thread continuation and per-invoke timeout", async (t) => {
+  const fx = await startFixture(t);
+  if (!fx) return;
+  const { db, base } = fx;
+  const rid = crypto.randomUUID().slice(0, 8);
+  const wrk = `thr-${rid}-wrk`;
+  const { groupID, parentTaskID, manager, worker, conns } = await orchestrationFixture(base, db, `thr-${rid}`);
+  try {
+    // 第一次带 thread_id 的调用
+    manager.send(proto.newRequest("inv-t1", proto.METHOD_AGENT_TASK_INVOKE, {
+      parent_task_id: parentTaskID, group_id: groupID, target_agent_id: wrk,
+      invocation_id: "t-1", thread_id: "research", type: "chat", content: "先查A",
+    } satisfies proto.AgentTaskInvokeParams));
+    const r1 = (await manager.next()).result as proto.AgentTaskInvokeResult;
+    assert.ok(r1.thread_session_id, "响应应带 thread_session_id");
+    const chat1 = proto.decodeParams<proto.AgentChatParams>(await worker.next(proto.METHOD_AGENT_CHAT));
+    assert.equal(chat1.session_id, r1.thread_session_id);
+    completeTask(worker, wrk, chat1.task_id, "A的结果");
+    await manager.next(proto.METHOD_AGENT_TASK_RESULT);
+
+    // 同 thread_id 第二次调用 → 目标 agent 见同一子会话（上下文连续）
+    manager.send(proto.newRequest("inv-t2", proto.METHOD_AGENT_TASK_INVOKE, {
+      parent_task_id: parentTaskID, group_id: groupID, target_agent_id: wrk,
+      invocation_id: "t-2", thread_id: "research", type: "chat", content: "再查B",
+    } satisfies proto.AgentTaskInvokeParams));
+    const r2 = (await manager.next()).result as proto.AgentTaskInvokeResult;
+    assert.equal(r2.thread_session_id, r1.thread_session_id);
+    const chat2 = proto.decodeParams<proto.AgentChatParams>(await worker.next(proto.METHOD_AGENT_CHAT));
+    assert.equal(chat2.session_id, chat1.session_id);
+    completeTask(worker, wrk, chat2.task_id, "B的结果");
+    await manager.next(proto.METHOD_AGENT_TASK_RESULT);
+
+    // 落库归因：两次子任务输出都落在群会话（thread 子会话不落库、不进侧栏）
+    const sessionID = await groupSessionIdOf(db, groupID);
+    assert.ok(sessionID);
+    await waitFor(async () => (await db.countMessages(OWNER, sessionID)) >= 3); // 1 user + 2 assistant
+    const msgs = await db.listMessages(OWNER, sessionID, 50);
+    assert.equal(msgs.filter((m) => m.role === "assistant" && m.agent_id === wrk).length, 2);
+
+    // timeout_ms 覆盖：worker 不应答 → 1s 超时，manager 收 failed 结果，worker 收 agent.cancel
+    manager.send(proto.newRequest("inv-t3", proto.METHOD_AGENT_TASK_INVOKE, {
+      parent_task_id: parentTaskID, group_id: groupID, target_agent_id: wrk,
+      invocation_id: "t-3", timeout_ms: 1000, type: "chat", content: "永不回复",
+    } satisfies proto.AgentTaskInvokeParams));
+    await manager.next();
+    const chat3 = proto.decodeParams<proto.AgentChatParams>(await worker.next(proto.METHOD_AGENT_CHAT));
+    const timeoutResult = proto.decodeParams<proto.AgentTaskResultParams>(await manager.next(proto.METHOD_AGENT_TASK_RESULT, 10_000));
+    assert.equal(timeoutResult.status, "failed");
+    assert.equal(timeoutResult.task_id, chat3.task_id);
+    assert.ok((timeoutResult.error ?? "").includes("超时"));
+    const cancel = proto.decodeParams<proto.AgentCancelParams>(await worker.next(proto.METHOD_AGENT_CANCEL));
+    assert.equal(cancel.task_id, chat3.task_id);
+  } finally {
+    for (const c of conns) c.close();
+    if (groupID) await db.deleteGroup(OWNER, groupID).catch(() => {});
+    await fx.close();
+  }
+});
+
+// 找群会话 id（sessions.agent_id = group:<gid>）
+async function groupSessionIdOf(db: InstanceType<typeof Db>, groupID: string): Promise<string | undefined> {
+  const sessions = await db.listSessions(OWNER, `group:${groupID}`);
+  return sessions[0]?.id;
+}
+
+// P0-2：群黑板 recent_turns 注入（fan-out 与编排子任务统一）
+test("group blackboard injects recent_turns", async (t) => {
+  const fx = await startFixture(t);
+  if (!fx) return;
+  const { db, base } = fx;
+  const conns: Conn[] = [];
+  let groupID = "";
+  const rid = crypto.randomUUID().slice(0, 8);
+  const a1 = `bb-${rid}-a1`;
+  const a2 = `bb-${rid}-a2`;
+  try {
+    const c1 = await Conn.dial(`${base}/ws/agent?token=${jwtFor(OWNER)}`);
+    const c2 = await Conn.dial(`${base}/ws/agent?token=${jwtFor(OWNER)}`);
+    conns.push(c1, c2);
+    await registerAgent(c1, a1);
+    await registerAgent(c2, a2);
+    await upsertAgentRow(db, a1, OWNER);
+    await upsertAgentRow(db, a2, OWNER);
+
+    const userConn = await Conn.dial(`${base}/ws/admin?token=${jwtFor(OWNER)}`);
+    conns.push(userConn);
+    await userConn.next(proto.METHOD_ADMIN_AGENT_LIST);
+    groupID = (await rpc<proto.GroupCreateResult>(userConn, "gc", proto.METHOD_GROUP_CREATE, {
+      name: "bb", agent_ids: [a1, a2], manager_agent_id: a1,
+    } satisfies proto.GroupCreateParams)).group_id;
+    // 稳定 session_id（同 UI：一个群会话一个 id），轮次才会累积在同一会话里
+    const sessionID = `bb-sess-${rid}`;
+
+    // 第一轮：@全体，两个成员回复
+    const turn1 = `${rid}-bb-1`;
+    await rpc(userConn, "t1", proto.METHOD_TASK_CREATE, {
+      group_id: groupID, task_id: turn1, session_id: sessionID, type: "chat", content: "第一轮问题", mentions: ["all"],
+    } satisfies proto.TaskCreateParams);
+    const chat1a = proto.decodeParams<proto.AgentChatParams>(await c1.next(proto.METHOD_AGENT_CHAT));
+    const chat1b = proto.decodeParams<proto.AgentChatParams>(await c2.next(proto.METHOD_AGENT_CHAT));
+    // 首轮无历史：不注入 recent_turns
+    assert.equal((chat1a.metadata?.group as { recent_turns?: unknown[] }).recent_turns, undefined);
+    // 成员档案（Agent Card 内化）：capabilities + 在线态
+    const members1 = (chat1a.metadata?.group as {
+      members: Array<{ agent_id: string; capabilities?: Array<{ type: string }>; online: boolean }>;
+    }).members;
+    const mem1 = new Map(members1.map((m) => [m.agent_id, m]));
+    assert.deepEqual(mem1.get(a1)?.capabilities?.map((c) => c.type), ["chat"]);
+    assert.equal(mem1.get(a1)?.online, true);
+    assert.equal(mem1.get(a2)?.online, true);
+    completeTask(c1, a1, chat1a.task_id, "第一轮A回答");
+    completeTask(c2, a2, chat1b.task_id, "第一轮B回答");
+    await userConn.next(proto.METHOD_ADMIN_PROGRESS);
+    await userConn.next(proto.METHOD_ADMIN_PROGRESS);
+    await waitFor(async () => (await db.countMessages(OWNER, sessionID)) >= 3);
+
+    // 第二轮：@a1 → metadata.group.recent_turns 带第一轮完整摘要
+    const turn2 = `${rid}-bb-2`;
+    await rpc(userConn, "t2", proto.METHOD_TASK_CREATE, {
+      group_id: groupID, task_id: turn2, session_id: sessionID, type: "chat", content: "第二轮问题", mentions: [a1],
+    } satisfies proto.TaskCreateParams);
+    const chat2a = proto.decodeParams<proto.AgentChatParams>(await c1.next(proto.METHOD_AGENT_CHAT));
+    const g2 = (chat2a.metadata?.group ?? {}) as {
+      turn_id?: string;
+      recent_turns?: Array<{ turn_id: string; user_text: string; replies: Array<{ agent_id: string; text: string }> }>;
+    };
+    assert.equal(g2.turn_id, turn2);
+    assert.equal(g2.recent_turns?.length, 1);
+    const prev = g2.recent_turns![0];
+    assert.equal(prev.turn_id, turn1);
+    assert.ok(prev.user_text.includes("第一轮问题"));
+    const replyOf = new Map(prev.replies.map((r) => [r.agent_id, r.text]));
+    assert.ok((replyOf.get(a1) ?? "").includes("第一轮A回答"));
+    assert.ok((replyOf.get(a2) ?? "").includes("第一轮B回答"));
+
+    // 编排子任务同样注入：a1（管理者，正处理 turn2）invoke a2
+    c1.send(proto.newRequest("mi", proto.METHOD_AGENT_TASK_INVOKE, {
+      parent_task_id: turn2, group_id: groupID, target_agent_id: a2,
+      invocation_id: "step-1", type: "chat", content: "委派",
+    } satisfies proto.AgentTaskInvokeParams));
+    await c1.next();
+    const subChat = proto.decodeParams<proto.AgentChatParams>(await c2.next(proto.METHOD_AGENT_CHAT));
+    const gSub = (subChat.metadata?.group ?? {}) as { recent_turns?: unknown[] };
+    assert.equal(gSub.recent_turns?.length, 1);
+  } finally {
+    for (const c of conns) c.close();
+    if (groupID) await db.deleteGroup(OWNER, groupID).catch(() => {});
+    await fx.close();
+  }
+});
+
+// P0-3：每父任务并发上限 + group.delete / group.remove 级联取消
+test("per-parent subtask cap and group lifecycle cascade cancel", async (t) => {
+  const fx = await startFixture(t);
+  if (!fx) return;
+  const { db, base } = fx;
+  const conns: Conn[] = [];
+  let groupID = "";
+  const rid = crypto.randomUUID().slice(0, 8);
+  const wrk = `cap-${rid}-wrk`;
+  try {
+    const mgr = await Conn.dial(`${base}/ws/agent?token=${jwtFor(OWNER)}`);
+    const worker = await Conn.dial(`${base}/ws/agent?token=${jwtFor(OWNER)}`);
+    conns.push(mgr, worker);
+    await registerAgent(mgr, `cap-${rid}-mgr`);
+    await registerAgent(worker, wrk);
+    await upsertAgentRow(db, `cap-${rid}-mgr`, OWNER);
+    await upsertAgentRow(db, wrk, OWNER);
+    const userConn = await Conn.dial(`${base}/ws/admin?token=${jwtFor(OWNER)}`);
+    conns.push(userConn);
+    await userConn.next(proto.METHOD_ADMIN_AGENT_LIST);
+    userConn.send(proto.newRequest("gc", proto.METHOD_GROUP_CREATE, {
+      name: "cap", agent_ids: [`cap-${rid}-mgr`, wrk], manager_agent_id: `cap-${rid}-mgr`,
+    } satisfies proto.GroupCreateParams));
+    groupID = ((await userConn.next()).result as proto.GroupCreateResult).group_id;
+    const parentTaskID = `${rid}-cap-pt`;
+    userConn.send(proto.newRequest("t", proto.METHOD_TASK_CREATE, {
+      group_id: groupID, task_id: parentTaskID, type: "chat", content: "go", mentions: [`cap-${rid}-mgr`],
+    } satisfies proto.TaskCreateParams));
+    await userConn.next();
+    await mgr.next(proto.METHOD_AGENT_CHAT);
+
+    // 连发 4 个子任务（worker 不应答，全部未决）→ 第 5 个 -32006
+    for (let i = 1; i <= 4; i++) {
+      mgr.send(proto.newRequest(`cap-${i}`, proto.METHOD_AGENT_TASK_INVOKE, {
+        parent_task_id: parentTaskID, group_id: groupID, target_agent_id: wrk,
+        invocation_id: `s-${i}`, type: "chat", content: `job ${i}`,
+      } satisfies proto.AgentTaskInvokeParams));
+      const r = (await mgr.next()).result as proto.AgentTaskInvokeResult;
+      assert.equal(r.status, "dispatched", `invoke #${i}`);
+      await worker.next(proto.METHOD_AGENT_CHAT);
+    }
+    mgr.send(proto.newRequest("cap-5", proto.METHOD_AGENT_TASK_INVOKE, {
+      parent_task_id: parentTaskID, group_id: groupID, target_agent_id: wrk,
+      invocation_id: "s-5", type: "chat", content: "job 5",
+    } satisfies proto.AgentTaskInvokeParams));
+    assert.equal((await mgr.next()).error?.code, proto.ERR_ORCHESTRATION_VIOLATION);
+
+    // group.remove：worker 出群 → 其未完成任务被取消
+    userConn.send(proto.newRequest("grm", proto.METHOD_GROUP_REMOVE, { group_id: groupID, agent_id: wrk } satisfies proto.GroupRemoveParams));
+    await userConn.next();
+    let cancels = 0;
+    for (;;) {
+      try {
+        const c = proto.decodeParams<proto.AgentCancelParams>(await worker.next(proto.METHOD_AGENT_CANCEL, 500));
+        if (c.task_id.startsWith(`${parentTaskID}@`)) cancels++;
+      } catch {
+        break;
+      }
+    }
+    assert.equal(cancels, 4, "worker 的 4 个未决子任务都应被取消");
+
+    // group.delete：重建群再派任务，解散后 fan-out 任务被取消
+    userConn.send(proto.newRequest("gc2", proto.METHOD_GROUP_CREATE, {
+      name: "cap2", agent_ids: [`cap-${rid}-mgr`, wrk],
+    } satisfies proto.GroupCreateParams));
+    const gid2 = ((await userConn.next()).result as proto.GroupCreateResult).group_id;
+    userConn.send(proto.newRequest("t2", proto.METHOD_TASK_CREATE, {
+      group_id: gid2, task_id: `${rid}-cap2`, type: "chat", content: "hi", mentions: ["all"],
+    } satisfies proto.TaskCreateParams));
+    await userConn.next();
+    await mgr.next(proto.METHOD_AGENT_CHAT);
+    await worker.next(proto.METHOD_AGENT_CHAT);
+    userConn.send(proto.newRequest("gdel", proto.METHOD_GROUP_DELETE, { group_id: gid2 } satisfies proto.GroupDeleteParams));
+    await userConn.next();
+    const cancelMgr = proto.decodeParams<proto.AgentCancelParams>(await mgr.next(proto.METHOD_AGENT_CANCEL));
+    const cancelWrk = proto.decodeParams<proto.AgentCancelParams>(await worker.next(proto.METHOD_AGENT_CANCEL));
+    assert.equal(cancelMgr.task_id, `${rid}-cap2#0`);
+    assert.equal(cancelWrk.task_id, `${rid}-cap2#1`);
+    await db.deleteGroup(OWNER, gid2).catch(() => {});
+  } finally {
+    for (const c of conns) c.close();
+    if (groupID) await db.deleteGroup(OWNER, groupID).catch(() => {});
+    await fx.close();
+  }
+});
+
+// P1-4：编排子任务落库（durable run tree）——dispatch 写入、终态更新、取消收口、重启恢复、run.list 查询
+test("orchestration runs are durable and queryable", async (t) => {
+  const fx = await startFixture(t);
+  if (!fx) return;
+  const { db, base } = fx;
+  const rid = crypto.randomUUID().slice(0, 8);
+  const wrk = `run-${rid}-wrk`;
+  const { groupID, parentTaskID, manager, worker, userConn, conns } = await orchestrationFixture(base, db, `run-${rid}`);
+  try {
+    // 子任务 1：完成 → run 行 completed
+    const r1 = (await rpc(manager, "inv-r1", proto.METHOD_AGENT_TASK_INVOKE, {
+      parent_task_id: parentTaskID, group_id: groupID, target_agent_id: wrk,
+      invocation_id: "r-1", type: "chat", content: "job1",
+    } satisfies proto.AgentTaskInvokeParams)) as proto.AgentTaskInvokeResult;
+    const chat1 = proto.decodeParams<proto.AgentChatParams>(await worker.next(proto.METHOD_AGENT_CHAT));
+    completeTask(worker, wrk, chat1.task_id, "结果一");
+    await manager.next(proto.METHOD_AGENT_TASK_RESULT);
+
+    // 子任务 2：保持 running → group.remove 级联取消 → run 行 cancelled
+    const r2 = (await rpc(manager, "inv-r2", proto.METHOD_AGENT_TASK_INVOKE, {
+      parent_task_id: parentTaskID, group_id: groupID, target_agent_id: wrk,
+      invocation_id: "r-2", type: "chat", content: "job2",
+    } satisfies proto.AgentTaskInvokeParams)) as proto.AgentTaskInvokeResult;
+    await worker.next(proto.METHOD_AGENT_CHAT);
+    await rpc(userConn, "grm", proto.METHOD_GROUP_REMOVE, { group_id: groupID, agent_id: wrk } satisfies proto.GroupRemoveParams);
+    await worker.next(proto.METHOD_AGENT_CANCEL);
+
+    // run.list（owner 范围）：按父任务查派发树
+    await waitFor(async () => {
+      const res = (await rpc(userConn, "rl", proto.METHOD_RUN_LIST, {
+        parent_task_id: parentTaskID,
+      } satisfies proto.RunListParams)) as proto.RunListResult;
+      return res.runs.length === 2 && res.runs.every((r) => r.status !== "running");
+    });
+    const runs = ((await rpc(userConn, "rl2", proto.METHOD_RUN_LIST, {
+      parent_task_id: parentTaskID,
+    } satisfies proto.RunListParams)) as proto.RunListResult).runs;
+    const byTask = new Map(runs.map((r) => [r.task_id, r]));
+    assert.equal(byTask.get(r1.task_id)?.status, "completed");
+    assert.equal(byTask.get(r1.task_id)?.target_agent_id, wrk);
+    assert.equal(byTask.get(r1.task_id)?.invoker_agent_id, `run-${rid}-mgr`);
+    assert.equal(byTask.get(r1.task_id)?.invocation_id, "r-1");
+    assert.equal(byTask.get(r2.task_id)?.status, "cancelled");
+
+    // 迟到的 done 不覆盖 cancelled 终态（finishRun 只从 running 迁出）
+    completeTask(worker, wrk, r2.task_id, "迟到的结果");
+    await new Promise((r) => setTimeout(r, 200));
+    const after = ((await rpc(userConn, "rl3", proto.METHOD_RUN_LIST, {
+      parent_task_id: parentTaskID,
+    } satisfies proto.RunListParams)) as proto.RunListResult).runs;
+    assert.equal(after.find((x) => x.task_id === r2.task_id)?.status, "cancelled");
+
+    // 启动恢复：本实例残留 running + 超龄孤儿 running → failed
+    await db.createRun({
+      id: `${rid}-ghost-own`, owner_id: OWNER, group_id: groupID, parent_task_id: `${rid}-ghost-p`,
+      invoker_agent_id: "m", target_agent_id: "w", invocation_id: null, session_id: "",
+      instance_id: "group-test", status: "running", created_at: Date.now(),
+    });
+    await db.createRun({
+      id: `${rid}-ghost-old`, owner_id: OWNER, group_id: groupID, parent_task_id: `${rid}-ghost-p`,
+      invoker_agent_id: "m", target_agent_id: "w", invocation_id: null, session_id: "",
+      instance_id: "gone-instance", status: "running", created_at: Date.now() - 7_200_000,
+    });
+    const recovered = await db.recoverRuns("group-test", Date.now() - 3_600_000, "gateway restarted");
+    assert.equal(recovered, 2);
+    const ghostRuns = ((await rpc(userConn, "rl4", proto.METHOD_RUN_LIST, {
+      parent_task_id: `${rid}-ghost-p`,
+    } satisfies proto.RunListParams)) as proto.RunListResult).runs;
+    assert.equal(ghostRuns.length, 2);
+    assert.ok(ghostRuns.every((r) => r.status === "failed" && r.error === "gateway restarted"));
+  } finally {
+    for (const c of conns) c.close();
+    if (groupID) await db.deleteGroup(OWNER, groupID).catch(() => {});
+    await fx.close();
+  }
+});
+
+// P1-5：批量 invoke targets[] + collect 策略（first / quorum 收割其余）
+test("batch invoke with collect strategy", async (t) => {
+  const fx = await startFixture(t);
+  if (!fx) return;
+  const { db, base } = fx;
+  const rid = crypto.randomUUID().slice(0, 8);
+  const mgr = `bat-${rid}-mgr`;
+  const w1 = `bat-${rid}-w1`;
+  const w2 = `bat-${rid}-w2`;
+  const w3 = `bat-${rid}-w3`;
+  const conns: Conn[] = [];
+  let groupID = "";
+  try {
+    const mc = await Conn.dial(`${base}/ws/agent?token=${jwtFor(OWNER)}`);
+    const c1 = await Conn.dial(`${base}/ws/agent?token=${jwtFor(OWNER)}`);
+    const c2 = await Conn.dial(`${base}/ws/agent?token=${jwtFor(OWNER)}`);
+    const c3 = await Conn.dial(`${base}/ws/agent?token=${jwtFor(OWNER)}`);
+    conns.push(mc, c1, c2, c3);
+    for (const [conn, id] of [[mc, mgr], [c1, w1], [c2, w2], [c3, w3]] as const) await registerAgent(conn, id);
+    for (const id of [mgr, w1, w2, w3]) await upsertAgentRow(db, id, OWNER);
+    const userConn = await Conn.dial(`${base}/ws/admin?token=${jwtFor(OWNER)}`);
+    conns.push(userConn);
+    await userConn.next(proto.METHOD_ADMIN_AGENT_LIST);
+    groupID = (await rpc<proto.GroupCreateResult>(userConn, "gc", proto.METHOD_GROUP_CREATE, {
+      name: "batch", agent_ids: [mgr, w1, w2, w3], manager_agent_id: mgr,
+    } satisfies proto.GroupCreateParams)).group_id;
+    const pt = `${rid}-bat-pt`;
+    await rpc(userConn, "t", proto.METHOD_TASK_CREATE, {
+      group_id: groupID, task_id: pt, type: "chat", content: "go", mentions: [mgr],
+    } satisfies proto.TaskCreateParams);
+    await mc.next(proto.METHOD_AGENT_CHAT);
+
+    // 批量 first：w1 先完成 → w2 被收割（agent.cancel + 合成 failed 结果）
+    const r1 = (await rpc(mc, "inv-1", proto.METHOD_AGENT_TASK_INVOKE, {
+      parent_task_id: pt, group_id: groupID, target_agent_id: "",
+      targets: [w1, w2], invocation_id: "b-1", collect: "first",
+      type: "chat", content: "race",
+    } satisfies proto.AgentTaskInvokeParams)) as proto.AgentTaskInvokeResult;
+    assert.equal(r1.status, "dispatched");
+    assert.equal(r1.tasks?.length, 2);
+    const taskOf = new Map((r1.tasks ?? []).map((x) => [x.target_agent_id, x.task_id]));
+    const chat1 = proto.decodeParams<proto.AgentChatParams>(await c1.next(proto.METHOD_AGENT_CHAT));
+    const chat2 = proto.decodeParams<proto.AgentChatParams>(await c2.next(proto.METHOD_AGENT_CHAT));
+    assert.equal(chat1.task_id, taskOf.get(w1));
+    assert.equal(chat2.task_id, taskOf.get(w2));
+    // metadata.group.mentions = 批量目标全集
+    const g = (chat1.metadata?.group ?? {}) as { mentions: string[] };
+    assert.deepEqual([...g.mentions].sort(), [w1, w2]);
+
+    completeTask(c1, w1, chat1.task_id, "最快的结果");
+    const res1 = proto.decodeParams<proto.AgentTaskResultParams>(await mc.next(proto.METHOD_AGENT_TASK_RESULT));
+    assert.equal(res1.status, "completed");
+    // w2 被收割：收到 agent.cancel，管理者收到合成 failed 结果
+    const cancel2 = proto.decodeParams<proto.AgentCancelParams>(await c2.next(proto.METHOD_AGENT_CANCEL));
+    assert.equal(cancel2.task_id, chat2.task_id);
+    const res2 = proto.decodeParams<proto.AgentTaskResultParams>(await mc.next(proto.METHOD_AGENT_TASK_RESULT));
+    assert.equal(res2.task_id, chat2.task_id);
+    assert.equal(res2.status, "failed");
+    assert.ok((res2.error ?? "").includes("collect"));
+
+    // quorum(2)：三个目标，两个成功后第三个被收割
+    const r2 = (await rpc(mc, "inv-2", proto.METHOD_AGENT_TASK_INVOKE, {
+      parent_task_id: pt, group_id: groupID, target_agent_id: "",
+      targets: [w1, w2, w3], invocation_id: "b-2", collect: { quorum: 2 },
+      type: "chat", content: "majority",
+    } satisfies proto.AgentTaskInvokeParams)) as proto.AgentTaskInvokeResult;
+    assert.equal(r2.tasks?.length, 3);
+    const q1 = proto.decodeParams<proto.AgentChatParams>(await c1.next(proto.METHOD_AGENT_CHAT));
+    const q2 = proto.decodeParams<proto.AgentChatParams>(await c2.next(proto.METHOD_AGENT_CHAT));
+    const q3 = proto.decodeParams<proto.AgentChatParams>(await c3.next(proto.METHOD_AGENT_CHAT));
+    completeTask(c1, w1, q1.task_id, "票一");
+    await mc.next(proto.METHOD_AGENT_TASK_RESULT); // 1/2，不收割
+    await expectSilence(c3, 300);
+    completeTask(c2, w2, q2.task_id, "票二");
+    await mc.next(proto.METHOD_AGENT_TASK_RESULT); // w2 完成
+    const harvested = proto.decodeParams<proto.AgentTaskResultParams>(await mc.next(proto.METHOD_AGENT_TASK_RESULT));
+    assert.equal(harvested.task_id, q3.task_id);
+    assert.equal(harvested.status, "failed");
+    assert.equal((await proto.decodeParams<proto.AgentCancelParams>(await c3.next(proto.METHOD_AGENT_CANCEL))).task_id, q3.task_id);
+
+    // 非法 quorum → -32602（rpc 返回整个错误消息对象）
+    const bad = await rpc<proto.Message>(mc, "inv-3", proto.METHOD_AGENT_TASK_INVOKE, {
+      parent_task_id: pt, group_id: groupID, target_agent_id: "",
+      targets: [w1], invocation_id: "b-3", collect: { quorum: 2 },
+      type: "chat", content: "x",
+    } satisfies proto.AgentTaskInvokeParams);
+    assert.equal(bad.error?.code, proto.ERR_INVALID_PARAMS);
+
+    // collect=all（默认）：不收割——w3 未完成时 w1 完成不触发取消
+    const r3 = (await rpc(mc, "inv-4", proto.METHOD_AGENT_TASK_INVOKE, {
+      parent_task_id: pt, group_id: groupID, target_agent_id: "",
+      targets: [w1, w3], invocation_id: "b-4",
+      type: "chat", content: "wait all",
+    } satisfies proto.AgentTaskInvokeParams)) as proto.AgentTaskInvokeResult;
+    assert.equal(r3.tasks?.length, 2);
+    const a1 = proto.decodeParams<proto.AgentChatParams>(await c1.next(proto.METHOD_AGENT_CHAT));
+    await c3.next(proto.METHOD_AGENT_CHAT);
+    completeTask(c1, w1, a1.task_id, "先完成");
+    await mc.next(proto.METHOD_AGENT_TASK_RESULT);
+    await expectSilence(c3, 300); // w3 未被取消
+  } finally {
+    for (const c of conns) c.close();
+    if (groupID) await db.deleteGroup(OWNER, groupID).catch(() => {});
+    await fx.close();
+  }
+});
+
+// P2-8/9：delegates 授权矩阵 + 预算制多级编排（深度 ≤3、每父任务总量 ≤16）
+test("delegates authorization and multi-level orchestration budget", async (t) => {
+  const fx = await startFixture(t);
+  if (!fx) return;
+  const { db, base } = fx;
+  const rid = crypto.randomUUID().slice(0, 8);
+  const mgr = `dl-${rid}-mgr`;
+  const w1 = `dl-${rid}-w1`;
+  const w2 = `dl-${rid}-w2`;
+  const conns: Conn[] = [];
+  let groupID = "";
+  try {
+    const mc = await Conn.dial(`${base}/ws/agent?token=${jwtFor(OWNER)}`);
+    const c1 = await Conn.dial(`${base}/ws/agent?token=${jwtFor(OWNER)}`);
+    const c2 = await Conn.dial(`${base}/ws/agent?token=${jwtFor(OWNER)}`);
+    conns.push(mc, c1, c2);
+    for (const [conn, id] of [[mc, mgr], [c1, w1], [c2, w2]] as const) await registerAgent(conn, id);
+    for (const id of [mgr, w1, w2]) await upsertAgentRow(db, id, OWNER);
+    const userConn = await Conn.dial(`${base}/ws/admin?token=${jwtFor(OWNER)}`);
+    conns.push(userConn);
+    await userConn.next(proto.METHOD_ADMIN_AGENT_LIST);
+    groupID = (await rpc<proto.GroupCreateResult>(userConn, "gc", proto.METHOD_GROUP_CREATE, {
+      name: "delegates", agent_ids: [mgr, w1, w2], manager_agent_id: mgr,
+    } satisfies proto.GroupCreateParams)).group_id;
+    const t0 = `${rid}-dl-t0`;
+    await rpc(userConn, "t0", proto.METHOD_TASK_CREATE, {
+      group_id: groupID, task_id: t0, type: "chat", content: "go", mentions: [mgr],
+    } satisfies proto.TaskCreateParams);
+    await mc.next(proto.METHOD_AGENT_CHAT);
+
+    // 未授权成员不能编排：mgr 先派 w2（T1），w2 从 T1 invoke → -32006
+    const r1 = (await rpc(mc, "inv-a", proto.METHOD_AGENT_TASK_INVOKE, {
+      parent_task_id: t0, group_id: groupID, target_agent_id: w2, type: "chat", content: "L1",
+    } satisfies proto.AgentTaskInvokeParams)) as proto.AgentTaskInvokeResult;
+    const t1 = r1.task_id;
+    await c2.next(proto.METHOD_AGENT_CHAT);
+    const denied = await rpc<proto.Message>(c2, "inv-x", proto.METHOD_AGENT_TASK_INVOKE, {
+      parent_task_id: t1, group_id: groupID, target_agent_id: w1, type: "chat", content: "no",
+    } satisfies proto.AgentTaskInvokeParams);
+    assert.equal(denied.error?.code, proto.ERR_ORCHESTRATION_VIOLATION);
+
+    // group.set_delegates 授权 w2 → w2 从 T1 invoke w1（T2，depth 2）
+    const sd = (await rpc(userConn, "gsd", proto.METHOD_GROUP_SET_DELEGATES, {
+      group_id: groupID, agent_ids: [w2],
+    } satisfies proto.GroupSetDelegatesParams)) as { delegate_agent_ids: string[] };
+    assert.deepEqual(sd.delegate_agent_ids, [w2]);
+    const r2 = (await rpc(c2, "inv-b", proto.METHOD_AGENT_TASK_INVOKE, {
+      parent_task_id: t1, group_id: groupID, target_agent_id: w1, type: "chat", content: "L2",
+    } satisfies proto.AgentTaskInvokeParams)) as proto.AgentTaskInvokeResult;
+    const t2 = r2.task_id;
+    await c1.next(proto.METHOD_AGENT_CHAT);
+
+    // w1 仍未授权 → 从 T2 invoke → -32006
+    const denied2 = await rpc<proto.Message>(c1, "inv-y", proto.METHOD_AGENT_TASK_INVOKE, {
+      parent_task_id: t2, group_id: groupID, target_agent_id: mgr, type: "chat", content: "no",
+    } satisfies proto.AgentTaskInvokeParams);
+    assert.equal(denied2.error?.code, proto.ERR_ORCHESTRATION_VIOLATION);
+
+    // 授权 w1 → 从 T2 invoke mgr（T3，depth 3 = 上限）；metadata 注入 delegates
+    await rpc(userConn, "gsd2", proto.METHOD_GROUP_SET_DELEGATES, {
+      group_id: groupID, agent_ids: [w1, w2],
+    } satisfies proto.GroupSetDelegatesParams);
+    const r3 = (await rpc(c1, "inv-c", proto.METHOD_AGENT_TASK_INVOKE, {
+      parent_task_id: t2, group_id: groupID, target_agent_id: mgr, type: "chat", content: "L3",
+    } satisfies proto.AgentTaskInvokeParams)) as proto.AgentTaskInvokeResult;
+    const t3 = r3.task_id;
+    const chat3 = proto.decodeParams<proto.AgentChatParams>(await mc.next(proto.METHOD_AGENT_CHAT));
+    assert.equal(chat3.task_id, t3);
+    const g3 = (chat3.metadata?.group ?? {}) as { delegate_agent_ids?: string[] };
+    assert.deepEqual(g3.delegate_agent_ids, [w1, w2]);
+
+    // depth 3 的任务再编排 → -32006（深度上限）
+    const tooDeep = await rpc<proto.Message>(mc, "inv-d", proto.METHOD_AGENT_TASK_INVOKE, {
+      parent_task_id: t3, group_id: groupID, target_agent_id: w1, type: "chat", content: "L4",
+    } satisfies proto.AgentTaskInvokeParams);
+    assert.equal(tooDeep.error?.code, proto.ERR_ORCHESTRATION_VIOLATION);
+
+    // 预算制：按父任务记账——T0 名下只有 T1 与循环内派发计数（T2/T3 计入 T1/T2 的账）。
+    // T1 已占 1，再派 15 个到 16，第 17 个拒绝
+    for (let i = 1; i <= 15; i++) {
+      const r = (await rpc(mc, `bp-${i}`, proto.METHOD_AGENT_TASK_INVOKE, {
+        parent_task_id: t0, group_id: groupID, target_agent_id: w1,
+        invocation_id: `bp-${i}`, type: "chat", content: `fill ${i}`,
+      } satisfies proto.AgentTaskInvokeParams)) as proto.AgentTaskInvokeResult;
+      const chat = proto.decodeParams<proto.AgentChatParams>(await c1.next(proto.METHOD_AGENT_CHAT));
+      completeTask(c1, w1, chat.task_id, "ok");
+      await mc.next(proto.METHOD_AGENT_TASK_RESULT);
+      void r;
+    }
+    const overBudget = await rpc<proto.Message>(mc, "bp-16", proto.METHOD_AGENT_TASK_INVOKE, {
+      parent_task_id: t0, group_id: groupID, target_agent_id: w1,
+      invocation_id: "bp-16", type: "chat", content: "one too many",
+    } satisfies proto.AgentTaskInvokeParams);
+    assert.equal(overBudget.error?.code, proto.ERR_ORCHESTRATION_VIOLATION);
+
+    // 非成员 delegate → -32602
+    const badDel = await rpc<proto.Message>(userConn, "gsd3", proto.METHOD_GROUP_SET_DELEGATES, {
+      group_id: groupID, agent_ids: ["not-a-member"],
+    } satisfies proto.GroupSetDelegatesParams);
+    assert.equal(badDel.error?.code, proto.ERR_INVALID_PARAMS);
+  } finally {
+    for (const c of conns) c.close();
+    if (groupID) await db.deleteGroup(OWNER, groupID).catch(() => {});
+    await fx.close();
+  }
+});

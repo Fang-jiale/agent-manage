@@ -615,6 +615,7 @@
                 groupNameInput: document.getElementById('groupNameInput'),
                 groupMemberList: document.getElementById('groupMemberList'),
                 groupManagerSelect: document.getElementById('groupManagerSelect'),
+                groupDelegateSelect: document.getElementById('groupDelegateSelect'),
                 groupCancel: document.getElementById('groupCancel'),
                 groupCreate: document.getElementById('groupCreate'),
                 groupModalTitle: document.getElementById('groupModalTitle'),
@@ -1556,6 +1557,7 @@
                             id: g.id,
                             name: g.name,
                             managerAgentId: g.manager_agent_id || null,
+                            delegateAgentIds: g.delegate_agent_ids || [],
                             agentIds: g.agent_ids || [],
                             createdAt: g.created_at
                         };
@@ -1607,6 +1609,9 @@
                             online + ' / ' + g.agentIds.length + ' 在线</span>' +
                             (g.managerAgentId
                                 ? '<span title="管理者 agent：@它 可调度群内其他 agent" style="color:var(--warning)">★ ' + escapeHtml(groupMemberName(g.managerAgentId)) + '</span>'
+                                : '') +
+                            ((g.delegateAgentIds || []).length > 0
+                                ? '<span title="授权成员：与管理者一样可调度群内其他 Agent">⚑ ' + (g.delegateAgentIds.length) + ' 授权</span>'
                                 : '') + '</div>' +
                         '<div class="chip-row">' + g.agentIds.slice(0, 5).map(id =>
                             '<span class="chip' + (state.agents[id]?.online ? '' : ' chip-off') + '" title="' + escapeAttr(id) + '">' +
@@ -1648,10 +1653,12 @@
                         '<span class="agent-status-text ' + (a.online ? 'online' : 'offline') + '" style="font-size:12px">' + (a.online ? '在线' : '离线') + '</span>' +
                     '</label>').join('');
                 els.groupManagerSelect.innerHTML = '';
+                els.groupDelegateSelect.innerHTML = '';
                 if (group) {
                     // 先按当前勾选重建管理者候选并回填原值
                     refreshGroupManagerOptions();
                     els.groupManagerSelect.value = group.managerAgentId || '';
+                    refreshGroupDelegateOptions(group.agentIds || [], group.delegateAgentIds || []);
                 }
                 els.groupOverlay.classList.add('open');
                 els.groupNameInput.focus();
@@ -1679,6 +1686,17 @@
                 els.groupManagerSelect.innerHTML = '<option value="">（不设管理者）</option>' + checked.map(id =>
                     '<option value="' + escapeAttr(id) + '">' + escapeHtml(groupMemberName(id)) + '</option>').join('');
                 if (checked.includes(prev)) els.groupManagerSelect.value = prev;
+                refreshGroupDelegateOptions(checked, [...els.groupDelegateSelect.selectedOptions].map(o => o.value));
+            }
+
+            // 授权成员（delegates）多选：候选随成员勾选联动，保留仍在候选内的已选值
+            function refreshGroupDelegateOptions(memberIds, selectedIds) {
+                const prev = new Set(selectedIds || []);
+                els.groupDelegateSelect.innerHTML = memberIds.length === 0
+                    ? '<option value="" disabled>（先勾选成员）</option>'
+                    : memberIds.map(id =>
+                        '<option value="' + escapeAttr(id) + '"' + (prev.has(id) ? ' selected' : '') + '>'
+                        + escapeHtml(groupMemberName(id)) + '</option>').join('');
             }
 
             async function saveGroupFromModal() {
@@ -1708,6 +1726,12 @@
                         if (manager !== (groupEditing.managerAgentId || null)) {
                             await rpcCall('group.set_manager', { group_id: gid, manager_agent_id: manager });
                         }
+                        const delegates = [...els.groupDelegateSelect.selectedOptions].map(o => o.value)
+                            .filter(id => agentIds.includes(id));
+                        const prevDelegates = groupEditing.delegateAgentIds || [];
+                        if (delegates.length !== prevDelegates.length || delegates.some(id => !prevDelegates.includes(id))) {
+                            await rpcCall('group.set_delegates', { group_id: gid, agent_ids: delegates });
+                        }
                         closeGroupModal();
                         await syncGroups();
                         renderChatHeader();
@@ -1718,6 +1742,11 @@
                             agent_ids: agentIds,
                             manager_agent_id: els.groupManagerSelect.value || null
                         });
+                        const delegates = [...els.groupDelegateSelect.selectedOptions].map(o => o.value)
+                            .filter(id => agentIds.includes(id));
+                        if (delegates.length > 0) {
+                            await rpcCall('group.set_delegates', { group_id: res.group_id, agent_ids: delegates }).catch(() => {});
+                        }
                         closeGroupModal();
                         await syncGroups();
                         selectAgent(groupKeyOf(res.group_id));
@@ -2441,8 +2470,11 @@
 
                 const meta = document.createElement('div');
                 meta.className = 'message-meta';
+                // 编排子任务徽标：实时来自 progress.parent_task_id；历史按 task_id 含 @ 推断（fan-out 是 #）
+                const delegated = msg.delegated || (typeof msg.taskId === 'string' && msg.taskId.includes('@'));
                 meta.innerHTML = '<span class="message-author">' + (msg.role === 'user' ? '我'
                     : escapeHtml(agentDisplayName(state.agents[msg.agentId]) || msg.agentId || 'Agent')) + '</span>' +
+                    (delegated ? '<span class="message-delegated" title="编排子任务：由管理者 Agent 派发">派发</span>' : '') +
                     '<span class="message-time" title="' + new Date(msg.createdAt).toLocaleString() + '">' + formatTime(msg.createdAt) + '</span>' +
                     (msg.durationMs !== undefined
                         ? '<span class="message-duration">耗时 ' + formatDuration(msg.durationMs) + '</span>'
@@ -3848,6 +3880,15 @@
                 if (!session) return;
                 task.lastActivity = Date.now();
 
+                // 编排子任务：占位气泡打"派发"标记（meta 徽标，首条带 parent_task_id 的进度时落）
+                if (params.parent_task_id) {
+                    const m = session.messages.find(x => x.id === task.messageId);
+                    if (m && !m.delegated) {
+                        m.delegated = true;
+                        if (state.currentAgentId === task.agentId && state.currentSessionId === task.sessionId) renderChat();
+                    }
+                }
+
                 // 群聊归因：占位气泡首次收到某 agent 的进度时落归因（头像/名称渲染用）
                 if (task.groupId && params.agent_id) {
                     const placeholder = session.messages.find(m => m.id === task.messageId);
@@ -4984,7 +5025,7 @@
                 if (state.token) {
                     validateCachedToken().then(connect);
                 } else {
-                    els.loginOverlay.classList.add('open'); hideBoot();
+                    void showLoginEntry();
                 }
             }
 

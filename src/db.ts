@@ -100,6 +100,24 @@ export interface DbMessage {
   created_at: number;
 }
 
+// 编排子任务运行记录（durable run tree）：dispatch 写入、终态更新，
+// 网关重启后扫 running 行兜底终结。id = 子任务 task_id。
+export interface DbOrchestrationRun {
+  id: string;
+  owner_id: string;
+  group_id: string;
+  parent_task_id: string;
+  invoker_agent_id: string;
+  target_agent_id: string;
+  invocation_id: string | null;
+  session_id: string;
+  instance_id: string;
+  status: string; // running | completed | failed | timeout | cancelled
+  error: string | null;
+  created_at: number;
+  ended_at: number | null;
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
   id VARCHAR(64) PRIMARY KEY,
@@ -199,6 +217,14 @@ CREATE TABLE IF NOT EXISTS agent_group_members (
   KEY idx_agent (agent_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS agent_group_delegates (
+  group_id VARCHAR(64) NOT NULL,
+  agent_id VARCHAR(128) NOT NULL,
+  added_at BIGINT NOT NULL,
+  PRIMARY KEY (group_id, agent_id),
+  KEY idx_agent (agent_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS agent_nicknames (
   owner_id VARCHAR(64) NOT NULL,
   agent_id VARCHAR(128) NOT NULL,
@@ -206,6 +232,24 @@ CREATE TABLE IF NOT EXISTS agent_nicknames (
   updated_at BIGINT NOT NULL,
   PRIMARY KEY (owner_id, agent_id),
   KEY idx_agent (agent_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS orchestration_runs (
+  id VARCHAR(80) PRIMARY KEY,
+  owner_id VARCHAR(64) NOT NULL,
+  group_id VARCHAR(64) NOT NULL,
+  parent_task_id VARCHAR(64) NOT NULL,
+  invoker_agent_id VARCHAR(128) NOT NULL,
+  target_agent_id VARCHAR(128) NOT NULL,
+  invocation_id VARCHAR(128) NULL,
+  session_id VARCHAR(64) NOT NULL DEFAULT '',
+  instance_id VARCHAR(64) NOT NULL DEFAULT '',
+  status VARCHAR(16) NOT NULL DEFAULT 'running',
+  error TEXT NULL,
+  created_at BIGINT NOT NULL,
+  ended_at BIGINT NULL,
+  KEY idx_owner_parent (owner_id, parent_task_id),
+  KEY idx_session (session_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 `;
 
@@ -391,11 +435,13 @@ export class Db {
       const groupIds = (grpRows as { id: string }[]).map((r) => r.id);
       if (groupIds.length > 0) {
         await conn.query("DELETE FROM agent_group_members WHERE group_id IN (?)", [groupIds]);
+        await conn.query("DELETE FROM agent_group_delegates WHERE group_id IN (?)", [groupIds]);
       }
       const [agentRows] = await conn.query("SELECT id FROM agents WHERE owner_id = ?", [id]);
       const agentIds = (agentRows as { id: string }[]).map((r) => r.id);
       if (agentIds.length > 0) {
         await conn.query("DELETE FROM agent_group_members WHERE agent_id IN (?)", [agentIds]);
+        await conn.query("DELETE FROM agent_group_delegates WHERE agent_id IN (?)", [agentIds]);
       }
       await conn.query("DELETE FROM agent_groups WHERE owner_id = ?", [id]);
       await conn.query("DELETE FROM device_keys WHERE owner_id = ?", [id]);
@@ -420,12 +466,14 @@ export class Db {
       const groupIds = (grpRows as { id: string }[]).map((r) => r.id);
       if (groupIds.length > 0) {
         await conn.query("DELETE FROM agent_group_members WHERE group_id IN (?)", [groupIds]);
+        await conn.query("DELETE FROM agent_group_delegates WHERE group_id IN (?)", [groupIds]);
       }
       // 群成员清理的子查询依赖 agents 表仍含这些行：先按属主收 id 再删行
       const [agentRows] = await conn.query("SELECT id FROM agents WHERE owner_id = ?", [id]);
       const agentIds = (agentRows as { id: string }[]).map((r) => r.id);
       if (agentIds.length > 0) {
         await conn.query("DELETE FROM agent_group_members WHERE agent_id IN (?)", [agentIds]);
+        await conn.query("DELETE FROM agent_group_delegates WHERE agent_id IN (?)", [agentIds]);
       }
       await conn.query("DELETE FROM agent_groups WHERE owner_id = ?", [id]);
       await conn.query("DELETE FROM device_keys WHERE owner_id = ?", [id]);
@@ -830,6 +878,73 @@ export class Db {
     const [rows] = await this.pool.query(
       "SELECT agent_id FROM agent_group_members WHERE group_id = ? ORDER BY added_at ASC", [groupID]);
     return (rows as { agent_id: string }[]).map((r) => r.agent_id);
+  }
+
+  // ---------- agent_group_delegates（群编排授权：管理者之外可发起 invoke 的成员） ----------
+
+  // 整组替换（事务）：agent_ids 须为群成员（调用方校验），去重
+  async setGroupDelegates(groupID: string, agentIDs: string[]): Promise<void> {
+    const now = Date.now();
+    const uniq = [...new Set(agentIDs)];
+    await this.withTransaction(async (conn) => {
+      await conn.query("DELETE FROM agent_group_delegates WHERE group_id = ?", [groupID]);
+      for (const id of uniq) {
+        await conn.query(
+          "INSERT INTO agent_group_delegates (group_id, agent_id, added_at) VALUES (?, ?, ?)",
+          [groupID, id, now]);
+      }
+    });
+  }
+
+  async listGroupDelegates(groupID: string): Promise<string[]> {
+    const [rows] = await this.pool.query(
+      "SELECT agent_id FROM agent_group_delegates WHERE group_id = ? ORDER BY added_at ASC", [groupID]);
+    return (rows as { agent_id: string }[]).map((r) => r.agent_id);
+  }
+
+  async removeGroupDelegate(groupID: string, agentID: string): Promise<void> {
+    await this.pool.query(
+      "DELETE FROM agent_group_delegates WHERE group_id = ? AND agent_id = ?", [groupID, agentID]);
+  }
+
+  // ---------- orchestration_runs（编排子任务 durable run tree） ----------
+
+  async createRun(r: Omit<DbOrchestrationRun, "error" | "ended_at">): Promise<void> {
+    await this.pool.query(
+      "INSERT INTO orchestration_runs (id, owner_id, group_id, parent_task_id, invoker_agent_id, target_agent_id, invocation_id, session_id, instance_id, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?)",
+      [r.id, r.owner_id, r.group_id, r.parent_task_id, r.invoker_agent_id, r.target_agent_id, r.invocation_id ?? null, r.session_id, r.instance_id, r.created_at],
+    );
+  }
+
+  // 终态只从 running 迁出（终态后到达的迟到信号不覆盖：先 cancelled 后 agent 补 done 不改成 completed）
+  async finishRun(id: string, status: string, error: string | null, endedAt: number): Promise<boolean> {
+    const [res] = await this.pool.query(
+      "UPDATE orchestration_runs SET status = ?, error = ?, ended_at = ? WHERE id = ? AND status = 'running'",
+      [status, error, endedAt, id]);
+    return (res as mysql.ResultSetHeader).affectedRows > 0;
+  }
+
+  // 启动恢复：本实例残留的 running（进程重启丢内存态）与孤儿 running（实例消失再也等不到终态）
+  async recoverRuns(instanceID: string, staleBeforeMs: number, reason: string): Promise<number> {
+    const now = Date.now();
+    const [res] = await this.pool.query(
+      "UPDATE orchestration_runs SET status = 'failed', error = ?, ended_at = ? WHERE status = 'running' AND (instance_id = ? OR created_at < ?)",
+      [reason, now, instanceID, staleBeforeMs]);
+    return (res as mysql.ResultSetHeader).affectedRows;
+  }
+
+  async listRuns(opts: { ownerID?: string; parentTaskID?: string; sessionID?: string; limit?: number }): Promise<DbOrchestrationRun[]> {
+    const conds: string[] = [];
+    const params: unknown[] = [];
+    if (opts.ownerID) { conds.push("owner_id = ?"); params.push(opts.ownerID); }
+    if (opts.parentTaskID) { conds.push("parent_task_id = ?"); params.push(opts.parentTaskID); }
+    if (opts.sessionID) { conds.push("session_id = ?"); params.push(opts.sessionID); }
+    const where = conds.length ? " WHERE " + conds.join(" AND ") : "";
+    const [rows] = await this.pool.query(
+      `SELECT * FROM orchestration_runs${where} ORDER BY created_at DESC LIMIT ?`,
+      [...params, opts.limit ?? 200],
+    );
+    return rows as DbOrchestrationRun[];
   }
 
   // ---------- agent_nicknames（用户对自有 agent 的备注名，仅展示用） ----------

@@ -73,8 +73,41 @@ interface TaskState {
   groupID?: string;       // 群聊任务：归属群
   parentTaskID?: string;  // 管理者编排：发起 invoke 的父任务
   invokerAgentID?: string; // 管理者编排：管理者 agent（子任务结束时回投结果）
-  depth: number;          // 0 = 用户直发，1 = 管理者编排的子任务
+  depth: number;          // 0 = 用户直发，1..MAX_ORCHESTRATION_DEPTH = 编排子/孙任务
+  subtasksDispatched?: number; // 本任务已派发子任务累计（预算制：连同已完成的也计数）
+  contextPolicy?: "final_only" | "full"; // 编排子任务结果回投策略（缺省 final_only）
+  invocationID?: string;  // 编排子任务的幂等键（记录到父任务的 invocation 记录）
+  threadSessionID?: string; // 续聊线程：目标 agent 所见的子会话 id（落库归因仍走 sessionID）
+  invocations?: Map<string, InvocationRecord>; // 父任务名下按 invocation_id 分组的子任务记录（幂等/对账）
 }
+
+// 单个 invocation_id（管理者一次逻辑调用）名下的子任务集合。
+// 挂在父任务的 TaskState 上，父任务结束随之消亡；children 上限防长任务膨胀。
+// collect 策略：first/quorum 条件满足时收割（取消）其余运行中的兄弟任务。
+interface InvocationRecord {
+  invocationID: string;
+  collect: "all" | "first" | { quorum: number };
+  collected: boolean; // 收割只触发一次
+  children: Array<{
+    taskID: string;
+    target: string;
+    done: boolean;
+    ok: boolean;
+    lastResult?: proto.AgentTaskResultParams; // 终态结果留存：duplicate invoke 重发用
+  }>;
+}
+
+// 单个父任务同时运行的编排子任务上限（防管理者连发把 worker 打满）
+const MAX_PARENT_SUBTASKS_RUNNING = 4;
+// 单父任务子任务总数预算（含已完成：预算制取代旧的单层硬限，多级编排仍受总账约束）
+const MAX_PARENT_SUBTASKS_TOTAL = 16;
+// 编排深度上限：depth 0（用户任务）→1→2→3，第 4 层拒绝（防递归硬限）
+const MAX_ORCHESTRATION_DEPTH = 3;
+// 单父任务 invocation 记录条数上限（FIFO 淘汰；每条最多 MAX_GROUP_FANOUT 个子任务）
+const MAX_PARENT_INVOCATIONS = 64;
+// per-invoke 超时覆盖的夹取范围
+const INVOKE_TIMEOUT_MIN_MS = 1_000;
+const INVOKE_TIMEOUT_MAX_MS = 3_600_000;
 
 // 群消息 fan-out 的单群目标 agent 上限
 const MAX_GROUP_FANOUT = 8;
@@ -128,6 +161,32 @@ function matchesInteractionChunk(
   return blockID === "" || c.block_id === blockID;
 }
 
+// chunk 序列里的文本内容（content[].text 拼接）
+function textOfChunk(c: { type?: string; content?: proto.ContentItem[] }): string {
+  return (c.content ?? []).map((ci) => ci.text ?? "").join("");
+}
+
+// final_only 策略：取尾部连续 text chunk 的终态文本（中间的 thinking/工具过程丢弃），
+// artifact（产出）chunk 一律保留；无尾部 text 时回退全部 text 拼接。
+function finalOnlyChunks(chunks: proto.LocalAgentChunk[]): proto.LocalAgentChunk[] {
+  const tail: proto.LocalAgentChunk[] = [];
+  for (let i = chunks.length - 1; i >= 0; i--) {
+    const c = chunks[i];
+    if (c.type !== proto.CHUNK_TYPE_TEXT) break;
+    tail.unshift(c);
+  }
+  const finalText = tail.map(textOfChunk).join("").trim();
+  const artifacts = chunks.filter((c) => c.type === proto.CHUNK_TYPE_ARTIFACT);
+  if (finalText === "" && artifacts.length === 0) {
+    const all = chunks.filter((c) => c.type === proto.CHUNK_TYPE_TEXT).map(textOfChunk).join("").trim();
+    return all !== "" ? [{ type: proto.CHUNK_TYPE_TEXT, content: proto.textContent(all) }] : [];
+  }
+  return [
+    ...(finalText !== "" ? [{ type: proto.CHUNK_TYPE_TEXT, content: proto.textContent(finalText) }] : []),
+    ...artifacts,
+  ];
+}
+
 export class Hub {
   agents = new Map<string, AgentConn>();
   users = new Map<WebSocket, UserConn>();
@@ -136,6 +195,13 @@ export class Hub {
   pendingRequests = new Map<string, PendingEntry>();
   tasks = new Map<string, TaskState>();
   taskBuffers = new Map<string, TaskBuffer>();
+  // 编排续聊线程：(groupID, invoker, target, thread_id) → 目标 agent 所见的稳定子会话 id。
+  // 内存态：网关重启后同线程再调用会拿到新 id（目标 agent 侧上下文重新开始）
+  invocationThreads = new Map<string, string>();
+  // 群上下文注入用的 agent 档案缓存（ownerID → id→{name,capabilities}），60s TTL + 注册/注销失效
+  private agentProfileCache = new Map<string, { at: number; profiles: Map<string, { name: string; capabilities: proto.Capability[] }> }>();
+  // 在线 agent id 集缓存（本地 ∪ 注册表），5s TTL
+  private onlineCache: { at: number; ids: Set<string> } | null = null;
   db?: Db;
   bus?: Bus;
   attachments?: AttachmentStore;
@@ -173,6 +239,48 @@ export class Hub {
     this.metrics.counter("ywm_messages_persisted_total", "Messages written to MySQL");
     this.metrics.counter("ywm_attachments_uploaded_total", "Attachment uploads");
     this.metrics.counter("ywm_attachment_bytes_total", "Attachment bytes uploaded");
+    this.metrics.counter("ywm_subtasks_created_total", "Orchestration subtasks dispatched");
+    this.metrics.counter("ywm_subtasks_completed_total", "Subtasks finished with done");
+    this.metrics.counter("ywm_subtasks_failed_total", "Subtasks finished with error");
+    this.metrics.counter("ywm_subtasks_timeout_total", "Subtasks killed by timeout");
+    this.metrics.counter("ywm_subtasks_cancelled_total", "Subtasks cancelled");
+    this.metrics.counter("ywm_subtask_duration_seconds_sum", "Subtask duration seconds total");
+    this.metrics.counter("ywm_subtask_duration_seconds_count", "Subtask duration sample count");
+  }
+
+  // ---- 编排运行记录（durable run tree） ----
+
+  // dispatch 时写 running 行（fire-and-forget，与消息持久化同风格）
+  recordRunStart(taskID: string, ts: TaskState): void {
+    if (!this.db || !ts.parentTaskID) return;
+    this.metrics.inc("ywm_subtasks_created_total");
+    const db = this.db;
+    db.createRun({
+      id: taskID,
+      owner_id: ts.ownerID,
+      group_id: ts.groupID ?? "",
+      parent_task_id: ts.parentTaskID,
+      invoker_agent_id: ts.invokerAgentID ?? "",
+      target_agent_id: ts.agentID,
+      invocation_id: ts.invocationID ?? null,
+      session_id: ts.sessionID,
+      instance_id: this.bus?.instanceID ?? "local",
+      status: "running",
+      created_at: ts.createdAt,
+    }).catch((e) => logger.error("run create failed", { error: String(e) }));
+  }
+
+  // 子任务终态唯一 funnel：指标 + orchestration_runs 收口（running → 终态，迟到信号不覆盖）。
+  // 普通任务（无 parentTaskID）直接跳过
+  finishRun(taskID: string, status: "completed" | "failed" | "timeout" | "cancelled", error?: string): void {
+    const ts = this.tasks.get(taskID);
+    if (!ts?.parentTaskID) return;
+    this.metrics.inc(`ywm_subtasks_${status}_total`);
+    this.metrics.inc("ywm_subtask_duration_seconds_sum", (Date.now() - ts.createdAt) / 1000);
+    this.metrics.inc("ywm_subtask_duration_seconds_count");
+    if (!this.db) return;
+    this.db.finishRun(taskID, status, error ?? null, Date.now())
+      .catch((e) => logger.error("run finish failed", { error: String(e), task_id: taskID }));
   }
 
   // 任务终结时记录指标（done / error / timeout 三个出口都走这里）
@@ -286,6 +394,7 @@ export class Hub {
   registerAgent(a: AgentConn): void {
     a.lastHeartbeat = Date.now();
     this.agents.set(a.id, a);
+    this.invalidateAgentNames(a.ownerID);
     // pending（待审批）agent 不进注册表：其他实例不可见、不可接任务
     if (this.bus && a.approval !== "pending") {
       a.lastRegistryTouch = Date.now(); // register 已写入全量条目，首个心跳不必立刻刷新
@@ -312,6 +421,7 @@ export class Hub {
   unregisterAgent(id: string): void {
     const ownerID = this.agents.get(id)?.ownerID ?? "";
     this.agents.delete(id);
+    if (ownerID !== "") this.invalidateAgentNames(ownerID);
     if (this.bus) {
       this.bus.unregisterAgent(id)
         .catch((e) => logger.error("registry unregister failed", { error: String(e) }));
@@ -562,6 +672,44 @@ export class Hub {
     return [...byID.values()];
   }
 
+  // 群上下文注入用的 agent 档案（ownerID → id→{name,capabilities}）：
+  // 60s TTL + 注册/注销时失效，避免每条群消息全量 listAgentsPaged(1000)
+  async agentProfilesOf(ownerID: string): Promise<Map<string, { name: string; capabilities: proto.Capability[] }>> {
+    const hit = this.agentProfileCache.get(ownerID);
+    if (hit && Date.now() - hit.at < 60_000) return hit.profiles;
+    const profiles = new Map<string, { name: string; capabilities: proto.Capability[] }>();
+    if (this.db) {
+      try {
+        const page = await this.db.listAgentsPaged({ ownerID, limit: 1000, offset: 0 });
+        for (const a of page.agents) {
+          let caps: proto.Capability[] = [];
+          try { caps = a.capabilities ? JSON.parse(a.capabilities) as proto.Capability[] : []; } catch { /* 坏数据忽略 */ }
+          if (!Array.isArray(caps)) caps = [];
+          profiles.set(a.id, { name: a.name, capabilities: caps });
+        }
+      } catch { /* 查询失败退空表，调用方回退 agent id */ }
+    }
+    this.agentProfileCache.set(ownerID, { at: Date.now(), profiles });
+    return profiles;
+  }
+
+  invalidateAgentNames(ownerID: string): void {
+    this.agentProfileCache.delete(ownerID);
+  }
+
+  // 在线 agent id 集（本地 ∪ 注册表），5s 缓存：metadata.group.members[].online 的数据源
+  async onlineAgentIDs(): Promise<Set<string>> {
+    if (this.onlineCache && Date.now() - this.onlineCache.at < 5_000) return this.onlineCache.ids;
+    const ids = new Set(this.agents.keys());
+    if (this.bus) {
+      try {
+        for (const a of await this.bus.listAgents()) ids.add(a.id);
+      } catch { /* 注册表不可用时仅本地 */ }
+    }
+    this.onlineCache = { at: Date.now(), ids };
+    return ids;
+  }
+
   private filterAgentsForUser(agents: proto.AgentInfo[], user: UserConn): proto.AgentInfo[] {
     if (user.isAdmin && !user.ownOnly) return agents;
     return agents.filter((a) => a.owner_id === user.userID);
@@ -654,7 +802,7 @@ export class Hub {
       }).catch((e) => logger.error("bus forward failed", { error: String(e) }));
       return;
     }
-    logger.warn("agent not found", { agent_id: agentID });
+    logger.warn("agent not found", { agent_id: agentID, method: msg.method, task: (msg.params as { task_id?: string } | null)?.task_id });
   }
 
   // ownerID 为 "" 表示广播给所有用户
@@ -719,14 +867,16 @@ export class Hub {
     if (!p || !p.taskID) return;
     const ts = this.tasks.get(p.taskID);
     if (ts) this.notifySubtaskResult(p.taskID, ts, reason);
+    this.finishRun(p.taskID, "failed", reason);
     this.observeTaskEnd(p.taskID, "failed");
     this.untrackTask(p.taskID);
   }
 
-  trackTask(taskID: string, agentID: string, ownerID: string, sessionID = "", extra?: Partial<TaskState>): void {
-    const timer = setTimeout(() => this.taskTimeoutCallback(taskID), this.taskTimeoutMs);
+  trackTask(taskID: string, agentID: string, ownerID: string, sessionID = "", extra?: Partial<TaskState> & { timeoutMs?: number }): void {
+    const { timeoutMs, ...state } = extra ?? {};
+    const timer = setTimeout(() => this.taskTimeoutCallback(taskID), timeoutMs ?? this.taskTimeoutMs);
     timer.unref();
-    this.tasks.set(taskID, { agentID, ownerID, sessionID, timer, createdAt: Date.now(), depth: 0, ...extra });
+    this.tasks.set(taskID, { agentID, ownerID, sessionID, timer, createdAt: Date.now(), depth: 0, ...state });
     this.metrics.inc("ywm_tasks_created_total");
   }
 
@@ -735,6 +885,8 @@ export class Hub {
     if (ts) {
       clearTimeout(ts.timer);
       this.tasks.delete(taskID);
+      // 父任务终结：其名下 invocation 记录一并消亡（子任务的记录引用同Map，无需单独清理）
+      if (ts.invocations) ts.invocations.clear();
     }
   }
 
@@ -852,14 +1004,18 @@ export class Hub {
       .catch((e) => logger.error("persist assistant message failed", { error: String(e) }));
   }
 
-  // 管理者编排：子任务终结（done/error/timeout）时把结果回投给管理者 agent
+  // 管理者编排：子任务终结（done/error/timeout）时把结果回投给管理者 agent。
+  // context_policy=final_only 只回终态文本+产出（默认，管理者上下文不被过程噪音撑爆）；
+  // full 回全量 chunks（旧行为）。终态结果留存到父任务的 invocation 记录，幂等重发用。
   notifySubtaskResult(taskID: string, ts: TaskState, errorText?: string): void {
     if (!ts.parentTaskID || !ts.invokerAgentID) return;
     const buf = this.taskBuffers.get(taskID);
-    const chunks = [...(buf?.chunks ?? [])];
+    let chunks: proto.LocalAgentChunk[] = [...(buf?.chunks ?? [])];
     if (buf?.truncated) chunks.push({ type: proto.CHUNK_TYPE_TEXT, content: proto.textContent("（输出过长，中间内容已截断）") });
     if (errorText) chunks.push({ type: proto.CHUNK_TYPE_TEXT, content: proto.textContent(errorText) });
-    this.forwardToAgent(ts.invokerAgentID, proto.newNotification(proto.METHOD_AGENT_TASK_RESULT, {
+    const policy = ts.contextPolicy ?? "final_only";
+    if (policy === "final_only") chunks = finalOnlyChunks(chunks);
+    const params: proto.AgentTaskResultParams = {
       agent_id: ts.invokerAgentID, // connector 多实例托管时 client 按此路由到管理者实例
       task_id: taskID,
       parent_task_id: ts.parentTaskID,
@@ -868,21 +1024,82 @@ export class Hub {
       status: errorText ? "failed" : "completed",
       chunks,
       error: errorText,
-    } satisfies proto.AgentTaskResultParams));
+      context_policy: policy,
+      invocation_id: ts.invocationID,
+    };
+    // 留存到父任务的 invocation 记录（有的话），duplicate invoke 已结束时据此重发
+    const parent = this.tasks.get(ts.parentTaskID);
+    const record = ts.invocationID ? parent?.invocations?.get(ts.invocationID) : undefined;
+    if (record) {
+      const child = record.children.find((c) => c.taskID === taskID);
+      if (child) {
+        child.done = true;
+        child.ok = !errorText;
+        child.lastResult = params;
+      }
+    }
+    this.forwardToAgent(ts.invokerAgentID, proto.newNotification(proto.METHOD_AGENT_TASK_RESULT, params));
+    // 真实结果先到，收割的合成结果在后（管理者先看到赢家，再看到被取消的兄弟）
+    if (record) this.harvestCollect(record);
   }
 
-  // C6 父子任务取消：父任务取消/超时时，按 parentTaskID 级联取消未完成子任务。
-  // tasks 只存未完成任务（done 即 untrack），无需再筛状态；depth 硬限 1，
-  // 子任务不能再派生孙任务，单层匹配即可。任务清理仍由各子任务 done 进度驱动。
-  cascadeCancelSubtasks(parentTaskID: string, allow?: (ts: TaskState) => boolean): void {
-    for (const [tid, ts] of this.tasks) {
-      if (ts.parentTaskID !== parentTaskID) continue;
-      if (allow && !allow(ts)) continue;
-      logger.info("cascade cancel subtask", { task_id: tid, parent_task_id: parentTaskID });
-      this.forwardToAgent(ts.agentID, proto.newNotification(proto.METHOD_AGENT_CANCEL, {
-        task_id: tid,
-        session_id: ts.sessionID || undefined,
+  // collect 收割：first/quorum 条件满足时取消其余运行中的兄弟任务（竞速/多数派）。
+  // 被收割的子任务立即合成 failed 结果回投管理者并就地清理，不等 agent 补终态
+  private harvestCollect(record: InvocationRecord): void {
+    if (record.collected || record.collect === "all") return;
+    const need = record.collect === "first" ? 1 : record.collect.quorum;
+    if (record.children.filter((c) => c.ok).length < need) return;
+    record.collected = true;
+    for (const c of record.children) {
+      if (c.done) continue;
+      const cts = this.tasks.get(c.taskID);
+      if (!cts) { c.done = true; c.ok = false; continue; }
+      c.done = true;
+      c.ok = false;
+      const reason = "cancelled: collect condition met";
+      c.lastResult = {
+        agent_id: cts.invokerAgentID ?? "",
+        task_id: c.taskID,
+        parent_task_id: cts.parentTaskID ?? "",
+        group_id: cts.groupID ?? "",
+        target_agent_id: cts.agentID,
+        status: "failed",
+        error: reason,
+        context_policy: cts.contextPolicy ?? "final_only",
+        invocation_id: cts.invocationID,
+      };
+      this.finishRun(c.taskID, "cancelled", reason);
+      this.observeTaskEnd(c.taskID, "failed");
+      this.untrackTask(c.taskID);
+      this.flushTaskBuffer(c.taskID, reason);
+      this.forwardToAgent(cts.agentID, proto.newNotification(proto.METHOD_AGENT_CANCEL, {
+        task_id: c.taskID,
+        session_id: cts.threadSessionID || cts.sessionID || undefined,
       } satisfies proto.AgentCancelParams));
+      this.forwardToAgent(cts.invokerAgentID!, proto.newNotification(proto.METHOD_AGENT_TASK_RESULT, c.lastResult));
+    }
+  }
+
+  // C6 父子任务取消：父任务取消/超时时，按 parentTaskID 链 BFS 级联取消全部未完成后代
+  // （多级编排下含孙任务）。tasks 只存未完成任务（done 即 untrack），无需再筛状态；
+  // 任务清理仍由各子任务 done 进度驱动。
+  cascadeCancelSubtasks(parentTaskID: string, allow?: (ts: TaskState) => boolean): void {
+    const queue = [parentTaskID];
+    const seen = new Set<string>([parentTaskID]);
+    while (queue.length > 0) {
+      const cur = queue.shift()!;
+      for (const [tid, ts] of this.tasks) {
+        if (ts.parentTaskID !== cur || seen.has(tid)) continue;
+        if (allow && !allow(ts)) continue;
+        seen.add(tid);
+        queue.push(tid);
+        logger.info("cascade cancel subtask", { task_id: tid, parent_task_id: cur });
+        this.finishRun(tid, "cancelled", "parent cancelled");
+        this.forwardToAgent(ts.agentID, proto.newNotification(proto.METHOD_AGENT_CANCEL, {
+          task_id: tid,
+          session_id: ts.threadSessionID || ts.sessionID || undefined,
+        } satisfies proto.AgentCancelParams));
+      }
     }
   }
 
@@ -890,6 +1107,7 @@ export class Hub {
     const ts = this.tasks.get(taskID);
     if (!ts) return;
     this.observeTaskEnd(taskID, "timeout");
+    this.finishRun(taskID, "timeout", "任务超时");
     this.tasks.delete(taskID);
     logger.warn("task timeout", { task_id: taskID, agent_id: ts.agentID });
     this.notifySubtaskResult(taskID, ts, "任务超时");
@@ -897,7 +1115,7 @@ export class Hub {
     // 通知 agent 中止任务，避免网关侧超时后 agent 还在空跑
     this.forwardToAgent(ts.agentID, proto.newNotification(proto.METHOD_AGENT_CANCEL, {
       task_id: taskID,
-      session_id: ts.sessionID || undefined,
+      session_id: ts.threadSessionID || ts.sessionID || undefined,
     } satisfies proto.AgentCancelParams));
     this.cascadeCancelSubtasks(taskID);
     const notif = proto.newNotification(proto.METHOD_ADMIN_PROGRESS, {
@@ -1140,8 +1358,14 @@ async function handleMessageList(hub: Hub, user: UserConn, msg: proto.Message, d
 
 // ---- 群组（多 agent 会话）----
 
-function groupInfoOf(g: { id: string; name: string; manager_agent_id: string | null; created_at: number }, agentIDs: string[]): proto.GroupInfo {
-  return { id: g.id, name: g.name, manager_agent_id: g.manager_agent_id, agent_ids: agentIDs, created_at: g.created_at };
+function groupInfoOf(
+  g: { id: string; name: string; manager_agent_id: string | null; created_at: number },
+  agentIDs: string[], delegateIDs: string[] = [],
+): proto.GroupInfo {
+  return {
+    id: g.id, name: g.name, manager_agent_id: g.manager_agent_id,
+    delegate_agent_ids: delegateIDs, agent_ids: agentIDs, created_at: g.created_at,
+  };
 }
 
 // 校验 agent 归属：admin 可用他人 agent，普通用户仅自己的
@@ -1205,7 +1429,7 @@ async function handleGroupList(hub: Hub, user: UserConn, msg: proto.Message, db:
   const groups = await db.listGroups(user.userID);
   const infos: proto.GroupInfo[] = [];
   for (const g of groups) {
-    infos.push(groupInfoOf(g, await db.listGroupMembers(g.id)));
+    infos.push(groupInfoOf(g, await db.listGroupMembers(g.id), await db.listGroupDelegates(g.id)));
   }
   sendMsg(user.ws, proto.newResponse(msg.id ?? "", { groups: infos } satisfies proto.GroupListResult));
 }
@@ -1217,7 +1441,9 @@ async function handleGroupDetail(hub: Hub, user: UserConn, msg: proto.Message, d
     sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "group not found");
     return;
   }
-  sendMsg(user.ws, proto.newResponse(msg.id ?? "", { group: groupInfoOf(g, await db.listGroupMembers(g.id)) } satisfies proto.GroupDetailResult));
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", {
+    group: groupInfoOf(g, await db.listGroupMembers(g.id), await db.listGroupDelegates(g.id)),
+  } satisfies proto.GroupDetailResult));
 }
 
 async function handleGroupAdd(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
@@ -1247,6 +1473,9 @@ async function handleGroupRemove(hub: Hub, user: UserConn, msg: proto.Message, d
     return;
   }
   if (g.manager_agent_id === params.agent_id) await db.setGroupManager(user.userID, params.group_id, null);
+  await db.removeGroupDelegate(params.group_id, params.agent_id); // 出群同步清掉授权
+  // 成员已出群：该成员名下未完成的群任务级联取消（后续 invoke 也会因非成员被拒）
+  cancelGroupTasks(hub, params.group_id, params.agent_id);
   sendMsg(user.ws, proto.newResponse(msg.id ?? "", { status: "ok" }));
 }
 
@@ -1283,12 +1512,54 @@ async function handleGroupSetManager(hub: Hub, user: UserConn, msg: proto.Messag
   sendMsg(user.ws, proto.newResponse(msg.id ?? "", { status: "ok" }));
 }
 
+// 授权矩阵：整组替换可发起编排的成员（须为群成员）。管理者之外的授权成员 =
+// delegate，能像管理者一样 agent.task.invoke（受同样的深度/预算/并发约束）
+async function handleGroupSetDelegates(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  const params = proto.decodeParams<proto.GroupSetDelegatesParams>(msg);
+  const g = await db.getGroup(user.userID, params.group_id);
+  if (!g) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "group not found");
+    return;
+  }
+  const ids = [...new Set(params.agent_ids ?? [])];
+  if (ids.length > MAX_GROUP_FANOUT) {
+    sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, `too many delegates (max ${MAX_GROUP_FANOUT})`);
+    return;
+  }
+  const members = await db.listGroupMembers(g.id);
+  for (const id of ids) {
+    if (!members.includes(id)) {
+      sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, `delegate must be a group member: ${id}`);
+      return;
+    }
+  }
+  await db.setGroupDelegates(g.id, ids);
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", { status: "ok", delegate_agent_ids: ids }));
+}
+
+// 群删除/成员移除后：取消该群未完成任务（agentID 给定则只取消该成员的）。
+// 与 handleGroupTaskCancel 一致：只下发 agent.cancel，任务清理由 agent 的 done 进度驱动
+function cancelGroupTasks(hub: Hub, groupID: string, agentID?: string): void {
+  for (const [tid, ts] of hub.tasks) {
+    if (ts.groupID !== groupID) continue;
+    if (agentID !== undefined && ts.agentID !== agentID) continue;
+    logger.info("cancel task after group change", { task_id: tid, group_id: groupID, agent_id: ts.agentID });
+    hub.finishRun(tid, "cancelled", "group changed");
+    hub.forwardToAgent(ts.agentID, proto.newNotification(proto.METHOD_AGENT_CANCEL, {
+      task_id: tid,
+      session_id: ts.threadSessionID || ts.sessionID || undefined,
+    } satisfies proto.AgentCancelParams));
+  }
+}
+
 async function handleGroupDelete(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
   const params = proto.decodeParams<proto.GroupDeleteParams>(msg);
   if (!(await db.deleteGroup(user.userID, params.group_id))) {
     sendError(user.ws, msg.id, proto.ERR_INVALID_PARAMS, "group not found");
     return;
   }
+  // 群已解散：全部未完成群任务级联取消（fan-out 家族与编排子任务都带 groupID）
+  cancelGroupTasks(hub, params.group_id);
   sendMsg(user.ws, proto.newResponse(msg.id ?? "", { status: "ok" }));
 }
 
@@ -2590,7 +2861,9 @@ export function handleAgentMessage(hub: Hub, agent: AgentConn, raw: string): voi
       // 跨属主任务（admin 操作他人 agent）：进度同时发给任务发起者
       if (ts && ts.ownerID !== src.ownerID) hub.forwardToUsers(ts.ownerID, notif);
       {
-        const sessionID = value.session_id ?? ts?.sessionID ?? "";
+        // 落库归因优先取网关侧登记的会话：thread 续聊子任务的目标侧会话不落库，
+        // 进度归因到群/父会话（群里可见）；同时杜绝 agent 自报 session_id 注入他人会话
+        const sessionID = ts?.sessionID ?? value.session_id ?? "";
         // confirm_cancelled 是撤销信号：标记待决 chunk 后不单独落库为 chunk
         if (value.type === proto.CHUNK_TYPE_CONFIRM_CANCELLED) {
           hub.markCancelledChunks(value.task_id, value.confirm_id ?? "",
@@ -2602,6 +2875,7 @@ export function handleAgentMessage(hub: Hub, agent: AgentConn, raw: string): voi
       }
       if (value.done || (value.error !== undefined && value.error !== "")) {
         if (ts) hub.notifySubtaskResult(value.task_id, ts, value.error);
+        hub.finishRun(value.task_id, value.error !== undefined && value.error !== "" ? "failed" : "completed", value.error);
         hub.observeTaskEnd(value.task_id, value.error !== undefined && value.error !== "" ? "failed" : "completed");
         hub.untrackTask(value.task_id);
         hub.flushTaskBuffer(value.task_id, value.error);
@@ -2666,27 +2940,100 @@ async function handleTaskCreate(hub: Hub, user: UserConn, msg: proto.Message): P
   } satisfies proto.AgentChatParams));
 }
 
-// 群上下文注入：转发 agent.chat 时在 metadata.group 带上群/成员/管理者信息，
-// 让本地 Agent 无需额外配置即可感知自己是否为管理者、群里有谁、本条 @ 了谁。
+// ---- 群黑板（blackboard lite）：把会话里最近的"轮次"摘要注入 metadata.group.recent_turns ----
+// 一轮 = 一条群用户消息 + 其后的各成员回复（fan-out 与编排子任务的落库消息都算）。
+// 成员由此"看得见"群里发生过什么，群聊不再是互盲的并行私聊。
+const RECENT_TURN_COUNT = 3;         // 注入最近几轮
+const RECENT_TURN_MSG_SCAN = 60;     // 向后扫描的最近消息条数上限
+const RECENT_TURN_TOTAL_BYTES = 8192; // recent_turns 总体积上限（超出丢最旧的轮）
+const TURN_USER_TEXT_MAX = 200;
+const TURN_REPLY_TEXT_MAX = 300;
+
+function truncateText(s: string, max: number): string {
+  return s.length > max ? s.slice(0, max) + "…" : s;
+}
+
+// 存储消息 content JSON → 可读文本（user 取 text；assistant 取 chunks 终态文本）
+function textOfStoredContent(role: string, content: string): string {
+  try {
+    const c = JSON.parse(content) as { text?: string; chunks?: proto.LocalAgentChunk[] };
+    if (role === "user") return c.text ?? "";
+    return finalOnlyChunks(c.chunks ?? []).map(textOfChunk).join("");
+  } catch {
+    return "";
+  }
+}
+
+async function recentTurnsOf(
+  db: Db, ownerID: string, sessionID: string, nameOf: Map<string, string>, currentTurnID?: string,
+): Promise<unknown[] | undefined> {
+  let msgs;
+  try {
+    msgs = await db.listMessages(ownerID, sessionID, RECENT_TURN_MSG_SCAN);
+  } catch {
+    return undefined;
+  }
+  // 按用户消息切轮（正序）；当前轮（turn_id 命中）不注入——它的 user 消息就是本条 content
+  const turns: Array<{ turn_id: string; user_text: string; replies: Array<{ agent_id: string; name: string; text: string }> }> = [];
+  for (const m of msgs) {
+    if (m.role === "user") {
+      turns.push({ turn_id: m.task_id ?? m.id, user_text: truncateText(textOfStoredContent("user", m.content), TURN_USER_TEXT_MAX), replies: [] });
+    } else if (m.role === "assistant" && turns.length > 0) {
+      turns[turns.length - 1].replies.push({
+        agent_id: m.agent_id,
+        name: nameOf.get(m.agent_id) ?? m.agent_id,
+        text: truncateText(textOfStoredContent("assistant", m.content), TURN_REPLY_TEXT_MAX),
+      });
+    }
+  }
+  let prev = turns.filter((t) => t.turn_id !== currentTurnID).slice(-RECENT_TURN_COUNT);
+  // 体积收敛：超限从最旧的轮开始丢
+  while (prev.length > 0 && JSON.stringify(prev).length > RECENT_TURN_TOTAL_BYTES) prev.shift();
+  return prev.length > 0 ? prev : undefined;
+}
+
+// 群上下文注入：转发 agent.chat 时在 metadata.group 带上群/成员/管理者信息与最近轮次，
+// 让本地 Agent 无需额外配置即可感知自己是否为管理者、群里有谁、本条 @ 了谁、之前聊了什么。
 // metadata 是自由扩展字段，不识别的 Agent 自动忽略，无兼容性问题。
 async function buildGroupMetadata(
   hub: Hub, ownerID: string,
-  group: { id: string; name: string; manager_agent_id: string | null },
+  group: { id: string; name: string; manager_agent_id: string | null; delegates?: string[] },
   members: string[], mentions: string[], base?: Record<string, unknown>,
+  sessionID?: string, turnID?: string,
 ): Promise<Record<string, unknown>> {
   const meta: Record<string, unknown> = { ...(base ?? {}) };
-  let nameOf = new Map<string, string>();
-  if (hub.db) {
-    const page = await hub.db.listAgentsPaged({ ownerID, limit: 1000, offset: 0 });
-    nameOf = new Map(page.agents.map((a) => [a.id, a.name]));
-  }
-  meta.group = {
+  const profiles = await hub.agentProfilesOf(ownerID);
+  const nameOf = new Map([...profiles].map(([id, p]) => [id, p.name]));
+  const online = await hub.onlineAgentIDs();
+  const g: Record<string, unknown> = {
     group_id: group.id,
     group_name: group.name,
     manager_agent_id: group.manager_agent_id,
-    members: members.map((id) => ({ agent_id: id, name: nameOf.get(id) ?? id })),
+    delegate_agent_ids: group.delegates ?? [],
+    // 成员档案（Agent Card 内化）：管理者可按能力选目标，而不是靠用户口头介绍谁会什么
+    members: members.map((id) => {
+      const p = profiles.get(id);
+      const caps = (p?.capabilities ?? []).slice(0, 8).map((c) => ({
+        type: c.type, name: c.name,
+        ...(c.description ? { description: c.description.slice(0, 200) } : {}),
+      }));
+      const firstDesc = (p?.capabilities ?? []).find((c) => c.description)?.description?.slice(0, 200);
+      return {
+        agent_id: id,
+        name: p?.name ?? id,
+        ...(firstDesc ? { description: firstDesc } : {}),
+        ...(caps.length ? { capabilities: caps } : {}),
+        online: online.has(id),
+      };
+    }),
     mentions,
   };
+  if (turnID) g.turn_id = turnID;
+  if (hub.db && sessionID) {
+    const recent = await recentTurnsOf(hub.db, ownerID, sessionID, nameOf, turnID);
+    if (recent) g.recent_turns = recent;
+  }
+  meta.group = g;
   return meta;
 }
 
@@ -2694,6 +3041,11 @@ async function buildGroupMetadata(
 // 鉴权：调用连接 === 承载父任务的连接 + 群管理者 === 父任务 agent + 目标同群且属主一致；
 // depth 硬限 1（编排产生的子任务不能再发起编排）。多实例下任务态在创建实例，
 // 跨实例 invoke 会得到 parent task not found（编排要求管理者与任务同实例）。
+// 可选参数：invocation_id（幂等，命中既有调用不重复派发）、targets[]（批量派发，
+// 同 invocation_id 一组）、collect（all 默认 / first / quorum(n)：条件满足收割其余）、
+// thread_id（续聊线程，批量时按目标各建线程）、timeout_ms（本次子任务超时覆盖）、
+// context_policy（final_only 默认 / full）。
+// 同父任务未决子任务并发 ≤ MAX_PARENT_SUBTASKS_RUNNING。
 async function handleAgentTaskInvoke(
   hub: Hub, agent: AgentConn, msg: proto.Message, params: proto.AgentTaskInvokeParams,
 ): Promise<void> {
@@ -2706,8 +3058,9 @@ async function handleAgentTaskInvoke(
     sendError(agent.ws, msg.id, proto.ERR_INVALID_PARAMS, "parent task not found");
     return;
   }
-  if (ts.depth >= 1) {
-    sendError(agent.ws, msg.id, proto.ERR_ORCHESTRATION_VIOLATION, "nested orchestration not allowed");
+  if (ts.depth >= MAX_ORCHESTRATION_DEPTH) {
+    sendError(agent.ws, msg.id, proto.ERR_ORCHESTRATION_VIOLATION,
+      `orchestration depth limit exceeded (max ${MAX_ORCHESTRATION_DEPTH})`);
     return;
   }
   const parentConn = hub.agents.get(ts.agentID);
@@ -2717,37 +3070,130 @@ async function handleAgentTaskInvoke(
   }
   const db = hub.db;
   const group = await db.getGroup(ts.ownerID, params.group_id);
-  if (!group || group.manager_agent_id !== ts.agentID) {
-    sendError(agent.ws, msg.id, proto.ERR_ORCHESTRATION_VIOLATION, "caller is not the group manager");
+  // 鉴权（权限矩阵）：群管理者 ∪ 群授权 delegates 可发起编排
+  const delegates = group ? await db.listGroupDelegates(group.id) : [];
+  if (!group || (group.manager_agent_id !== ts.agentID && !delegates.includes(ts.agentID))) {
+    sendError(agent.ws, msg.id, proto.ERR_ORCHESTRATION_VIOLATION, "caller is not authorized to orchestrate (manager or delegate)");
     return;
   }
   const members = await db.listGroupMembers(group.id);
-  if (params.target_agent_id === ts.agentID || !members.includes(params.target_agent_id)) {
-    sendError(agent.ws, msg.id, proto.ERR_ORCHESTRATION_VIOLATION, "target agent not in group");
+  // 目标解析：targets[]（批量，去重）或 target_agent_id（单目标），二选一
+  const targets = params.targets?.length
+    ? [...new Set(params.targets.filter((t) => t !== ""))]
+    : [params.target_agent_id].filter((t) => t !== "");
+  if (targets.length === 0) {
+    sendError(agent.ws, msg.id, proto.ERR_INVALID_PARAMS, "target required (target_agent_id or targets)");
     return;
   }
-  const target = await hub.resolveAgent(params.target_agent_id);
-  if (!target || target.ownerID !== ts.ownerID) {
-    sendError(agent.ws, msg.id, proto.ERR_AGENT_NOT_FOUND, "target agent not found");
+  if (targets.length > MAX_GROUP_FANOUT) {
+    sendError(agent.ws, msg.id, proto.ERR_ORCHESTRATION_VIOLATION, `too many targets (max ${MAX_GROUP_FANOUT})`);
     return;
   }
-  if (hub.getAgent(params.target_agent_id)?.approval === "pending") {
-    sendError(agent.ws, msg.id, proto.ERR_UNAUTHORIZED, "target agent pending approval");
+  for (const t of targets) {
+    if (t === ts.agentID || !members.includes(t)) {
+      sendError(agent.ws, msg.id, proto.ERR_ORCHESTRATION_VIOLATION, "target agent not in group");
+      return;
+    }
+  }
+  // 收集策略：all（默认等全部）/ first（首个成功收割其余）/ quorum(n)（n 个成功收割其余）
+  let collect: "all" | "first" | { quorum: number } = "all";
+  if (params.collect === "first") {
+    collect = "first";
+  } else if (params.collect !== undefined && params.collect !== "all" && typeof params.collect === "object") {
+    const q = Math.floor(params.collect.quorum);
+    if (!Number.isFinite(q) || q < 1 || q > targets.length) {
+      sendError(agent.ws, msg.id, proto.ERR_INVALID_PARAMS, `quorum must be 1..${targets.length}`);
+      return;
+    }
+    collect = { quorum: q };
+  }
+  const invocationID = params.invocation_id?.trim().slice(0, 128) ?? "";
+  // 幂等：同 parent+invocation_id 命中既有记录——仍在跑返回同子任务；已结束重发终态结果。
+  // 要重跑请换新 invocation_id。
+  if (invocationID !== "") {
+    const record = ts.invocations?.get(invocationID);
+    if (record) {
+      const running = record.children.filter((c) => !c.done);
+      for (const c of record.children) {
+        if (c.lastResult && running.length === 0) {
+          // 接收方 = 父任务的承载 agent（管理者）；父任务自身没有 invokerAgentID（那是子任务字段）
+          hub.forwardToAgent(ts.agentID, proto.newNotification(proto.METHOD_AGENT_TASK_RESULT, c.lastResult));
+        }
+      }
+      sendMsg(agent.ws, proto.newResponse(msg.id ?? "", {
+        task_id: (running[0] ?? record.children[record.children.length - 1]).taskID,
+        status: running.length > 0 ? "dispatched" : "duplicate",
+        context_policy: params.context_policy === "full" ? "full" : "final_only",
+        tasks: record.children.map((c) => ({ target_agent_id: c.target, task_id: c.taskID })),
+      } satisfies proto.AgentTaskInvokeResult));
+      return;
+    }
+  }
+  // 每父任务并发上限：管理者连发会把目标 agent 打满（限速器按属主记，兜不住单任务）
+  let running = 0;
+  for (const t of hub.tasks.values()) {
+    if (t.parentTaskID === params.parent_task_id) running++;
+  }
+  if (running + targets.length > MAX_PARENT_SUBTASKS_RUNNING) {
+    sendError(agent.ws, msg.id, proto.ERR_ORCHESTRATION_VIOLATION,
+      `too many running subtasks (max ${MAX_PARENT_SUBTASKS_RUNNING})`);
     return;
+  }
+  // 预算制：本父任务累计派发的子任务总数（含已完成）也受限——多级/重试都不能刷出无限任务
+  if ((ts.subtasksDispatched ?? 0) + targets.length > MAX_PARENT_SUBTASKS_TOTAL) {
+    sendError(agent.ws, msg.id, proto.ERR_ORCHESTRATION_VIOLATION,
+      `subtask budget exceeded (max ${MAX_PARENT_SUBTASKS_TOTAL} per parent task)`);
+    return;
+  }
+  ts.subtasksDispatched = (ts.subtasksDispatched ?? 0) + targets.length;
+  for (const t of targets) {
+    const target = await hub.resolveAgent(t);
+    if (!target || target.ownerID !== ts.ownerID) {
+      sendError(agent.ws, msg.id, proto.ERR_AGENT_NOT_FOUND, `target agent not found: ${t}`);
+      return;
+    }
+    if (hub.getAgent(t)?.approval === "pending") {
+      sendError(agent.ws, msg.id, proto.ERR_UNAUTHORIZED, `target agent pending approval: ${t}`);
+      return;
+    }
   }
   if (!hub.taskLimiter.allow(ts.ownerID)) {
     sendError(agent.ws, msg.id, proto.ERR_RATE_LIMITED, "too many tasks");
     return;
   }
-  const childTaskID = `${params.parent_task_id}@${crypto.randomUUID().slice(0, 8)}`;
-  hub.trackTask(childTaskID, params.target_agent_id, ts.ownerID, ts.sessionID, {
-    groupID: group.id,
-    parentTaskID: params.parent_task_id,
-    invokerAgentID: ts.agentID,
-    depth: ts.depth + 1,
-  });
+  // 续聊线程：同 (group, invoker, target, thread_id) 复用稳定子会话 id（目标 agent 侧上下文连续）。
+  // 子会话不落库——进度归因仍走群/父会话（progress 处理优先取网关侧登记的 sessionID）
+  const threadSessions = new Map<string, string>();
+  const threadID = params.thread_id?.trim().slice(0, 128) ?? "";
+  if (threadID !== "") {
+    for (const t of targets) {
+      const key = `${group.id}:${ts.agentID}:${t}:${threadID}`;
+      let sid = hub.invocationThreads.get(key);
+      if (!sid) {
+        sid = crypto.randomUUID();
+        hub.invocationThreads.set(key, sid);
+      }
+      threadSessions.set(t, sid);
+    }
+  }
+  // invocation 记录先于派发登记：终态回投（notifySubtaskResult）据此留存/更新与 collect 收割
+  let record: InvocationRecord | undefined;
+  if (invocationID !== "") {
+    let m = ts.invocations;
+    if (!m) {
+      m = new Map();
+      ts.invocations = m;
+    }
+    if (m.size >= MAX_PARENT_INVOCATIONS) m.delete(m.keys().next().value as string); // FIFO 淘汰
+    record = { invocationID, children: [], collect, collected: false };
+    m.set(invocationID, record);
+  }
+  const timeoutMs = params.timeout_ms !== undefined
+    ? Math.min(Math.max(Math.floor(params.timeout_ms), INVOKE_TIMEOUT_MIN_MS), INVOKE_TIMEOUT_MAX_MS)
+    : undefined;
+  const policy: "final_only" | "full" = params.context_policy === "full" ? "full" : "final_only";
   const childMeta = await buildGroupMetadata(
-    hub, ts.ownerID, group, members, [params.target_agent_id], params.metadata);
+    hub, ts.ownerID, { ...group, delegates }, members, targets, params.metadata, ts.sessionID, params.parent_task_id);
   // 子任务复用父任务会话：会话绑定的 workdir 同样注入（manager 未显式携带时兜底）
   const childSession = ts.sessionID
     ? await hub.db!.getSession(ts.ownerID, ts.sessionID).catch(() => undefined)
@@ -2755,14 +3201,38 @@ async function handleAgentTaskInvoke(
   if (childSession?.workdir && childMeta.workdir === undefined) {
     childMeta.workdir = childSession.workdir;
   }
-  hub.forwardToAgent(params.target_agent_id, proto.newRequest("", proto.METHOD_AGENT_CHAT, {
-    task_id: childTaskID,
-    session_id: ts.sessionID,
-    type: params.type,
-    content: params.content,
-    metadata: childMeta,
-  } satisfies proto.AgentChatParams));
-  sendMsg(agent.ws, proto.newResponse(msg.id ?? "", { task_id: childTaskID, status: "dispatched" } satisfies proto.AgentTaskInvokeResult));
+  const tasks: Array<{ target_agent_id: string; task_id: string; thread_session_id?: string }> = [];
+  for (const t of targets) {
+    const childTaskID = `${params.parent_task_id}@${crypto.randomUUID().slice(0, 8)}`;
+    const threadSessionID = threadSessions.get(t);
+    hub.trackTask(childTaskID, t, ts.ownerID, ts.sessionID, {
+      groupID: group.id,
+      parentTaskID: params.parent_task_id,
+      invokerAgentID: ts.agentID,
+      depth: ts.depth + 1,
+      contextPolicy: policy,
+      invocationID: invocationID !== "" ? invocationID : undefined,
+      threadSessionID,
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    });
+    if (record) record.children.push({ taskID: childTaskID, target: t, done: false, ok: false });
+    hub.recordRunStart(childTaskID, hub.tasks.get(childTaskID)!);
+    tasks.push({ target_agent_id: t, task_id: childTaskID, ...(threadSessionID ? { thread_session_id: threadSessionID } : {}) });
+    hub.forwardToAgent(t, proto.newRequest("", proto.METHOD_AGENT_CHAT, {
+      task_id: childTaskID,
+      session_id: threadSessionID ?? ts.sessionID, // thread 模式下目标 agent 见稳定子会话
+      type: params.type,
+      content: params.content,
+      metadata: childMeta,
+    } satisfies proto.AgentChatParams));
+  }
+  sendMsg(agent.ws, proto.newResponse(msg.id ?? "", {
+    task_id: tasks[0].task_id,
+    status: "dispatched",
+    context_policy: policy,
+    tasks,
+    ...(threadSessions.size === 1 ? { thread_session_id: [...threadSessions.values()][0] } : {}),
+  } satisfies proto.AgentTaskInvokeResult));
 }
 
 // 群聊路径：@提及 路由（mentions 空则拒绝，保证"默认不触发"），多目标 fan-out 派生 task_id（<tid>#<n>）。
@@ -2822,7 +3292,8 @@ async function handleGroupTaskCreate(
 
   const taskIDs: string[] = [];
   const groupMeta = await buildGroupMetadata(
-    hub, user.userID, group, members, online, params.metadata);
+    hub, user.userID, { ...group, delegates: await db.listGroupDelegates(group.id) },
+    members, online, params.metadata, sessionID, params.task_id);
   online.forEach((target, i) => {
     const taskID = online.length === 1 ? params.task_id : `${params.task_id}#${i}`;
     taskIDs.push(taskID);
@@ -2845,6 +3316,32 @@ async function handleGroupTaskCreate(
   }));
 }
 
+// 编排子任务运行记录查询：owner 范围（admin 可看全部），供前端派发树/审计
+async function handleRunList(hub: Hub, user: UserConn, msg: proto.Message, db: Db): Promise<void> {
+  const params = proto.decodeParams<proto.RunListParams>(msg);
+  const runs = await db.listRuns({
+    ownerID: user.isAdmin ? undefined : user.userID,
+    parentTaskID: params.parent_task_id || undefined,
+    sessionID: params.session_id || undefined,
+    limit: Math.min(Math.max(Math.floor(params.limit ?? 200), 1), 500),
+  });
+  sendMsg(user.ws, proto.newResponse(msg.id ?? "", {
+    runs: runs.map((r) => ({
+      task_id: r.id,
+      parent_task_id: r.parent_task_id,
+      group_id: r.group_id,
+      invoker_agent_id: r.invoker_agent_id,
+      target_agent_id: r.target_agent_id,
+      invocation_id: r.invocation_id,
+      session_id: r.session_id,
+      status: r.status,
+      error: r.error,
+      created_at: r.created_at,
+      ended_at: r.ended_at,
+    })),
+  } satisfies proto.RunListResult));
+}
+
 // 群级取消：按基任务 id 收敛 fan-out 派生任务（<tid>#n）与编排子任务（parent 指向本批），
 // 逐个下发 agent.cancel；任务清理仍由 agent 的 done 进度驱动（与单 agent 取消一致）
 function handleGroupTaskCancel(hub: Hub, user: UserConn, msg: proto.Message, params: proto.TaskCancelParams): void {
@@ -2856,9 +3353,10 @@ function handleGroupTaskCancel(hub: Hub, user: UserConn, msg: proto.Message, par
     if (inFamily && (ts.ownerID === user.userID || user.isAdmin)) matches.push([tid, ts]);
   }
   for (const [tid, ts] of matches) {
+    hub.finishRun(tid, "cancelled", "user cancelled");
     hub.forwardToAgent(ts.agentID, proto.newNotification(proto.METHOD_AGENT_CANCEL, {
       task_id: tid,
-      session_id: ts.sessionID || undefined,
+      session_id: ts.threadSessionID || ts.sessionID || undefined,
     } satisfies proto.AgentCancelParams));
   }
   sendMsg(user.ws, proto.newResponse(msg.id ?? "", { task_id: params.task_id, status: "cancelling" } satisfies proto.TaskCancelResult));
@@ -3003,8 +3501,16 @@ export function handleUserMessage(hub: Hub, user: UserConn, raw: string): void {
       withDb(hub, user, msg, (db) => handleGroupSetManager(hub, user, msg, db));
       break;
 
+    case proto.METHOD_GROUP_SET_DELEGATES:
+      withDb(hub, user, msg, (db) => handleGroupSetDelegates(hub, user, msg, db));
+      break;
+
     case proto.METHOD_GROUP_DELETE:
       withDb(hub, user, msg, (db) => handleGroupDelete(hub, user, msg, db));
+      break;
+
+    case proto.METHOD_RUN_LIST:
+      withDb(hub, user, msg, (db) => handleRunList(hub, user, msg, db));
       break;
 
     case proto.METHOD_USER_LIST:
@@ -3403,7 +3909,15 @@ export async function createGatewayServer(cfg: GatewayConfig, staticFile: string
   const hub = new Hub(cfg.agentTimeoutMs, cfg.userTimeoutMs, cfg.taskTimeoutMs);
   hub.db = db;
   hub.attachments = attachments;
-  if (db) await hub.reloadBrands();
+  if (db) {
+    await hub.reloadBrands();
+    // 启动恢复：编排任务态在内存，重启即丢。本实例残留的 running 行与超龄孤儿行
+    // （实例消失等不到终态）统一兜底终结，管理者侧由客户端超时兜底，此处只做审计收口
+    const staleBefore = Date.now() - Math.max(cfg.taskTimeoutMs * 2, 3_600_000);
+    db.recoverRuns(cfg.instanceID, staleBefore, "gateway restarted")
+      .then((n) => { if (n > 0) logger.warn("recovered stale orchestration runs", { count: n }); })
+      .catch((e) => logger.error("orchestration run recovery failed", { error: String(e) }));
+  }
   const productsDir = cfg.productsDir ?? "data/products"; // 产品分发目录（测试夹层不传时用默认）
   hub.productsDir = productsDir; // product.push 推送前用来校验包真实存在
   const loginLimiter = new RateLimiter(10, 60_000); // 每 IP 每分钟 10 次登录尝试

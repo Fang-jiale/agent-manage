@@ -388,6 +388,11 @@ mark.search-hit {
     font-size: 11px; color: var(--text-tertiary);
     background: var(--bg-hover); border-radius: 99px; padding: 1px 8px;
 }
+.message-delegated {
+    font-size: 11px; color: var(--warning, #b8860b);
+    background: color-mix(in srgb, var(--warning, #b8860b) 12%, transparent);
+    border-radius: 99px; padding: 1px 8px;
+}
 .message-content { font-size: 14.5px; overflow-wrap: break-word; }
 .message.user .message-content {
     background: var(--bg-bubble-user);
