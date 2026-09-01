@@ -295,13 +295,44 @@
 
             /* ---------- export ---------- */
 
-            function exportSession() {
+            function exportSession() { exportSessionAs('md'); }
+
+            function exportSessionAs(format) {
                 const session = getCurrentSession();
                 if (!session || session.messages.length === 0) {
                     showToast('当前会话没有消息', 'warning');
                     return;
                 }
                 const agent = state.agents[session.agentId];
+                if (format === 'json') {
+                    const payload = {
+                        format: 'ywmatrix-session-export',
+                        version: 1,
+                        exportedAt: new Date().toISOString(),
+                        session: {
+                            id: session.id,
+                            title: session.title,
+                            agentId: session.agentId,
+                            agentName: agentDisplayName(agent) || session.agentId,
+                            workdir: session.workdir || null,
+                            createdAt: session.createdAt || null,
+                            messages: session.messages.map(m => ({
+                                id: m.id, role: m.role, createdAt: m.createdAt,
+                                done: m.done !== false,
+                                ...(m.taskId ? { taskId: m.taskId } : {}),
+                                ...(m.errorText ? { errorText: m.errorText } : {}),
+                                ...(m.role === 'user'
+                                    ? { text: m.text || '', attachments: m.attachments || [] }
+                                    : { chunks: m.chunks || [] })
+                            }))
+                        }
+                    };
+                    downloadBlob(JSON.stringify(payload, null, 2),
+                        session.title.replace(/[\\/:*?"<>|]/g, '_') + '.json', 'application/json;charset=utf-8');
+                    showToast('已导出 JSON（含工具调用与图片数据）', 'success', 1500);
+                    return;
+                }
+
                 const lines = [
                     '# ' + session.title, '',
                     '> Agent: ' + (agentDisplayName(agent) || session.agentId) +
@@ -314,20 +345,71 @@
                     if (m.role === 'user') {
                         if (m.text) lines.push(m.text);
                         (m.attachments || []).forEach(a =>
-                            lines.push('- 附件: ' + a.name + ' (' + formatSize(a.size || 0) + ')'));
+                            lines.push('- 附件: ' + a.name + ' (' + formatSize(a.size || 0) + ')' +
+                                (a.url ? '：' + a.url : '')));
                     } else {
-                        lines.push((m.chunks || []).filter(c => c.type === 'text')
-                            .map(c => c.text || '').join('\n'));
+                        for (const c of (m.chunks || [])) {
+                            const out = chunkToMarkdown(c);
+                            if (out) lines.push(out, '');
+                        }
+                        if (m.errorText) lines.push('> ⚠️ 出错：' + m.errorText, '');
                     }
-                    lines.push('', '---', '');
+                    lines.push('---', '');
                 }
-                const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' });
+                downloadBlob(lines.join('\n'),
+                    session.title.replace(/[\\/:*?"<>|]/g, '_') + '.md', 'text/markdown;charset=utf-8');
+                showToast('已导出 Markdown', 'success', 1500);
+            }
+
+            function downloadBlob(content, filename, mime) {
+                const blob = new Blob([content], { type: mime });
                 const a = document.createElement('a');
                 a.href = URL.createObjectURL(blob);
-                a.download = session.title.replace(/[\\/:*?"<>|]/g, '_') + '.md';
+                a.download = filename;
                 a.click();
                 URL.revokeObjectURL(a.href);
-                showToast('已导出 Markdown', 'success', 1500);
+            }
+
+            // 导出用：chunk → Markdown 片段。text 走正文；工具/交互卡以引用块摘要保留；
+            // 图片优先嵌 URL，base64 转内嵌 data URI（大图会撑大文件，完整数据走 JSON 导出）
+            function chunkToMarkdown(c) {
+                switch (c.type) {
+                    case 'text':
+                        return c.text || '';
+                    case 'error':
+                        return '> ⚠️ 出错：' + (c.text || '');
+                    case 'thinking':
+                        return ''; // 内部推理不导出
+                    case 'action':
+                        return '> 🔧 工具调用 `' + (c.name || 'Tool') + '`：' + firstLine(toolArgsText(c) || '');
+                    case 'result': {
+                        const textPart = toolResultText(c);
+                        const imgs = [];
+                        for (const it of (c.items || [])) {
+                            if (it.type === 'image') {
+                                const src = it.url || (it.data ? 'data:' + (it.mimeType || 'image/png') + ';base64,' + it.data : '');
+                                if (src) imgs.push('![image](' + src + ')');
+                            }
+                        }
+                        return ['> 📤 结果 `' + (c.name || 'Tool') + '`' + (textPart ? '：' + firstLine(textPart) : '')]
+                            .concat(imgs).join('\n');
+                    }
+                    case 'image': {
+                        const src = c.url || (c.data ? 'data:' + (c.mime || 'image/png') + ';base64,' + c.data : '');
+                        return src ? '![image](' + src + ')' : '';
+                    }
+                    case 'resource':
+                        return '> 📎 资源：' + (c.uri || c.url || '');
+                    case 'confirm_required':
+                        return '> ❓ 需要确认：' + (c.prompt || c.message || '') +
+                            (c.answered ? '（已' + (c.answered === 'allow' ? '确认' : '拒绝') + '）' : '（未应答）');
+                    case 'prompt_required':
+                        return '> ❓ 需要输入：' + (c.prompt || c.message || '');
+                    case 'block_required':
+                        return '> ❓ 需要填写表单：' + (c.title || c.prompt || '');
+                    default:
+                        return c.text || '';
+                }
             }
 
             /* ---------- command palette ---------- */
@@ -358,6 +440,7 @@
                     { label: '新建会话', icon: ICONS.plus, run: newSession },
                     { label: '搜索当前会话', icon: ICONS.search, run: () => toggleChatSearch(true) },
                     { label: '导出当前会话', icon: ICONS.download, run: exportSession },
+                    { label: '导出当前会话为 JSON（全量）', icon: ICONS.download, run: () => exportSessionAs('json') },
                     { label: '切换主题', icon: resolveTheme() === 'dark' ? ICONS.sun : ICONS.moon,
                       run: () => {
                           state.settings.themeMode = resolveTheme() === 'dark' ? 'light' : 'dark';
@@ -2352,7 +2435,12 @@
 
                 els.messages.innerHTML = '';
                 if (session.messages.length === 0) {
-                    els.messages.appendChild(renderSuggestions(session));
+                    // 服务端有历史但本轮还没拉回来（首开/清过本地缓存）：先骨架屏，同步完成后 renderChat 替换
+                    if (wsConnected && !loadedSessions.has(session.id) && (session.messageCount ?? 0) > 0) {
+                        renderChatSkeleton();
+                    } else {
+                        els.messages.appendChild(renderSuggestions(session));
+                    }
                 } else {
                     const total = session.messages.length;
                     const visibleCount = Math.min(chatVisibleLimit, total);
@@ -2413,6 +2501,34 @@
                     scrollToBottom(true);
                 }
                 updateInputState();
+            }
+
+            // 历史消息加载中的占位气泡：与服务端对账完成前避免误显示"空会话"建议卡
+            function renderChatSkeleton() {
+                const wrap = document.createElement('div');
+                wrap.className = 'chat-skeleton';
+                wrap.setAttribute('aria-label', '正在加载历史消息');
+                const shapes = [
+                    { cls: 'skel-user', lines: [55] },
+                    { cls: 'skel-agent', lines: [90, 75, 40] },
+                    { cls: 'skel-user', lines: [45] },
+                    { cls: 'skel-agent', lines: [80, 50] }
+                ];
+                for (const s of shapes) {
+                    const row = document.createElement('div');
+                    row.className = 'skel-row ' + s.cls;
+                    const bubble = document.createElement('div');
+                    bubble.className = 'skel-bubble';
+                    s.lines.forEach(w => {
+                        const line = document.createElement('div');
+                        line.className = 'skel-line';
+                        line.style.width = w + '%';
+                        bubble.appendChild(line);
+                    });
+                    row.appendChild(bubble);
+                    wrap.appendChild(row);
+                }
+                els.messages.appendChild(wrap);
             }
 
             function renderSuggestions(session) {
@@ -2494,10 +2610,18 @@
 
                 const actions = document.createElement('div');
                 actions.className = 'message-actions';
+                const failed = msg.role === 'assistant' && msg.done && isFailedMessage(msg);
+                const canRegen = msg.role === 'assistant' && msg.done && !failed && isLastDoneAssistant(msg);
                 actions.innerHTML = '<button class="icon-btn" data-act="copy" title="复制">' + ICONS.copy + '</button>' +
                     (msg.role === 'user'
                         ? '<button class="icon-btn" data-act="edit" title="编辑后重发">' + ICONS.edit + '</button>' +
                           '<button class="icon-btn" data-act="resend" title="重新发送">' + ICONS.resend + '</button>'
+                        : '') +
+                    (failed
+                        ? '<button class="icon-btn" data-act="retry" title="重试">' + ICONS.resend + '</button>'
+                        : '') +
+                    (canRegen
+                        ? '<button class="icon-btn" data-act="regen" title="重新生成">' + ICONS.resend + '</button>'
                         : '');
                 actions.querySelector('[data-act="copy"]').onclick = () => {
                     const text = msg.role === 'user'
@@ -2522,6 +2646,10 @@
                         sendMessage();
                     };
                 }
+                const retryBtn = actions.querySelector('[data-act="retry"]');
+                if (retryBtn) retryBtn.onclick = () => retryAssistantMessage(msg);
+                const regenBtn = actions.querySelector('[data-act="regen"]');
+                if (regenBtn) regenBtn.onclick = () => retryAssistantMessage(msg);
 
                 body.appendChild(meta);
                 body.appendChild(content);
@@ -2545,6 +2673,72 @@
                     }
                 }
                 return null;
+            }
+
+            // 失败判定：任务异常结束（error chunk）或本地兜底写入的 errorText
+            function isFailedMessage(msg) {
+                return !!msg.errorText || (msg.chunks || []).some(c => c.type === 'error');
+            }
+
+            // 会话内最后一条已完成的助手消息才提供"重新生成"，中间消息重新生成会与后续历史矛盾
+            function isLastDoneAssistant(msg) {
+                const found = findSessionMessage(msg.id);
+                if (!found) return false;
+                const msgs = found.session.messages;
+                for (let i = msgs.length - 1; i >= 0; i--) {
+                    if (msgs[i].role === 'assistant') return msgs[i].id === msg.id && msgs[i].done;
+                }
+                return false;
+            }
+
+            // 失败重试 / 重新生成共用：从失败/最后一条助手消息回溯到最近的用户消息，原样重发任务
+            function retryAssistantMessage(msg) {
+                const found = findSessionMessage(msg.id);
+                if (!found) return;
+                const idx = found.session.messages.indexOf(msg);
+                for (let i = idx - 1; i >= 0; i--) {
+                    if (found.session.messages[i].role === 'user') {
+                        regenerateReply(found.session, found.session.messages[i]);
+                        return;
+                    }
+                }
+                showToast('未找到对应的用户消息，无法重试', 'warning');
+            }
+
+            // 基于已存在的用户消息重发任务：不追加用户消息，新开一条助手消息承接流式回复
+            async function regenerateReply(session, userMsg) {
+                if (!ws || ws.readyState !== WebSocket.OPEN) {
+                    showToast('连接已断开，无法发送', 'error');
+                    return;
+                }
+                for (const t of pendingTasks.values()) {
+                    if (!t.done && t.sessionId === session.id) {
+                        showToast('当前会话还有任务在执行，稍后再试', 'warning');
+                        return;
+                    }
+                }
+                const agent = state.agents[session.agentId];
+                const group = groupFromKey(session.agentId);
+                if (!group && agent && !agent.online) {
+                    showToast('Agent 不在线，无法发送', 'warning');
+                    return;
+                }
+                const text = userMsg.text || '';
+                const metadata = {};
+                const slashCmd = parseSlashCommand(text, agent);
+                if (slashCmd) metadata.command = slashCmd;
+                if ((userMsg.attachments || []).length) metadata.attachments = userMsg.attachments;
+                const idx = session.messages.indexOf(userMsg);
+                const history = session.messages.slice(Math.max(0, idx - 10), idx).map(m => ({
+                    role: m.role,
+                    content: m.role === 'user'
+                        ? (m.text || '')
+                        : (m.chunks || []).filter(c => c.type === 'text').map(c => c.text || '').join('')
+                })).filter(h => h.content);
+                if (history.length) metadata.history = history;
+                session.messageCount = (session.messageCount ?? 0) + 1;
+                await dispatchTask(session, text, metadata, userMsg.id);
+                syncChatChrome();
             }
 
             // 给最近任务列表用：把 markdown/chunk 文本压成一行纯文本预览。
@@ -4313,6 +4507,12 @@
                     showToast('Agent 不在线，无法发送', 'warning');
                     return;
                 }
+                // 群聊缺 @ 提前拦截，避免用户消息落库后再回滚
+                if (groupFromKey(session.agentId) &&
+                    parseGroupMentions(text, groupFromKey(session.agentId)).length === 0) {
+                    showToast('群聊请 @成员 或 @全体 后发送', 'warning');
+                    return;
+                }
 
                 let uploaded = [];
                 if (files.length) {
@@ -4378,16 +4578,17 @@
                 }
                 if (history.length) metadata.history = history;
 
-                // ---- 群聊路径：@mentions 路由，网关立即返回 fan-out 出的 task_ids ----
+                await dispatchTask(session, text, metadata, userMsgId);
+            }
+
+            // 任务派发：doSendMessage 正常发送与 regenerateReply 重试共用。
+            // 前置条件：用户消息已在 session.messages 里、连接与在线校验由调用方完成。
+            async function dispatchTask(session, text, metadata, userMsgId) {
                 const group = groupFromKey(session.agentId);
                 if (group) {
+                    // ---- 群聊路径：@mentions 路由，网关立即返回 fan-out 出的 task_ids ----
                     const mentions = parseGroupMentions(text, group);
-                    if (mentions.length === 0) {
-                        session.messages = session.messages.filter(m => m.id !== userMsgId);
-                        renderChat();
-                        showToast('群聊请 @成员 或 @全体 后发送', 'warning');
-                        return;
-                    }
+                    if (mentions.length === 0) return; // 调用方已前置校验，这里防御
                     const baseTaskId = generateId();
                     let taskIds;
                     try {

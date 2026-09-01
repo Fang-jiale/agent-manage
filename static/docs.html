@@ -230,7 +230,8 @@ node src/client.ts --config ~/.agent-manage/connector.json</code></pre>
     <ul>
         <li>一个对象可多会话：列表行点箭头展开；hover 出现置顶 / 重命名 / 删除；顶部可搜索当前会话消息（命中高亮）</li>
         <li><strong>工作目录</strong>：会话可绑定一个目录（标题栏 📂 徽章），Agent 在该目录下干活；首个任务后锁定，换目录自动开新会话</li>
-        <li>导出：标题栏下载按钮，把当前会话导出为 Markdown</li>
+        <li>导出：标题栏下载按钮把当前会话导出为 Markdown（含工具调用摘要与图片）；命令面板（⌘K）里可导出全量 JSON（含完整 chunk 与附件数据）</li>
+        <li>失败重试 / 重新生成：出错的消息 hover 出现重试按钮，直接基于原提问重新发起；最后一条回复可"重新生成"</li>
     </ul>
     <div class="callout"><strong>退出页面不中断</strong>：任务归属于会话而不是页面——手机上发出任务后退出，任务照常执行；回来重新打开，流式继续、已完成的记录完整可见（离开期间的结果自动对账补全）。</div>
 </section>

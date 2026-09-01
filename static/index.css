@@ -1704,3 +1704,29 @@ body.compact .agent-card { padding: 8px 10px; }
 }
 .interaction-card.answered .chunk-pad { padding: 10px 12px; }
 .interaction-card.answered .ic-label { margin-bottom: 6px; }
+
+/* ---------- chat skeleton（历史消息加载占位） ---------- */
+.chat-skeleton { display: flex; flex-direction: column; gap: 18px; padding: 18px 4px; }
+.skel-row { display: flex; }
+.skel-row.skel-user { justify-content: flex-end; }
+.skel-row.skel-agent { justify-content: flex-start; }
+.skel-bubble {
+    display: flex; flex-direction: column; gap: 8px;
+    width: min(62%, 460px); padding: 12px 14px;
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--bg-hover) 55%, var(--bg));
+    border: 1px solid var(--border);
+}
+.skel-line {
+    height: 12px; border-radius: 6px;
+    background: linear-gradient(90deg,
+        color-mix(in srgb, currentColor 6%, transparent) 25%,
+        color-mix(in srgb, currentColor 14%, transparent) 50%,
+        color-mix(in srgb, currentColor 6%, transparent) 75%);
+    background-size: 200% 100%;
+    animation: skel-shimmer 1.4s ease-in-out infinite;
+    color: var(--text);
+}
+.skel-row.skel-user .skel-bubble { width: min(42%, 320px); }
+@keyframes skel-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { .skel-line { animation: none; } }
