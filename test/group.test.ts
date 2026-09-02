@@ -1389,3 +1389,55 @@ test("group.run debate and pipeline custom steps", async (t) => {
     await fx.close();
   }
 });
+
+// 模板运行落库：group.run 的根行与步骤行写入 orchestration_runs（步骤 TaskState 无
+// parentTaskID，走 executeGroupRun 直接建行），run.list 按 session 给出派发树；
+// 按 run_id 家族取消时步骤行与根行收口 cancelled
+test("group.run records run tree and closes rows on cancel", async (t) => {
+  const fx = await startFixture(t);
+  if (!fx) return;
+  const { db, base } = fx;
+  const rid = crypto.randomUUID().slice(0, 8);
+  const a1 = `rt-${rid}-a1`;
+  const conns: Conn[] = [];
+  let groupID = "";
+  try {
+    const c1 = await Conn.dial(`${base}/ws/agent?token=${jwtFor(OWNER)}`);
+    conns.push(c1);
+    await registerAgent(c1, a1);
+    await upsertAgentRow(db, a1, OWNER);
+    const userConn = await Conn.dial(`${base}/ws/admin?token=${jwtFor(OWNER)}`);
+    conns.push(userConn);
+    await userConn.next(proto.METHOD_ADMIN_AGENT_LIST);
+    groupID = (await rpc<proto.GroupCreateResult>(userConn, "gc", proto.METHOD_GROUP_CREATE, {
+      name: "rt", agent_ids: [a1],
+    } satisfies proto.GroupCreateParams)).group_id;
+
+    const run = (await rpc<proto.GroupRunResult>(userConn, "gr", proto.METHOD_GROUP_RUN, {
+      group_id: groupID, preset: "round_robin", topic: "链路验证", rounds: 1,
+    } satisfies proto.GroupRunParams));
+    const step0 = proto.decodeParams<proto.AgentChatParams>(await c1.next(proto.METHOD_AGENT_CHAT));
+    assert.equal(step0.task_id, `${run.run_id}:0`);
+
+    // 按 run_id 家族取消（前端 stopCurrentTask 的路径）
+    await rpc(userConn, "cx", proto.METHOD_TASK_CANCEL, {
+      group_id: groupID, task_id: run.run_id, session_id: step0.session_id,
+    });
+    const cnl = proto.decodeParams<proto.AgentCancelParams>(await c1.next(proto.METHOD_AGENT_CANCEL, 10_000));
+    assert.equal(cnl.task_id, step0.task_id);
+
+    // run.list：根行与步骤行都收口 cancelled
+    await waitFor(async () => {
+      const res = await rpc<proto.RunListResult>(userConn, "rl", proto.METHOD_RUN_LIST, {
+        session_id: step0.session_id,
+      });
+      const rows = res.runs ?? [];
+      return rows.some((r) => r.task_id === run.run_id && r.status === "cancelled")
+        && rows.some((r) => r.task_id === `${run.run_id}:0` && r.status === "cancelled");
+    }, 8000);
+  } finally {
+    for (const c of conns) c.close();
+    if (groupID) await db.deleteGroup(OWNER, groupID).catch(() => {});
+    await fx.close();
+  }
+});

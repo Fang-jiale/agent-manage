@@ -1730,3 +1730,28 @@ body.compact .agent-card { padding: 8px 10px; }
 .skel-row.skel-user .skel-bubble { width: min(42%, 320px); }
 @keyframes skel-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 @media (prefers-reduced-motion: reduce) { .skel-line { animation: none; } }
+
+/* ---------- 群组协作模板 / 运行记录 ---------- */
+.chip-btn { cursor: pointer; border: 1px solid var(--border); background: var(--bg); transition: border-color .15s; }
+.chip-btn:hover { border-color: var(--accent); color: var(--accent); }
+.run-preset-row { display: flex; gap: 8px; }
+.run-preset { cursor: pointer; }
+.run-preset.active { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.run-step { border: 1px solid var(--border); border-radius: 10px; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
+.run-step-head { display: flex; align-items: center; justify-content: space-between; }
+.run-step-title { font-size: 13px; font-weight: 600; color: var(--text-secondary); }
+.run-step-targets { min-height: 64px; padding: 4px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font-size: 13px; }
+.run-step-content { resize: vertical; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font-family: inherit; }
+.run-step-opts { font-size: 12px; color: var(--text-tertiary); display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.run-row { border-bottom: 1px solid var(--border); }
+.run-row-main { display: flex; align-items: center; gap: 8px; padding: 7px 4px; font-size: 13px; min-width: 0; }
+.run-row-main[data-kids="1"] { cursor: pointer; }
+.run-row-main[data-kids="1"]:hover { background: var(--bg-hover); border-radius: 6px; }
+.run-caret { display: inline-block; width: 14px; color: var(--text-tertiary); transition: transform .15s; }
+.run-caret.open { transform: rotate(90deg); }
+.run-name { font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.run-root > .run-row-main .run-name { font-family: var(--mono); font-size: 12px; }
+.run-target { color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.run-status-label { font-size: 12px; flex-shrink: 0; }
+.run-time { margin-left: auto; color: var(--text-tertiary); font-size: 12px; flex-shrink: 0; }
+.run-error { padding: 2px 4px 8px 26px; color: var(--danger); font-size: 12px; word-break: break-all; }

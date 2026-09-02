@@ -476,10 +476,21 @@ export function handleGroupTaskCancel(hub: Hub, user: UserConn, msg: proto.Messa
   }
   for (const [tid, ts] of matches) {
     hub.finishRun(tid, "cancelled", "user cancelled");
+    // 运行模板步骤的 TaskState 不带 parentTaskID，hub.finishRun 会跳过；
+    // 其 orchestration_runs 行由 executeGroupRun 直接建，这里同样直接收口
+    if (hub.db && tid.startsWith(runPrefix)) {
+      void hub.db.finishRun(tid, "cancelled", "user cancelled", Date.now())
+        .catch((e) => logger.error("run finish failed", { task_id: tid, error: String(e) }));
+    }
     hub.forwardToAgent(ts.agentID, proto.newNotification(proto.METHOD_AGENT_CANCEL, {
       task_id: tid,
       session_id: ts.threadSessionID || ts.sessionID || undefined,
     } satisfies proto.AgentCancelParams));
+  }
+  // 根 run 行（run-xxx 本身没有对应 TaskState，不在 matches 里）
+  if (hub.db && params.task_id.startsWith("run-")) {
+    void hub.db.finishRun(params.task_id, "cancelled", "user cancelled", Date.now())
+      .catch((e) => logger.error("run finish failed", { task_id: params.task_id, error: String(e) }));
   }
   sendMsg(user.ws, proto.newResponse(msg.id ?? "", { task_id: params.task_id, status: "cancelling" } satisfies proto.TaskCancelResult));
 }
@@ -697,6 +708,48 @@ async function executeGroupRun(
 ): Promise<void> {
   let prev: Array<{ target: string; text: string }> = [];
   const all: Array<{ target: string; text: string }> = [];
+  // 运行模板自身与各步骤任务也落 orchestration_runs（durable run tree）：步骤不走
+  // agent 委派链路（trackTask 不带 parentTaskID，recordRunStart 会跳过），在这里
+  // 直接记录/收口，run.list 才能给出模板运行的完整派发树
+  const db = hub.db;
+  const instanceID = hub.bus?.instanceID ?? "local";
+  const runStatusOf = (r: { error?: string }): "completed" | "failed" | "timeout" | "cancelled" => {
+    if (r.error === undefined || r.error === "") return "completed";
+    if (/超时|timeout/i.test(r.error)) return "timeout";
+    if (/取消|cancel/i.test(r.error)) return "cancelled";
+    return "failed";
+  };
+  const recordStepRuns = (ids: string[], targets: string[]): void => {
+    if (!db) return;
+    ids.forEach((id, n) => {
+      void db.createRun({
+        id, owner_id: ownerID, group_id: group.id, parent_task_id: runID,
+        invoker_agent_id: "", target_agent_id: targets[n], invocation_id: null,
+        session_id: sessionID, instance_id: instanceID, status: "running", created_at: Date.now(),
+      }).catch((e) => logger.error("run create failed", { task_id: id, error: String(e) }));
+    });
+  };
+  const finishStepRuns = (ids: string[], results: Array<{ error?: string; text: string }>): void => {
+    if (!db) return;
+    ids.forEach((id, n) => {
+      const r = results[n] ?? {};
+      void db.finishRun(id, runStatusOf(r), r.error ?? null, Date.now())
+        .catch((e) => logger.error("run finish failed", { task_id: id, error: String(e) }));
+    });
+  };
+  const finishRootRun = (status: string, error: string | null): void => {
+    if (!db) return;
+    void db.finishRun(runID, status, error, Date.now())
+      .catch((e) => logger.error("run finish failed", { task_id: runID, error: String(e) }));
+  };
+  if (db) {
+    void db.createRun({
+      id: runID, owner_id: ownerID, group_id: group.id, parent_task_id: "",
+      invoker_agent_id: "", target_agent_id: `group:${group.id}`, invocation_id: null,
+      session_id: sessionID, instance_id: instanceID, status: "running", created_at: Date.now(),
+    }).catch((e) => logger.error("run create failed", { task_id: runID, error: String(e) }));
+  }
+  try {
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i];
     const content = step.content
@@ -713,20 +766,28 @@ async function executeGroupRun(
         task_id: id, session_id: sessionID, type: "chat", content, metadata: meta,
       } satisfies proto.AgentChatParams));
     });
+    recordStepRuns(ids, step.targets);
     logger.info("group.run step dispatched", { run_id: runID, step: step.label, targets: step.targets });
     // collect:first = 首个成功即收割其余；all = 等全部
     const results = step.collect === "first" && ids.length > 1
       ? await waitFirstAndHarvest(hub, ids, step.targets)
       : await Promise.all(ids.map((id, n) => hub.waitTaskDone(id).then((r) => ({ ...r, target: step.targets[n] }))));
+    finishStepRuns(ids, results);
     prev = results.map((r) => ({ target: r.target, text: r.text }));
     all.push(...prev);
     const allFailed = results.every((r) => r.error !== undefined || r.text === "");
     if (allFailed) {
       logger.warn("group.run aborted: step produced no output", { run_id: runID, step: step.label });
+      finishRootRun("failed", `步骤 ${i + 1}（${step.label}）无输出，后续步骤中止`);
       return;
     }
   }
   logger.info("group.run completed", { run_id: runID, steps: steps.length });
+  finishRootRun("completed", null);
+  } catch (e) {
+    finishRootRun("failed", String(e));
+    throw e;
+  }
 }
 
 // collect:first：等第一个成功结果，取消收割其余运行中任务

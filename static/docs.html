@@ -257,6 +257,8 @@ node src/client.ts --config ~/.agent-manage/connector.json</code></pre>
         <li>群组面板 → <strong>新建群组</strong>：勾选成员、可设「管理者 Agent」（★ 标记）</li>
         <li>群聊发消息需 <code>@成员</code> 或 <code>@全体</code>；离线成员自动跳过（会提示跳过了谁）</li>
         <li><strong>管理者编排</strong>：@管理者后，它可以自主把子任务派发给群内其他成员，结果汇总回它的回复里；父任务取消会级联取消子任务</li>
+        <li><strong>协作模板</strong>（群聊顶栏 ⚡）：网关按模板自动调度群成员——<em>轮流发言</em>（后者能看到前者全部发言）、<em>辩论</em>（正反方交替、管理者裁决）、<em>流水线</em>（自定义步骤，<code>{{prev}}</code>/<code>{{all}}</code> 注入上文）；每步都是普通群消息，可随时停止整个运行</li>
+        <li><strong>运行记录</strong>（群聊顶栏 🕘）：查看本会话的编排运行派发树与各步状态（运行中/完成/失败/超时/取消），点行展开子任务</li>
     </ul>
 </section>
 

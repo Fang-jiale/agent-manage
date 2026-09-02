@@ -441,6 +441,10 @@
                     { label: '搜索当前会话', icon: ICONS.search, run: () => toggleChatSearch(true) },
                     { label: '导出当前会话', icon: ICONS.download, run: exportSession },
                     { label: '导出当前会话为 JSON（全量）', icon: ICONS.download, run: () => exportSessionAs('json') },
+                    ...(isGroupKey(state.currentAgentId) ? [
+                        { label: '群组协作模板（轮流/辩论/流水线）', icon: ICONS.plus, run: openRunModal },
+                        { label: '本会话运行记录', icon: ICONS.search, run: openRunsModal }
+                    ] : []),
                     { label: '切换主题', icon: resolveTheme() === 'dark' ? ICONS.sun : ICONS.moon,
                       run: () => {
                           state.settings.themeMode = resolveTheme() === 'dark' ? 'light' : 'dark';
@@ -707,6 +711,20 @@
                 workdirCancel: document.getElementById('workdirCancel'),
                 workdirClear: document.getElementById('workdirClear'),
                 workdirSave: document.getElementById('workdirSave'),
+                runOverlay: document.getElementById('runOverlay'),
+                runPresetRow: document.getElementById('runPresetRow'),
+                runTopicInput: document.getElementById('runTopicInput'),
+                runRoundsSelect: document.getElementById('runRoundsSelect'),
+                runPresetHint: document.getElementById('runPresetHint'),
+                runStepsBox: document.getElementById('runStepsBox'),
+                runStepsList: document.getElementById('runStepsList'),
+                runAddStep: document.getElementById('runAddStep'),
+                runCancel: document.getElementById('runCancel'),
+                runLaunch: document.getElementById('runLaunch'),
+                runsOverlay: document.getElementById('runsOverlay'),
+                runsList: document.getElementById('runsList'),
+                runsRefresh: document.getElementById('runsRefresh'),
+                runsClose: document.getElementById('runsClose'),
                 railUnreadBadge: document.getElementById('railUnreadBadge'),
                 sessionMenuBtn: document.getElementById('sessionMenuBtn'),
                 sessionMenu: document.getElementById('sessionMenu'),
@@ -825,7 +843,18 @@
                     localStorage.removeItem(SESSIONS_PREFIX + targetKey);
                     return;
                 }
-                writeLocal(SESSIONS_PREFIX + targetKey, sessions);
+                // 落盘前瘦身：剥离超长 base64（结果图/内嵌附件 data），只留 url——
+                // 服务端 message.list 持有完整数据，重开页面会话同步后即恢复显示；
+                // 不剥离则流式期间每 500ms 序列化一次大 base64，极易撞 5MB 配额。
+                // 同时按 prune 规则截断目标内会话数（原先只在 loadState 跑一次，
+                // 长驻页面期间会话数无上限增长）。
+                const pruned = pruneSessions({ [targetKey]: sessions })[targetKey];
+                writeLocal(SESSIONS_PREFIX + targetKey, JSON.stringify(pruned, (key, value) => {
+                    if ((key === 'data' || key === 'dataUrl') && typeof value === 'string' && value.length > 4096) {
+                        return undefined;
+                    }
+                    return value;
+                }));
             }
 
             function saveState() {
@@ -1289,11 +1318,11 @@
                     }
                     renderSessions();
                     renderSessionMenu();
-                    renderChat();
+                    renderChat(false, true);
                     const cur = getCurrentSession();
                     if (cur && !loadedSessions.has(cur.id)) {
                         await loadMessages(cur);
-                        renderChat();
+                        renderChat(false, true);
                     }
                 } catch (e) { console.warn('syncSessions failed', e); }
             }
@@ -1909,6 +1938,10 @@
 
             function renderSessions() {
                 updateRailUnreadBadge();
+                // 重命名输入进行中直接跳过：整列表重建会把输入框换掉、用户输入丢失；
+                // 输入失焦/回车提交时 finish() 会重渲染，列表不会一直停留在旧态
+                if (els.sessionList.querySelector('.session-rename-input') ||
+                    els.sessionMenuList.querySelector('.session-rename-input')) return;
                 els.sessionList.innerHTML = '';
                 const targets = [];
                 Object.keys(state.sessions).forEach(key => {
@@ -2161,6 +2194,273 @@
                 showToast(workdir ? '工作目录已绑定：' + workdir : '已清除工作目录绑定', 'success');
             }
 
+            /* ---------- 群组协作模板（group.run）与运行记录（run.list） ---------- */
+
+            let runPreset = 'round_robin';
+            const RUN_PRESET_HINTS = {
+                round_robin: '成员依次发言，后者能看到前者的全部发言',
+                debate: '前两个在线成员任正反方交替辩论，最后由管理者（或首成员）裁决',
+                pipeline: '自定义步骤流水线，支持 {{prev}} / {{all}} 注入上文'
+            };
+
+            function openRunModal() {
+                const session = getCurrentSession();
+                if (!session || !groupFromKey(session.agentId)) {
+                    showToast('请先进入一个群组会话', 'warning');
+                    return;
+                }
+                runPreset = 'round_robin';
+                els.runTopicInput.value = '';
+                els.runRoundsSelect.value = '2';
+                els.runStepsList.innerHTML = '';
+                addRunStepRow();
+                addRunStepRow();
+                applyRunPresetUI();
+                els.runOverlay.classList.add('open');
+                setTimeout(() => els.runTopicInput.focus(), 60);
+            }
+
+            function closeRunModal() { els.runOverlay.classList.remove('open'); }
+
+            function applyRunPresetUI() {
+                els.runPresetRow.querySelectorAll('.run-preset').forEach(b =>
+                    b.classList.toggle('active', b.dataset.preset === runPreset));
+                els.runPresetHint.textContent = RUN_PRESET_HINTS[runPreset] || '';
+                const pipeline = runPreset === 'pipeline';
+                els.runStepsBox.style.display = pipeline ? '' : 'none';
+                els.runTopicInput.style.display = pipeline ? 'none' : '';
+                els.runRoundsSelect.parentElement.style.display = pipeline ? 'none' : '';
+                els.runTopicInput.placeholder = runPreset === 'debate'
+                    ? '辩题，如：是否采用微服务架构'
+                    : '主题，如：评审这份方案的可行性';
+            }
+
+            function addRunStepRow() {
+                const session = getCurrentSession();
+                const group = session ? groupFromKey(session.agentId) : null;
+                if (!group) return;
+                if (els.runStepsList.children.length >= 12) {
+                    showToast('最多 12 个步骤', 'warning');
+                    return;
+                }
+                const row = document.createElement('div');
+                row.className = 'run-step';
+
+                const head = document.createElement('div');
+                head.className = 'run-step-head';
+                const idx = els.runStepsList.children.length + 1;
+                const title = document.createElement('span');
+                title.textContent = '步骤 ' + idx;
+                title.className = 'run-step-title';
+                const rm = document.createElement('button');
+                rm.type = 'button';
+                rm.className = 'icon-btn';
+                rm.title = '删除步骤';
+                rm.innerHTML = ICONS.trash || '✕';
+                rm.onclick = () => { row.remove(); renumberRunSteps(); };
+                head.appendChild(title);
+                head.appendChild(rm);
+
+                const targets = document.createElement('select');
+                targets.multiple = true;
+                targets.className = 'run-step-targets';
+                group.agentIds.forEach(id => {
+                    const o = document.createElement('option');
+                    o.value = id;
+                    o.textContent = groupMemberName(id);
+                    targets.appendChild(o);
+                });
+
+                const content = document.createElement('textarea');
+                content.rows = 2;
+                content.placeholder = '这一步的指令，可用 {{prev}} {{all}} 引用上文';
+                content.className = 'run-step-content';
+
+                const opts = document.createElement('label');
+                opts.className = 'run-step-opts';
+                const collect = document.createElement('input');
+                collect.type = 'checkbox';
+                collect.title = '多目标时，首个成功即收割其余';
+                opts.appendChild(collect);
+                opts.appendChild(document.createTextNode(' 首个成功即收割'));
+
+                row.appendChild(head);
+                row.appendChild(targets);
+                row.appendChild(content);
+                row.appendChild(opts);
+                els.runStepsList.appendChild(row);
+            }
+
+            function renumberRunSteps() {
+                els.runStepsList.querySelectorAll('.run-step-title').forEach((el, i) => {
+                    el.textContent = '步骤 ' + (i + 1);
+                });
+            }
+
+            async function launchRun() {
+                const session = getCurrentSession();
+                const group = session && groupFromKey(session.agentId);
+                if (!session || !group) return;
+                const params = {
+                    group_id: group.id,
+                    preset: runPreset,
+                    session_id: session.id // 复用当前群会话：步骤气泡直接流进本会话
+                };
+                if (runPreset === 'pipeline') {
+                    const steps = [];
+                    for (const row of els.runStepsList.querySelectorAll('.run-step')) {
+                        const run = [...row.querySelectorAll('.run-step-targets option:checked')].map(o => o.value);
+                        const content = row.querySelector('.run-step-content').value.trim();
+                        if (!run.length || !content) {
+                            showToast('每个步骤都需要选择成员并填写指令', 'warning');
+                            return;
+                        }
+                        steps.push({
+                            run: run.length === 1 ? run[0] : run,
+                            content,
+                            ...(row.querySelector('input[type=checkbox]').checked && run.length > 1
+                                ? { collect: 'first' } : {})
+                        });
+                    }
+                    if (!steps.length) { showToast('至少添加一个步骤', 'warning'); return; }
+                    params.steps = steps;
+                } else {
+                    const topic = els.runTopicInput.value.trim();
+                    if (!topic) { showToast('请填写主题', 'warning'); els.runTopicInput.focus(); return; }
+                    params.topic = topic;
+                    params.rounds = parseInt(els.runRoundsSelect.value, 10) || 2;
+                }
+                els.runLaunch.disabled = true;
+                try {
+                    const res = await rpcCall('group.run', params, 30000);
+                    closeRunModal();
+                    showToast('运行已启动（' + (res.run_id || '') + '），步骤将依次出现在本会话', 'success', 2500);
+                    // 网关把【模板】主题落成用户消息；对账取回，同时收养可能已派发的首步
+                    void syncSessionFromServer(session);
+                } catch (e) {
+                    showToast('启动失败：' + (e.message || e), 'error');
+                } finally {
+                    els.runLaunch.disabled = false;
+                }
+            }
+
+            /* ----- 运行记录（run.list） ----- */
+
+            let runsExpanded = new Set();
+            const RUN_STATUS_META = {
+                running: ['运行中', 'var(--accent)'],
+                completed: ['完成', 'var(--success)'],
+                failed: ['失败', 'var(--danger)'],
+                timeout: ['超时', 'var(--warning)'],
+                cancelled: ['已取消', 'var(--text-tertiary)']
+            };
+
+            function openRunsModal() {
+                const session = getCurrentSession();
+                if (!session) return;
+                runsExpanded.clear();
+                els.runsOverlay.classList.add('open');
+                void refreshRuns();
+            }
+
+            function closeRunsModal() { els.runsOverlay.classList.remove('open'); }
+
+            async function refreshRuns() {
+                const session = getCurrentSession();
+                if (!session) return;
+                els.runsList.innerHTML = '<p style="color:var(--text-tertiary);font-size:13px;padding:8px 4px">加载中…</p>';
+                let runs;
+                try {
+                    const res = await rpcCall('run.list', { session_id: session.id, limit: 200 }, 30000);
+                    runs = res.runs || [];
+                } catch (e) {
+                    els.runsList.innerHTML = '<p style="color:var(--danger);font-size:13px;padding:8px 4px">加载失败：' +
+                        escapeHtml(e.message || String(e)) + '</p>';
+                    return;
+                }
+                if (!runs.length) {
+                    els.runsList.innerHTML = '<p style="color:var(--text-tertiary);font-size:13px;padding:8px 4px">本会话暂无编排运行记录</p>';
+                    return;
+                }
+                currentRunsCache = runs;
+                renderRunsTree(runs);
+            }
+
+            // run-xxx:2 → "步骤 3"；run-xxx:2#1 → "步骤 3 · 分支 2"；agent 委派（@uuid）→ "委派 xxxxxx"
+            function runLabelOf(taskId) {
+                const m = /^run-[a-z0-9]+:(\d+)(?:#(\d+))?$/.exec(taskId);
+                if (m) {
+                    return '步骤 ' + (parseInt(m[1], 10) + 1) +
+                        (m[2] !== undefined ? ' · 分支 ' + (parseInt(m[2], 10) + 1) : '');
+                }
+                return '委派 ' + taskId.slice(-6);
+            }
+
+            // 顶层行：根 run（parent_task_id 为空）与游离的委派子任务；展开加载子树
+            function renderRunsTree(runs) {
+                const byParent = new Map();
+                for (const r of runs) {
+                    const key = r.parent_task_id || '';
+                    if (!byParent.has(key)) byParent.set(key, []);
+                    byParent.get(key).push(r);
+                }
+                els.runsList.innerHTML = '';
+                const roots = [...(byParent.get('') || [])].sort((a, b) => b.created_at - a.created_at);
+                for (const r of roots) els.runsList.appendChild(runRowHtml(r, byParent, 0));
+            }
+
+            function runRowHtml(run, byParent, depth) {
+                const [label, color] = RUN_STATUS_META[run.status] || [run.status, 'var(--text-tertiary)'];
+                const isRoot = !run.parent_task_id;
+                const hasKids = (byParent.get(run.task_id) || []).length > 0;
+                const expanded = runsExpanded.has(run.task_id);
+                const wrap = document.createElement('div');
+                wrap.className = 'run-row' + (isRoot ? ' run-root' : '');
+                wrap.style.paddingLeft = (depth * 18) + 'px';
+
+                const main = document.createElement('div');
+                main.className = 'run-row-main';
+                const caret = hasKids
+                    ? '<span class="run-caret' + (expanded ? ' open' : '') + '">▸</span>'
+                    : '<span class="run-caret" style="visibility:hidden">▸</span>';
+                const target = run.target_agent_id
+                    ? (run.target_agent_id.startsWith('group:')
+                        ? '全体成员' : groupMemberName(run.target_agent_id))
+                    : '—';
+                const dur = run.ended_at
+                    ? ' · ' + formatDuration(Math.max(0, run.ended_at - run.created_at))
+                    : '';
+                main.innerHTML = caret +
+                    '<span class="run-status" style="color:' + color + '">●</span>' +
+                    '<span class="run-name">' + escapeHtml(isRoot ? run.task_id : runLabelOf(run.task_id)) + '</span>' +
+                    '<span class="run-target">→ ' + escapeHtml(target) + '</span>' +
+                    '<span class="run-status-label" style="color:' + color + '">' + label + '</span>' +
+                    '<span class="run-time">' + escapeHtml(formatTime(run.created_at) + dur) + '</span>';
+                wrap.appendChild(main);
+
+                if (run.error) {
+                    const err = document.createElement('div');
+                    err.className = 'run-error';
+                    err.textContent = run.error;
+                    wrap.appendChild(err);
+                }
+                if (hasKids && expanded) {
+                    for (const kid of [...byParent.get(run.task_id)].sort((a, b) => a.created_at - b.created_at)) {
+                        wrap.appendChild(runRowHtml(kid, byParent, depth + 1));
+                    }
+                }
+                if (hasKids) {
+                    main.addEventListener('click', () => {
+                        if (runsExpanded.has(run.task_id)) runsExpanded.delete(run.task_id);
+                        else runsExpanded.add(run.task_id);
+                        renderRunsTree(currentRunsCache);
+                    });
+                }
+                return wrap;
+            }
+
+            let currentRunsCache = [];
+
             // C4：目录切换 → 新会话直接带新目录创建（session.create 支持 workdir 参数）
             async function createSessionWithWorkdir(agentId, workdir) {
                 try {
@@ -2183,7 +2483,7 @@
                     saveState();
                     renderSessions();
                     renderSessionMenu();
-                    renderChat();
+                    renderChat(false, true);
                     beginSessionCapLoading(getCurrentSession());
                     showToast(workdir ? ('目录已切换，新会话已创建：' + workdir) : '已新建会话', 'success');
                 } catch (e) {
@@ -2255,7 +2555,7 @@
                 saveState();
                 renderSessions();
                 renderSessionMenu();
-                renderChat();
+                renderChat(false, true);
             }
 
             /* ---------- rendering: chat ---------- */
@@ -2306,8 +2606,12 @@
                     chips.push('<span class="chip" title="@成员 或 @全体 发消息">' + group.agentIds.length + ' 个成员 · ' +
                         '<span class="agent-status-text ' + (onlineCount ? 'online' : 'offline') + '">' + onlineCount + ' 在线</span></span>');
                     chips.push(workdirChipHtml(session));
+                    chips.push('<button class="chip chip-btn" id="runTplChip" title="网关按模板顺序调度群成员：轮流发言 / 辩论 / 流水线">⚡ 协作模板</button>');
+                    chips.push('<button class="chip chip-btn" id="runsChip" title="本会话的编排运行记录与派发树">🕘 运行记录</button>');
                     els.headerChips.innerHTML = chips.join('');
                     bindWorkdirChip();
+                    els.headerChips.querySelector('#runTplChip')?.addEventListener('click', openRunModal);
+                    els.headerChips.querySelector('#runsChip')?.addEventListener('click', openRunsModal);
                     return;
                 }
                 const agent = state.agents[session.agentId];
@@ -2408,7 +2712,7 @@
             let chatVisibleLimit = MAX_VISIBLE_MSGS;
             function resetChatVisibleLimit() { chatVisibleLimit = MAX_VISIBLE_MSGS; }
 
-            function renderChat(preserveScroll = false) {
+            function renderChat(preserveScroll = false, forceBottom = false) {
                 const session = getCurrentSession();
                 renderChatHeader();
                 if (!session) {
@@ -2425,12 +2729,15 @@
                 }
                 els.emptyState.style.display = 'none';
 
-                // 扩展窗口时保留视觉位置：记下旧 scrollHeight 和 scrollTop，
-                // 渲染完成后把多出来的高度加回去，用户视角不变
+                // 滚动位置：preserveScroll=精确保持（加载更早/展开窗口）；
+                // forceBottom=会话切换/新建必须回底；其余（对账/归因/storage 同步等
+                // 全量重建场景）跟随 stickToBottom——用户上翻阅读时不拽走。
+                // 注意滚动容器是 #chatContainer，#messages 是其内部静态块不产生滚动。
                 let prevScrollH = 0, prevScrollTop = 0;
-                if (preserveScroll) {
-                    prevScrollH = els.messages.scrollHeight;
-                    prevScrollTop = els.messages.scrollTop;
+                const keepPosition = preserveScroll || (!forceBottom && !stickToBottom);
+                if (keepPosition) {
+                    prevScrollH = els.chatContainer.scrollHeight;
+                    prevScrollTop = els.chatContainer.scrollTop;
                 }
 
                 els.messages.innerHTML = '';
@@ -2491,12 +2798,12 @@
                             els.messages.appendChild(makeDivider(msg.createdAt));
                             lastDay = day;
                         }
-                        els.messages.appendChild(renderMessage(msg));
+                        els.messages.appendChild(renderMessage(msg, session));
                     }
                 }
-                if (preserveScroll) {
-                    const newScrollH = els.messages.scrollHeight;
-                    els.messages.scrollTop = newScrollH - prevScrollH + prevScrollTop;
+                if (keepPosition) {
+                    // 新内容插在上方时把多出的高度补回去，用户视角不动
+                    els.chatContainer.scrollTop = els.chatContainer.scrollHeight - prevScrollH + prevScrollTop;
                 } else {
                     scrollToBottom(true);
                 }
@@ -2557,7 +2864,7 @@
                 return wrap;
             }
 
-            function renderMessage(msg) {
+            function renderMessage(msg, msgSession) {
                 const wrapper = document.createElement('div');
                 wrapper.className = 'message ' + (msg.role === 'user' ? 'user' : 'assistant');
                 // 等待首个 chunk 的空 assistant 消息先隐藏，由 typing 指示器占位，避免两个头像并存
@@ -2611,7 +2918,7 @@
                 const actions = document.createElement('div');
                 actions.className = 'message-actions';
                 const failed = msg.role === 'assistant' && msg.done && isFailedMessage(msg);
-                const canRegen = msg.role === 'assistant' && msg.done && !failed && isLastDoneAssistant(msg);
+                const canRegen = msg.role === 'assistant' && msg.done && !failed && isLastDoneAssistant(msg, msgSession);
                 actions.innerHTML = '<button class="icon-btn" data-act="copy" title="复制">' + ICONS.copy + '</button>' +
                     (msg.role === 'user'
                         ? '<button class="icon-btn" data-act="edit" title="编辑后重发">' + ICONS.edit + '</button>' +
@@ -2680,11 +2987,11 @@
                 return !!msg.errorText || (msg.chunks || []).some(c => c.type === 'error');
             }
 
-            // 会话内最后一条已完成的助手消息才提供"重新生成"，中间消息重新生成会与后续历史矛盾
-            function isLastDoneAssistant(msg) {
-                const found = findSessionMessage(msg.id);
-                if (!found) return false;
-                const msgs = found.session.messages;
+            // 会话内最后一条已完成的助手消息才提供"重新生成"，中间消息重新生成会与后续历史矛盾。
+            // 只扫本会话（renderMessage 传入），避免对每条可见消息全局找会话的线性扫
+            function isLastDoneAssistant(msg, session) {
+                const msgs = (session || getCurrentSession())?.messages;
+                if (!msgs) return false;
                 for (let i = msgs.length - 1; i >= 0; i--) {
                     if (msgs[i].role === 'assistant') return msgs[i].id === msg.id && msgs[i].done;
                 }
@@ -3554,10 +3861,12 @@
                     if (!prev || new Date(prev.createdAt).toDateString() !== new Date(msg.createdAt).toDateString()) {
                         els.messages.appendChild(makeDivider(msg.createdAt));
                     }
-                    const msgEl = renderMessage(msg);
+                    const msgEl = renderMessage(msg, session);
                     msgEl.classList.add('msg-enter');
                     els.messages.appendChild(msgEl);
-                    scrollToBottom(true);
+                    // 用户自己发的消息强制回底；收到的回复（多端收养/群占位）尊重
+                    // stickToBottom，避免用户上翻阅读时被拽走
+                    scrollToBottom(msg.role === 'user');
                 }
                 scheduleSessionsRender(); // 消息高频路径走合并渲染
             }
@@ -3688,7 +3997,7 @@
                 saveState();
                 renderAgents();
                 renderSessions();
-                renderChat();
+                renderChat(false, true);
                 beginSessionCapLoading(getCurrentSession());
                 if (window.innerWidth <= 768) setSidebarOpen(false);
                 syncSessions(agentId);
@@ -3701,7 +4010,7 @@
                 resetChatVisibleLimit();
                 saveState();
                 renderSessions();
-                renderChat();
+                renderChat(false, true);
                 beginSessionCapLoading(getCurrentSession());
                 renderSessionMenu();
                 toggleSessionMenu(false);
@@ -3728,7 +4037,7 @@
                 saveState();
                 renderSessions();
                 renderSessionMenu();
-                renderChat();
+                renderChat(false, true);
                 beginSessionCapLoading(getCurrentSession());
                 toggleSessionMenu(false);
                 els.messageInput.focus();
@@ -3742,7 +4051,7 @@
                 session.messages = [];
                 session.updatedAt = Date.now();
                 saveState();
-                renderChat();
+                renderChat(false, true);
                 renderSessions();
             }
 
@@ -3923,9 +4232,13 @@
                         return;
                     }
                     const id = 'rpc-' + (++rpcSeq) + '-' + generateId();
-                    pendingRpc.set(id, { resolve, reject });
+                    let timer = null;
+                    pendingRpc.set(id, {
+                        resolve: (v) => { clearTimeout(timer); resolve(v); },
+                        reject: (e) => { clearTimeout(timer); reject(e); }
+                    });
                     send({ jsonrpc: '2.0', id, method, params });
-                    setTimeout(() => {
+                    timer = setTimeout(() => {
                         if (pendingRpc.delete(id)) reject(new Error(method + ' 超时'));
                     }, timeoutMs);
                 });
@@ -4066,6 +4379,8 @@
                     task = {
                         taskId, messageId: msgId, agentId: ownerKey, sessionId: params.session_id,
                         groupId: params.group_id || null, done: false, adopted: true,
+                        // 运行模板步骤（run-xxx:n[#m]）：按 run_id 家族取消（task.cancel 传前缀）
+                        baseTaskId: /^run-[a-z0-9]+:/.test(taskId) ? taskId.replace(/:.*$/, '') : undefined,
                         startTime: Date.now(), lastActivity: Date.now()
                     };
                     pendingTasks.set(taskId, task);
@@ -4557,7 +4872,13 @@
                 })).filter(h => h.content);
                 const userMsgId = generateId();
                 const msgAttachments = files.map((a, i) => uploaded[i] || { name: a.name, mime: a.mime, size: a.size });
-                if (files.length) attachmentBlobs.set(userMsgId, files.map(a => a.dataUrl));
+                if (files.length) {
+                    // 图片 dataUrl 只用于本地点击预览，留最近 20 条消息的量防内存常驻膨胀
+                    if (attachmentBlobs.size >= 20) {
+                        attachmentBlobs.delete(attachmentBlobs.keys().next().value);
+                    }
+                    attachmentBlobs.set(userMsgId, files.map(a => a.dataUrl));
+                }
                 appendMessage(session, {
                     id: userMsgId, role: 'user', text,
                     attachments: msgAttachments.length ? msgAttachments : undefined,
@@ -4614,7 +4935,7 @@
                             id: generateId(), role: 'assistant', agentId: null, taskId: baseTaskId,
                             chunks: [], done: true, errorText: e.message || String(e), createdAt: Date.now()
                         });
-                        renderChat();
+                        renderChat(false, true);
                         showToast('发送失败：' + (e.message || e), 'error');
                         return;
                     }
@@ -4689,13 +5010,15 @@
                 for (const [taskId, task] of pendingTasks) {
                     if (task.done) continue;
                     if (task.groupId) {
-                        // 群任务按家族取消：同 baseTaskId 只发一次群级 task.cancel
-                        if (cancelledGroups.has(task.baseTaskId)) continue;
-                        cancelledGroups.add(task.baseTaskId);
+                        // 群任务按家族取消：同 baseTaskId 只发一次群级 task.cancel。
+                        // base 缺失（他端发起收养来的 fan-out 任务）退化用去掉 # 派生后缀的 id
+                        const familyId = task.baseTaskId || taskId.replace(/#\w+$/, '');
+                        if (cancelledGroups.has(familyId)) continue;
+                        cancelledGroups.add(familyId);
                         send({
                             jsonrpc: '2.0',
                             method: 'task.cancel',
-                            params: { group_id: task.groupId, task_id: task.baseTaskId, session_id: task.sessionId },
+                            params: { group_id: task.groupId, task_id: familyId, session_id: task.sessionId },
                             id: generateId()
                         });
                     } else {
@@ -4917,6 +5240,28 @@
                 els.workdirOverlay.addEventListener('click', (e) => {
                     if (e.target === els.workdirOverlay) closeWorkdirModal();
                 });
+
+                // 群组协作模板 / 运行记录
+                els.runPresetRow.addEventListener('click', (e) => {
+                    const btn = e.target.closest('.run-preset');
+                    if (!btn) return;
+                    runPreset = btn.dataset.preset;
+                    applyRunPresetUI();
+                });
+                els.runCancel.addEventListener('click', closeRunModal);
+                els.runLaunch.addEventListener('click', () => void launchRun());
+                els.runOverlay.addEventListener('click', (e) => {
+                    if (e.target === els.runOverlay) closeRunModal();
+                });
+                els.runAddStep.addEventListener('click', addRunStepRow);
+                els.runTopicInput.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void launchRun(); }
+                });
+                els.runsClose.addEventListener('click', closeRunsModal);
+                els.runsRefresh.addEventListener('click', () => void refreshRuns());
+                els.runsOverlay.addEventListener('click', (e) => {
+                    if (e.target === els.runsOverlay) closeRunsModal();
+                });
                 els.workdirInput.addEventListener('keydown', (e) => {
                     if (e.key === 'Enter') { e.preventDefault(); saveSessionWorkdir(false); }
                     if (e.key === 'Escape') closeWorkdirModal();
@@ -5101,6 +5446,8 @@
                         closeDrawer();
                         els.pwdOverlay.classList.remove('open');
                         els.workdirOverlay.classList.remove('open');
+                        els.runOverlay.classList.remove('open');
+                        els.runsOverlay.classList.remove('open');
                         if (els.settingsOverlay.classList.contains('open')) { closeSettings(); saveState(); }
                     }
                     if (els.lightbox.classList.contains('open')) {
@@ -5136,6 +5483,10 @@
 
                 window.addEventListener('storage', e => {
                     if (e.key === STORAGE_KEY || (e.key && e.key.startsWith(SESSIONS_PREFIX))) {
+                        // 本页有在途任务时跳过：另一标签的磁盘态可能滞后于防抖写盘，
+                        // 整体替换 state 会截断正在流式的 chunks；任务结束后的
+                        // syncSessionFromServer 会向服务端对账补全，无需此刻同步
+                        if ([...pendingTasks.values()].some(t => !t.done)) return;
                         state = loadState();
                         applySettings();
                         applySidebarCollapsed();
@@ -5214,7 +5565,7 @@
                 renderAgents();
                 renderGroups();
                 renderSessions();
-                renderChat();
+                renderChat(false, true);
                 updateInputState();
                 // 心跳等相对时间标签每分钟刷新一次
                 setInterval(() => {

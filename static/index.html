@@ -225,6 +225,53 @@
         </div>
     </div>
 
+    <div class="modal-overlay" id="runOverlay">
+        <div class="modal" style="max-width:560px" role="dialog" aria-modal="true" aria-labelledby="runModalTitle">
+            <h3 id="runModalTitle">群组协作模板</h3>
+            <p style="color:var(--text-tertiary);font-size:13px;margin:4px 0 10px">网关按模板顺序向成员派发任务，上一步输出自动注入下一步；每步都是普通群消息，可随时取消</p>
+            <div class="run-preset-row" id="runPresetRow" role="radiogroup" aria-label="模板">
+                <button type="button" class="chip run-preset active" data-preset="round_robin">轮流发言</button>
+                <button type="button" class="chip run-preset" data-preset="debate">辩论</button>
+                <button type="button" class="chip run-preset" data-preset="pipeline">流水线</button>
+            </div>
+            <div id="runTopicBox">
+                <input type="text" id="runTopicInput" placeholder="主题，如：评审这份方案的可行性" style="width:100%;box-sizing:border-box;margin:10px 0 8px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text)">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                    <span style="font-size:13px;color:var(--text-secondary)">轮数</span>
+                    <select id="runRoundsSelect" style="padding:6px 8px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text)">
+                        <option value="1">1</option><option value="2" selected>2</option><option value="3">3</option><option value="4">4</option>
+                    </select>
+                    <span id="runPresetHint" style="font-size:12px;color:var(--text-tertiary)"></span>
+                </div>
+            </div>
+            <div id="runStepsBox" style="display:none">
+                <p style="font-size:12px;color:var(--text-tertiary);margin:8px 0 6px">每步选择目标成员并写指令；<code>{{prev}}</code> 注入上一步输出、<code>{{all}}</code> 注入此前全部输出；某步全部失败则中止</p>
+                <div id="runStepsList" style="max-height:260px;overflow-y:auto;display:flex;flex-direction:column;gap:8px"></div>
+                <button type="button" class="btn btn-ghost" id="runAddStep" style="margin-top:8px">+ 添加步骤</button>
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-ghost" id="runCancel">取消</button>
+                <button class="btn btn-primary" id="runLaunch">开始运行</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="runsOverlay">
+        <div class="modal" style="max-width:720px" role="dialog" aria-modal="true" aria-labelledby="runsModalTitle">
+            <div class="modal-head-row">
+                <h3 id="runsModalTitle">运行记录</h3>
+                <button class="icon-btn" id="runsRefresh" title="刷新">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M13.5 8A5.5 5.5 0 1 1 8 2.5c2 0 3.8 1.1 4.8 2.8M13.5 2.3v3.2h-3.2"/></svg>
+                </button>
+            </div>
+            <p style="color:var(--text-tertiary);font-size:13px;margin:4px 0 10px">当前会话的编排运行与派发树；点行展开子任务</p>
+            <div id="runsList" style="max-height:400px;overflow-y:auto"></div>
+            <div class="modal-actions">
+                <button class="btn btn-ghost" id="runsClose">关闭</button>
+            </div>
+        </div>
+    </div>
+
     <div class="modal-overlay" id="pwdOverlay">
         <div class="modal" style="max-width:400px" role="dialog" aria-modal="true" aria-labelledby="pwdModalTitle">
             <h3 id="pwdModalTitle">修改密码</h3>
@@ -381,6 +428,6 @@
         <div style="font-size:13px;color:var(--text-tertiary)">YwMatrix 加载中…</div>
     </div>
     <style>@keyframes ywmspin{to{transform:rotate(360deg)}}</style>
-    <script src="/static/app.js?v=2026090101"></script>
+    <script src="/static/app.js?v=2026090201"></script>
 </body>
 </html>
