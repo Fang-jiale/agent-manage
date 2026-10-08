@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -50,6 +51,45 @@ function testConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
     ...overrides,
   };
 }
+
+test("platform product variants and desktop downloads preserve the legacy catalog", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "ywm-release-test-"));
+  const productsDir = path.join(root, "products");
+  const payload = Buffer.from("fixture package");
+  const sha256 = crypto.createHash("sha256").update(payload).digest("hex");
+  for (const artifact of ["", "win7-x64", "linux-arm64"]) {
+    const dir = path.join(productsDir, "sample", "1.0.0", artifact);
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, "manifest.json"), JSON.stringify({ format: 1, brand: "sample", version: "1.0.0", kind: "stdio", ...(artifact ? { artifact_id: artifact } : {}) }));
+    await fs.writeFile(path.join(dir, "meta.json"), JSON.stringify({ sha256, size: payload.length, uploaded_at: Date.now() }));
+    await fs.writeFile(path.join(dir, "package.tar.gz"), payload);
+  }
+  const releasesDir = path.join(root, "client-releases");
+  await fs.mkdir(releasesDir);
+  await fs.writeFile(path.join(releasesDir, "setup.exe"), payload);
+  await fs.writeFile(path.join(releasesDir, "index.json"), JSON.stringify({ releases: [{ file: "setup.exe", label: "Test client", version: "1.1.0", size: payload.length, sha256, tested: false, target: "win7-x64" }] }));
+  const srv = await startGateway(testConfig({ productsDir }));
+  const base = srv.base.replace(/^ws/, "http");
+  try {
+    const legacy = await (await fetch(base + "/products/catalog")).json() as { products: unknown[] };
+    assert.equal(legacy.products.length, 1);
+    const variants = await (await fetch(base + "/products/catalog?variants=1")).json() as { products: unknown[] };
+    assert.equal(variants.products.length, 3);
+    const download = await fetch(base + "/products/sample/1.0.0/download?artifact=linux-arm64");
+    assert.equal(download.status, 200);
+    assert.equal(download.headers.get("x-checksum-sha256"), sha256);
+    assert.deepEqual(Buffer.from(await download.arrayBuffer()), payload);
+    assert.equal((await fetch(base + "/products/sample/1.0.0/download?artifact=..%2Fescape")).status, 404);
+    assert.equal((await fetch(base + "/clients")).status, 200);
+    const catalog = await (await fetch(base + "/clients/catalog")).json() as { releases: unknown[] };
+    assert.equal(catalog.releases.length, 1);
+    assert.equal((await fetch(base + "/clients/files/setup.exe")).status, 200);
+    assert.equal((await fetch(base + "/clients/files/other.exe")).status, 404);
+  } finally {
+    await srv.close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
 
 interface TestServer {
   base: string;

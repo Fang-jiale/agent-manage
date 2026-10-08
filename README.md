@@ -182,7 +182,7 @@ Agent 注册信息持久化在 `agents` 表（上线 upsert、离线标记、心
   "params": {
     "agent_id": "demo-mac",
     "capabilities": [
-      {"type": "chat", "name": "coding", "description": "编码助手"}
+      {"type": "chat", "name": "coding", "description": "编码智能体"}
     ]
   }
 }

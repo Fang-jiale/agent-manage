@@ -272,7 +272,7 @@ Content-Type: application/json
       {
         "type": "chat",
         "name": "coding",
-        "description": "编码助手，可读写文件、执行命令、分析代码"
+        "description": "编码智能体，可读写文件、执行命令、分析代码"
       }
     ],
     "platform": {
@@ -565,7 +565,7 @@ AgentClient 收到后必须做两件事：
         "name": "张三的 MacBook",
         "status": "online",
         "capabilities": [
-          {"type": "chat", "name": "coding", "description": "编码助手"}
+          {"type": "chat", "name": "coding", "description": "编码智能体"}
         ],
         "platform": {"os": "darwin", "arch": "arm64"}
       }
@@ -651,7 +651,7 @@ Content-Type: application/json
 
 {
   "capabilities": [
-    {"type": "chat", "name": "coding", "description": "编码助手"}
+    {"type": "chat", "name": "coding", "description": "编码智能体"}
   ]
 }
 ```

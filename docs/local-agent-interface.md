@@ -205,14 +205,14 @@
   "method": "lifecycle.register",
   "params": {
     "agent_id": "coding-agent",
-    "name": "代码助手",
+    "name": "代码智能体",
     "version": "1.2.0",
     "description": "帮助用户编写、重构、审查代码",
     "capabilities": [
       {
         "type": "chat",
         "name": "coding",
-        "description": "编码助手，可读写文件、执行命令、分析代码"
+        "description": "编码智能体，可读写文件、执行命令、分析代码"
       }
     ],
     "platform": {
@@ -1072,7 +1072,7 @@ Agent 主动通知非任务相关事件。
 {
   "type": "chat",
   "name": "coding",
-  "description": "编码助手，可读写文件、执行命令、分析代码"
+  "description": "编码智能体，可读写文件、执行命令、分析代码"
 }
 ```
 

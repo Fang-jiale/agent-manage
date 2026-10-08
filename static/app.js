@@ -1,3 +1,5 @@
+import { draftKey, isCompositionKey, DraftStore, indexedDraftPersistence } from './composer.js';
+
         (function() {
             const STORAGE_KEY = 'agent_manage_v1';
             // 会话拆成独立 key 存：消息热路径只序列化当前目标，避免整库 stringify 卡主线程
@@ -19,6 +21,56 @@
             const expandedTargets = new Set(); // 「消息」面板展开显示会话列表的聊天对象 key
             let composerFiles = [];
             const attachmentBlobs = new Map();
+            let composerKey = null;
+            let draftLoading = false;
+            let draftSaveTimer = null;
+            let draftWarningShown = false;
+            let composerVersion = 0;
+            const readingAttachments = new Set();
+            const drafts = new DraftStore(indexedDraftPersistence(window.indexedDB), () => {
+                if (draftWarningShown) return;
+                draftWarningShown = true;
+                showToast('草稿暂时只能保留在当前页面，关闭或刷新前请先保存内容', 'warning', 6000);
+            });
+
+            function currentDraftKey() {
+                return draftKey(state.user?.id, state.currentAgentId, getCurrentSession()?.id);
+            }
+
+            function saveComposer() {
+                clearTimeout(draftSaveTimer);
+                if (!composerKey || draftLoading) return;
+                drafts.write(composerKey, { text: els.messageInput.value, files: composerFiles });
+            }
+
+            function resizeComposer() {
+                els.messageInput.style.height = 'auto';
+                els.messageInput.style.height = Math.min(els.messageInput.scrollHeight, 200) + 'px';
+            }
+
+            function syncComposer() {
+                const key = currentDraftKey();
+                if (key === composerKey) return;
+                saveComposer();
+                composerKey = key;
+                const version = ++composerVersion;
+                composerFiles = [];
+                els.messageInput.value = '';
+                closeCmdMenu();
+                renderAttachStrip();
+                resizeComposer();
+                draftLoading = !!key;
+                if (!key) return;
+                void drafts.read(key).then(draft => {
+                    if (composerKey !== key || composerVersion !== version) return;
+                    els.messageInput.value = draft.text;
+                    composerFiles = draft.files;
+                    draftLoading = false;
+                    renderAttachStrip();
+                    resizeComposer();
+                    updateInputState();
+                });
+            }
 
             /* ---------- attachments ---------- */
 
@@ -31,10 +83,15 @@
                 return (bytes / 1024 / 1024).toFixed(1) + ' MB';
             }
 
-            function addFiles(fileList) {
-                const files = [...fileList];
-                for (const f of files) {
-                    if (composerFiles.length >= ATTACH_MAX_COUNT) {
+            async function addFiles(fileList) {
+                if (!composerKey || draftLoading || sending || readingAttachments.has(composerKey)) return;
+                const key = composerKey;
+                const userId = state.user?.id;
+                const session = getCurrentSession();
+                const accepted = [];
+                let available = ATTACH_MAX_COUNT - composerFiles.length;
+                for (const f of fileList) {
+                    if (available <= 0) {
                         showToast('最多添加 ' + ATTACH_MAX_COUNT + ' 个附件', 'warning');
                         break;
                     }
@@ -42,18 +99,40 @@
                         showToast('「' + f.name + '」超过 2MB 限制', 'warning');
                         continue;
                     }
-                    const reader = new FileReader();
-                    reader.onload = () => {
-                        composerFiles.push({ name: f.name, mime: f.type || 'application/octet-stream', size: f.size, dataUrl: reader.result });
-                        renderAttachStrip();
-                        updateInputState();
-                    };
-                    reader.readAsDataURL(f);
+                    available--;
+                    accepted.push(f);
+                }
+                if (!accepted.length) return;
+                saveComposer();
+                readingAttachments.add(key);
+                updateInputState();
+                try {
+                    const files = await Promise.all(accepted.map(f => new Promise((resolve, reject) => {
+                        const reader = new FileReader();
+                        reader.onload = () => resolve({ name: f.name, mime: f.type || 'application/octet-stream', size: f.size, dataUrl: reader.result });
+                        reader.onerror = () => reject(new Error('无法读取「' + f.name + '」'));
+                        reader.readAsDataURL(f);
+                    })));
+                    const draft = await drafts.read(key);
+                    if (state.user?.id !== userId || !state.sessions[session.agentId]?.[session.id]) return;
+                    // Use the latest draft: users may have switched away and back or
+                    // removed an older attachment while these files were being read.
+                    const active = composerKey === key && !draftLoading;
+                    const nextFiles = [...(active ? composerFiles : draft.files), ...files].slice(0, ATTACH_MAX_COUNT);
+                    drafts.write(key, { text: active ? els.messageInput.value : draft.text, files: nextFiles });
+                    if (active) { composerFiles = nextFiles; renderAttachStrip(); }
+                } catch (error) {
+                    showToast(error.message || '附件读取失败，请重新添加', 'error');
+                } finally {
+                    readingAttachments.delete(key);
+                    updateInputState();
                 }
             }
 
             function removeAttachment(idx) {
+                if (sending) return;
                 composerFiles.splice(idx, 1);
+                saveComposer();
                 renderAttachStrip();
                 updateInputState();
             }
@@ -335,12 +414,12 @@
 
                 const lines = [
                     '# ' + session.title, '',
-                    '> Agent: ' + (agentDisplayName(agent) || session.agentId) +
+                    '> 智能体: ' + (agentDisplayName(agent) || session.agentId) +
                     ' · 导出于 ' + new Date().toLocaleString() +
                     (session.workdir ? ' · 工作目录: ' + session.workdir : ''), ''
                 ];
                 for (const m of session.messages) {
-                    lines.push((m.role === 'user' ? '**我**' : '**Agent**') +
+                    lines.push((m.role === 'user' ? '**我**' : '**智能体**') +
                         ' · ' + formatTime(m.createdAt), '');
                     if (m.role === 'user') {
                         if (m.text) lines.push(m.text);
@@ -463,7 +542,7 @@
                         icon: '<span class="status-dot ' + (a.online ? (a.busy ? 'busy' : 'online') : 'offline') + '"></span>',
                         run: () => selectAgent(a.id)
                     }));
-                if (agents.length) groups.push(['Agent', agents]);
+                if (agents.length) groups.push(['智能体', agents]);
 
                 if (state.currentAgentId) {
                     const sessions = Object.values(getSessionsForAgent(state.currentAgentId))
@@ -888,6 +967,7 @@
                 }, 500);
             }
             window.addEventListener('pagehide', () => {
+                saveComposer();
                 // 只冲刷未落盘的目标(通常 0-1 个),不再全量序列化+孤儿扫描——
                 // 那会阻塞跳转数百毫秒,表现为"点完按钮等一会儿才跳"
                 if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
@@ -980,6 +1060,11 @@
             function setConnectionStatus(status, text) {
                 els.connectionDot.className = 'conn-dot ' + status;
                 els.connectionDot.parentElement.title = text;
+                const banner = document.getElementById('connectionBanner');
+                banner.hidden = status === 'connected' || !state.user;
+                banner.textContent = status === 'connecting'
+                    ? text + ' 可以继续编辑草稿；已有任务将在连接恢复后同步状态。'
+                    : '连接已断开。可以继续编辑草稿，连接恢复后再发送。';
             }
 
             function showToast(message, type = 'info', duration = 3000) {
@@ -1054,10 +1139,11 @@
 
             function isAdmin() { return state.user?.role === 'admin'; }
 
-            // 管理后台对普通用户即个人控制台（我的 Agent/设备密钥/配对码），全员可见
+            // 管理后台对普通用户即个人控制台（我的智能体/设备密钥/配对码），全员可见
             function updateAdminBtn() {
                 els.adminBtn.style.display = state.user ? '' : 'none';
                 els.adminBtn.title = isAdmin() ? '管理后台' : '个人中心';
+                document.getElementById('accountNavLabel').textContent = isAdmin() ? '管理' : '我的';
             }
 
 
@@ -1139,7 +1225,7 @@
                     '<div class="drawer-section"><div class="drawer-section-title">备注名</div>' +
                         '<div class="nickname-row">' +
                             '<input type="text" id="nicknameInput" class="nickname-input" maxlength="256" ' +
-                                'placeholder="' + (a.nickname ? '' : '给这个 Agent 起个备注名（可选）') + '" value="' + escapeAttr(a.nickname || '') + '">' +
+                                'placeholder="' + (a.nickname ? '' : '给这个 智能体 起个备注名（可选）') + '" value="' + escapeAttr(a.nickname || '') + '">' +
                             '<button class="btn btn-primary btn-sm" id="nicknameSaveBtn">保存</button>' +
                         '</div>' +
                         '<div class="nickname-hint">仅自己可见；清空后保存即删除备注</div>' +
@@ -1291,6 +1377,7 @@
                     pruneSessionCapabilities();
                     renderSessions();
                     renderSessionMenu();
+                    if (!getCurrentSession()) renderDashboard();
                 } catch (e) { console.warn('syncAllSessions failed', e); }
             }
 
@@ -1414,16 +1501,20 @@
             }
 
             function updateInputState() {
+                syncComposer();
                 const hasSession = !!getCurrentSession();
-                els.messageInput.disabled = !hasSession || !wsConnected;
-                els.sendBtn.disabled = !hasSession || !wsConnected ||
+                els.messageInput.disabled = !hasSession || draftLoading || sending;
+                const readingFiles = readingAttachments.has(composerKey);
+                els.attachBtn.disabled = !hasSession || draftLoading || sending || readingFiles;
+                els.sendBtn.disabled = !hasSession || !wsConnected || draftLoading || sending || readingFiles ||
                     (!els.messageInput.value.trim() && composerFiles.length === 0);
                 els.stopBtn.disabled = !hasActiveTask();
                 if (!hasSession) {
-                    els.messageInput.placeholder = '先在左侧选择一个 Agent';
+                    els.messageInput.placeholder = '先在左侧选择一个智能体';
                     els.inputHint.textContent = '支持粘贴或拖入图片、文件';
                 } else if (!wsConnected) {
-                    els.messageInput.placeholder = '连接已断开，等待重连…';
+                    els.messageInput.placeholder = '可以继续编辑，连接恢复后发送';
+                    els.inputHint.textContent = '连接恢复后手动发送 · 草稿保存在本机';
                 } else if (isGroupKey(state.currentAgentId)) {
                     const g = groupFromKey(state.currentAgentId);
                     const onlineMembers = g ? g.agentIds.filter(id => state.agents[id]?.online).length : 0;
@@ -1435,8 +1526,8 @@
                         els.inputHint.textContent = '@成员 触发回复 · 支持粘贴或拖入图片、文件';
                     }
                 } else if (state.agents[state.currentAgentId] && !state.agents[state.currentAgentId].online) {
-                    els.messageInput.placeholder = 'Agent 离线，上线后才能发送…';
-                    els.inputHint.textContent = '当前 Agent 不在线 · 上线后将自动恢复';
+                    els.messageInput.placeholder = '智能体 离线，上线后才能发送…';
+                    els.inputHint.textContent = '当前 智能体 不在线 · 上线后将自动恢复';
                 } else {
                     els.messageInput.placeholder = state.settings.sendWith === 'cmd-enter'
                         ? '输入消息，⌘Enter 发送，Enter 换行'
@@ -1470,7 +1561,41 @@
                     setProgress(null);
                 }
                 updateInputState();
+                renderTaskStatus();
+                if (!getCurrentSession()) renderDashboard();
                 persistPendingTasks();
+            }
+
+            function renderTaskStatus() {
+                const status = document.getElementById('taskStatus');
+                const session = getCurrentSession();
+                const tasks = [...pendingTasks.values()].filter(t => !t.done && t.sessionId === session?.id && t.agentId === session?.agentId);
+                const waiting = tasks.find(t => t.waitingForInput);
+                const task = waiting || tasks[0];
+                let label = status.querySelector('span');
+                if (!label) { label = document.createElement('span'); status.append(label); }
+                let button = status.querySelector('button');
+                if (!button) {
+                    button = document.createElement('button');
+                    button.textContent = '查看确认';
+                    button.onclick = () => els.messages.querySelector('.interaction-card:not(.answered)')?.scrollIntoView({ block: 'center' });
+                    status.append(button);
+                }
+                button.hidden = !waiting;
+                status.classList.toggle('waiting', !!waiting);
+                status.hidden = !session;
+                if (!session) return;
+                if (task) {
+                    const duration = task.startTime ? ' · ' + formatDuration(Date.now() - task.startTime) : '';
+                    label.textContent = (waiting ? '等待你确认' : '正在执行') + duration +
+                        (tasks.length > 1 ? ' · ' + tasks.length + ' 个任务进行中' : '') +
+                        (!waiting && typeof task.lastPercentage === 'number' ? ' · ' + Math.round(task.lastPercentage) + '%' : '');
+                } else {
+                    const last = [...session.messages].reverse().find(m => m.role === 'assistant' && m.done);
+                    status.hidden = !last;
+                    if (last) label.textContent = (isFailedMessage(last) ? '上次任务未成功，可在回复处重试' : '上次任务已完成') +
+                        (last.durationMs !== undefined ? ' · ' + formatDuration(last.durationMs) : '');
+                }
             }
 
             // 任务刷新恢复：任务归会话不归连接——网关按 owner 广播进度、
@@ -1572,8 +1697,8 @@
                 });
                 if (ids.length === 0) {
                     els.agentList.innerHTML =
-                        '<div class="empty-hint">暂无 Agent，接入后会显示在这里</div>' +
-                        '<button class="empty-action" id="agentEmptyGo">前往个人中心接入 Agent</button>';
+                        '<div class="empty-hint">暂无智能体，接入后会显示在这里</div>' +
+                        '<button class="empty-action" id="agentEmptyGo">前往个人中心接入 智能体</button>';
                     // 手机新标签(保住聊天页不重载);电脑同页跳转
                     document.getElementById('agentEmptyGo').onclick = () => {
                         if (window.innerWidth <= 768) window.open('/admin', '_blank');
@@ -1694,7 +1819,7 @@
                 if (groups.length === 0) {
                     const btn = document.createElement('button');
                     btn.className = 'empty-action';
-                    btn.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" width="14" height="14"><path d="M8 3v10M3 8h10"/></svg> 新建群组（多 Agent 沟通）';
+                    btn.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" width="14" height="14"><path d="M8 3v10M3 8h10"/></svg> 新建群组（多 智能体 沟通）';
                     btn.onclick = () => openGroupModal(null);
                     els.groupList.appendChild(btn);
                     return;
@@ -1723,7 +1848,7 @@
                                 ? '<span title="管理者 agent：@它 可调度群内其他 agent" style="color:var(--warning)">★ ' + escapeHtml(groupMemberName(g.managerAgentId)) + '</span>'
                                 : '') +
                             ((g.delegateAgentIds || []).length > 0
-                                ? '<span title="授权成员：与管理者一样可调度群内其他 Agent">⚑ ' + (g.delegateAgentIds.length) + ' 授权</span>'
+                                ? '<span title="授权成员：与管理者一样可调度群内其他 智能体">⚑ ' + (g.delegateAgentIds.length) + ' 授权</span>'
                                 : '') + '</div>' +
                         '<div class="chip-row">' + g.agentIds.slice(0, 5).map(id =>
                             '<span class="chip' + (state.agents[id]?.online ? '' : ' chip-off') + '" title="' + escapeAttr(id) + '">' +
@@ -1747,7 +1872,7 @@
                 const agents = Object.values(state.agents);
                 if (group && !group.agentIds) group = null; // 防御：非 group 对象（如事件）按新建处理
                 if (!group && agents.length < 1) {
-                    showToast('暂无可用 Agent，先接入至少一个', 'warning');
+                    showToast('暂无可用 智能体，先接入至少一个', 'warning');
                     return;
                 }
                 groupEditing = group || null;
@@ -1815,7 +1940,7 @@
                 const name = els.groupNameInput.value.trim();
                 const agentIds = [...els.groupMemberList.querySelectorAll('input:checked')].map(i => i.value);
                 if (!name) { showToast('请输入群组名称', 'warning'); return; }
-                if (agentIds.length === 0) { showToast('请至少勾选一个 Agent', 'warning'); return; }
+                if (agentIds.length === 0) { showToast('请至少勾选一个 智能体', 'warning'); return; }
                 // 保存中禁用按钮：编辑路径是串行多条 RPC，双击会建出重复群
                 if (els.groupCreate.disabled) return;
                 els.groupCreate.disabled = true;
@@ -1972,7 +2097,7 @@
                 if (!targets.length) {
                     const btn = document.createElement('button');
                     btn.className = 'empty-action';
-                    btn.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" width="14" height="14"><path d="M8 3v10M3 8h10"/></svg> 选择一个 Agent 开始对话';
+                    btn.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" width="14" height="14"><path d="M8 3v10M3 8h10"/></svg> 选择一个智能体 开始对话';
                     btn.onclick = () => switchSidebarSection('agents');
                     els.sessionList.appendChild(btn);
                     return;
@@ -2495,7 +2620,7 @@
                 if (session.workdir) {
                     return '<span class="chip chip-workdir" id="workdirChip" title="会话工作目录，点击修改：' + escapeAttr(session.workdir) + '">📂 <span class="cw-path">' + escapeHtml(session.workdir) + '</span></span>';
                 }
-                return '<span class="chip chip-workdir" id="workdirChip" style="color:var(--text-tertiary)" title="绑定会话工作目录（Agent 在该目录下干活）">📂 目录</span>';
+                return '<span class="chip chip-workdir" id="workdirChip" style="color:var(--text-tertiary)" title="绑定会话工作目录（智能体 在该目录下干活）">📂 目录</span>';
             }
 
             function bindWorkdirChip() {
@@ -2545,6 +2670,14 @@
                     return;
                 }
                 loadedSessions.delete(session.id);
+                const removedDraft = draftKey(state.user?.id, session.agentId, session.id);
+                if (composerKey === removedDraft) {
+                    clearTimeout(draftSaveTimer);
+                    composerKey = null;
+                    composerFiles = [];
+                    els.messageInput.value = '';
+                }
+                drafts.delete(removedDraft);
                 dropSessionCapabilities(session.agentId, session.id);
                 delete state.sessions[session.agentId][session.id];
                 if (state.currentSessionId === session.id) {
@@ -2575,6 +2708,9 @@
 
             function renderChatHeader() {
                 const session = getCurrentSession();
+                document.getElementById('chatActionsMenu').hidden = !session;
+                document.getElementById('agentDetailsBtn').hidden = !session || isGroupKey(session.agentId);
+                els.searchChatBtn.disabled = !session;
                 if (els.sessionMenuBtn) {
                     els.sessionMenuBtn.style.display = session ? '' : 'none';
                 }
@@ -2582,7 +2718,7 @@
                 els.chatTitle.onclick = null;
                 els.chatTitle.title = '';
                 if (!session) {
-                    els.chatTitle.textContent = '选择一个 Agent 开始对话';
+                    els.chatTitle.textContent = '选择一个智能体 开始对话';
                     els.chatSubtitle.textContent = '';
                     els.headerChips.innerHTML = '';
                     setChatStatusDot(null);
@@ -2617,7 +2753,7 @@
                 const agent = state.agents[session.agentId];
                 els.chatTitle.textContent = agentDisplayName(agent) || session.agentId;
                 els.chatTitle.style.cursor = 'pointer';
-                els.chatTitle.title = '查看 Agent 详情';
+                els.chatTitle.title = '查看 智能体 详情';
                 els.chatTitle.onclick = () => openAgentDrawer(session.agentId);
                 els.chatSubtitle.textContent = session.title + ' · ' + countText;
                 els.typingAvatar.innerHTML = agentAvatarInner(agent);
@@ -2630,13 +2766,8 @@
                     chips.push('<span class="chip" style="color: var(--warning)">待审批</span>');
                 } else {
                     // 状态 chip 常显：在线(绿)/忙碌(黄,脉冲)/离线(灰)，一眼可见
-                    chips.push('<span class="chip chip-status ' + statusClass + '" title="Agent 实时状态">' +
+                    chips.push('<span class="chip chip-status ' + statusClass + '" title="智能体 实时状态">' +
                         '<span class="status-dot ' + statusClass + '"></span>' + statusText + '</span>');
-                }
-                if (agent?.platform?.os) {
-                    chips.push('<span class="chip platform" title="' + escapeAttr(agent.platform.os + ' / ' + (agent.platform.arch || '')) + '">' +
-                        '<span class="chip-platform-icon">' + platformIcon(agent.platform.os) + '</span>' +
-                        escapeHtml(agent.platform.os) + '</span>');
                 }
                 // 当前模型单独成 chip；command 类 capability 是给斜杠菜单用的，不占展示位
                 const model = currentModelOf(agent);
@@ -2645,11 +2776,8 @@
                 }
                 // C7：会话级命令/技能（项目技能）尚在加载
                 if (sessionCapLoading && !sessionCapabilities.has(sessionCapKey(session.agentId, session.id))) {
-                    chips.push('<span class="chip" style="color:var(--text-tertiary)" title="Agent 正在加载本目录的项目命令与技能">⟳ 正在加载项目技能</span>');
+                    chips.push('<span class="chip" style="color:var(--text-tertiary)" title="智能体 正在加载本目录的项目命令与技能">⟳ 正在加载项目技能</span>');
                 }
-                (agent?.capabilities || []).filter(c => c.type !== 'command').slice(0, 5).forEach(c => {
-                    chips.push('<span class="chip" title="' + escapeAttr(c.description || '') + '">' + escapeHtml(c.name || c.type) + '</span>');
-                });
                 chips.push(workdirChipHtml(session));
                 els.headerChips.innerHTML = chips.join('');
                 bindWorkdirChip();
@@ -2668,9 +2796,38 @@
                 const slot = h < 6 ? '夜深了' : h < 12 ? '早上好' : h < 14 ? '中午好' : h < 18 ? '下午好' : h < 23 ? '晚上好' : '夜深了';
                 const name = currentUserName();
                 els.dashGreeting.textContent = name ? (slot + '，' + name) : '欢迎使用 YwMatrix';
+                const onboarding = agents.length === 0;
+                document.getElementById('dashOnboarding').hidden = !onboarding;
+                document.getElementById('dashDescription').textContent = onboarding
+                    ? '先连接你的终端，再把任务交给 智能体。'
+                    : '继续上次的对话，或选择一个在线智能体 开始新任务。';
+                els.dashStats.hidden = onboarding;
+                document.getElementById('dashRecentTitle').hidden = onboarding;
+                els.dashRecent.hidden = onboarding;
+                const sessions = Object.values(state.sessions).flatMap(byAgent => Object.values(byAgent))
+                    .filter(s => state.agents[s.agentId] || groupFromKey(s.agentId))
+                    .sort((a, b) => b.updatedAt - a.updatedAt);
+                const continueButton = document.getElementById('dashContinue');
+                continueButton.hidden = !sessions.length;
+                continueButton.onclick = () => {
+                    const recentSession = sessions[0];
+                    state.currentAgentId = recentSession.agentId;
+                    selectSession(recentSession.id);
+                };
+                const taskList = document.getElementById('dashTasks');
+                taskList.replaceChildren();
+                [...pendingTasks.values()].filter(t => !t.done)
+                    .sort((a, b) => Number(!!b.waitingForInput) - Number(!!a.waitingForInput)).slice(0, 4).forEach(task => {
+                        const button = document.createElement('button');
+                        button.className = 'dash-task';
+                        button.textContent = (task.waitingForInput ? '待确认 · ' : '运行中 · ') +
+                            (state.sessions[task.agentId]?.[task.sessionId]?.title || agentDisplayName(state.agents[task.agentId]) || '任务');
+                        button.onclick = () => { state.currentAgentId = task.agentId; selectSession(task.sessionId); };
+                        taskList.append(button);
+                    });
 
                 const cards = [
-                    { icon: ICONS.cpu, num: online + ' / ' + agents.length, lbl: '在线 Agent' },
+                    { icon: ICONS.cpu, num: online + ' / ' + agents.length, lbl: '在线智能体' },
                     { icon: ICONS.activity, num: busy, lbl: '忙碌中' },
                     { icon: ICONS.chat, num: sessionCount, lbl: '会话总数' }
                 ];
@@ -2688,7 +2845,7 @@
                     .sort((a, b) => (b.online ? 1 : 0) - (a.online ? 1 : 0) || (b.lastHeartbeat || 0) - (a.lastHeartbeat || 0))
                     .slice(0, 4);
                 if (recent.length === 0) {
-                    els.dashRecent.innerHTML = '<div class="dash-recent-empty">暂无 Agent，可前往个人中心接入，或用配对码连接 AgentClient</div>';
+                    els.dashRecent.innerHTML = '<div class="dash-recent-empty">暂无智能体，可前往个人中心接入，或用配对码连接 AgentClient</div>';
                 } else {
                     els.dashRecent.innerHTML = recent.map(a => {
                         const status = a.online ? (a.busy ? 'busy' : 'online') : 'offline';
@@ -2714,7 +2871,9 @@
 
             function renderChat(preserveScroll = false, forceBottom = false) {
                 const session = getCurrentSession();
+                document.querySelector('.input-area').hidden = !session;
                 renderChatHeader();
+                renderTaskStatus();
                 if (!session) {
                     els.emptyState.style.display = 'flex';
                     renderDashboard();
@@ -2882,7 +3041,7 @@
                     avatar.style.color = '#fff';
                 } else {
                     const agent = state.agents[msg.agentId];
-                    const agentName = agent?.name || msg.agentId || 'Agent';
+                    const agentName = agent?.name || msg.agentId || '智能体';
                     avatar.innerHTML = agentAvatarInner(agent);
                     avatar.style.background = avatarColor(String(agentName));
                     avatar.style.color = '#fff';
@@ -2896,8 +3055,8 @@
                 // 编排子任务徽标：实时来自 progress.parent_task_id；历史按 task_id 含 @ 推断（fan-out 是 #）
                 const delegated = msg.delegated || (typeof msg.taskId === 'string' && msg.taskId.includes('@'));
                 meta.innerHTML = '<span class="message-author">' + (msg.role === 'user' ? '我'
-                    : escapeHtml(agentDisplayName(state.agents[msg.agentId]) || msg.agentId || 'Agent')) + '</span>' +
-                    (delegated ? '<span class="message-delegated" title="编排子任务：由管理者 Agent 派发">派发</span>' : '') +
+                    : escapeHtml(agentDisplayName(state.agents[msg.agentId]) || msg.agentId || '智能体')) + '</span>' +
+                    (delegated ? '<span class="message-delegated" title="编排子任务：由管理者 智能体 派发">派发</span>' : '') +
                     '<span class="message-time" title="' + new Date(msg.createdAt).toLocaleString() + '">' + formatTime(msg.createdAt) + '</span>' +
                     (msg.durationMs !== undefined
                         ? '<span class="message-duration">耗时 ' + formatDuration(msg.durationMs) + '</span>'
@@ -2987,7 +3146,7 @@
                 return !!msg.errorText || (msg.chunks || []).some(c => c.type === 'error');
             }
 
-            // 会话内最后一条已完成的助手消息才提供"重新生成"，中间消息重新生成会与后续历史矛盾。
+            // 会话内最后一条已完成的智能体消息才提供"重新生成"，中间消息重新生成会与后续历史矛盾。
             // 只扫本会话（renderMessage 传入），避免对每条可见消息全局找会话的线性扫
             function isLastDoneAssistant(msg, session) {
                 const msgs = (session || getCurrentSession())?.messages;
@@ -2998,7 +3157,7 @@
                 return false;
             }
 
-            // 失败重试 / 重新生成共用：从失败/最后一条助手消息回溯到最近的用户消息，原样重发任务
+            // 失败重试 / 重新生成共用：从失败/最后一条智能体消息回溯到最近的用户消息，原样重发任务
             function retryAssistantMessage(msg) {
                 const found = findSessionMessage(msg.id);
                 if (!found) return;
@@ -3012,7 +3171,7 @@
                 showToast('未找到对应的用户消息，无法重试', 'warning');
             }
 
-            // 基于已存在的用户消息重发任务：不追加用户消息，新开一条助手消息承接流式回复
+            // 基于已存在的用户消息重发任务：不追加用户消息，新开一条智能体消息承接流式回复
             async function regenerateReply(session, userMsg) {
                 if (!ws || ws.readyState !== WebSocket.OPEN) {
                     showToast('连接已断开，无法发送', 'error');
@@ -3027,7 +3186,7 @@
                 const agent = state.agents[session.agentId];
                 const group = groupFromKey(session.agentId);
                 if (!group && agent && !agent.online) {
-                    showToast('Agent 不在线，无法发送', 'warning');
+                    showToast('智能体 不在线，无法发送', 'warning');
                     return;
                 }
                 const text = userMsg.text || '';
@@ -3509,7 +3668,7 @@
             // 交互卡片终态：chunk 级 answered/cancelled（网关随任务落库）优先，
             // message.answered 仅兼容旧 localStorage 数据
             const CANCEL_REASON_TEXT = {
-                task_cancelled: '任务取消', interrupted: '被中断', agent_exited: 'Agent 退出', 'task ended': '任务结束'
+                task_cancelled: '任务取消', interrupted: '被中断', agent_exited: '智能体 退出', 'task ended': '任务结束'
             };
             function chunkResolveState(chunk, msg) {
                 if (chunk.cancelled) {
@@ -4025,7 +4184,7 @@
 
             async function newSession() {
                 if (!state.currentAgentId) {
-                    showToast('请先选择一个 Agent', 'warning');
+                    showToast('请先选择一个智能体', 'warning');
                     return;
                 }
                 try {
@@ -4320,7 +4479,7 @@
                 renderSessions(); // 列表头像角标跟随状态刷新
                 updateInputState();
                 if (!state.currentAgentId && list.length > 0) {
-                    selectAgent(list[0].id);
+                    renderChat();
                 } else if (state.currentAgentId && !next[state.currentAgentId]) {
                     // current agent disappeared; keep view but mark offline
                     renderChatHeader();
@@ -4337,12 +4496,12 @@
                     agent.online = true;
                     agent.busy = false;
                     state.agents[agentId] = agent;
-                    showToast('Agent 上线：' + agentDisplayName(agent), 'success');
+                    showToast('智能体 上线：' + agentDisplayName(agent), 'success');
                 } else if (params.event === 'unregister' || params.event === 'offline') {
                     if (state.agents[agentId]) {
                         state.agents[agentId].online = false;
                         state.agents[agentId].busy = false;
-                        showToast('Agent 离线：' + agentDisplayName(state.agents[agentId]), 'warning');
+                        showToast('智能体 离线：' + agentDisplayName(state.agents[agentId]), 'warning');
                     }
                 }
                 saveState();
@@ -4583,7 +4742,7 @@
             /* C1 会话级 capability 快照：key = agentId + '\n' + sessionId。
                仅存内存层（session 关闭/删除即清理），同 type/name 与全局层冲突时会话层优先。 */
             const sessionCapabilities = new Map();
-            // C7：session 打开后等待项目技能加载；15s 未收到会话级快照视为该 Agent 不做分阶段上报
+            // C7：session 打开后等待项目技能加载；15s 未收到会话级快照视为该 智能体 不做分阶段上报
             let sessionCapLoading = false;
             let sessionCapTimer = null;
 
@@ -4798,18 +4957,23 @@
             // 重入守卫：附件上传/RPC 期间再按 Enter 不许二次发送（按钮虽禁用，键盘路径仍会进来）
             let sending = false;
             async function sendMessage() {
-                if (sending) return;
+                if (sending || draftLoading || readingAttachments.has(composerKey)) return;
                 sending = true;
+                updateInputState();
                 try {
                     await doSendMessage();
                 } finally {
                     sending = false;
+                    renderAttachStrip();
+                    updateInputState();
                 }
             }
 
             async function doSendMessage() {
                 const text = els.messageInput.value.trim();
-                const files = composerFiles;
+                const files = [...composerFiles];
+                const sentDraftKey = composerKey;
+                const sentUserId = state.user?.id;
                 if (!text && files.length === 0) return;
                 const session = getCurrentSession();
                 if (!session) return;
@@ -4819,7 +4983,7 @@
                 }
                 const agent = state.agents[session.agentId];
                 if (agent && !agent.online) {
-                    showToast('Agent 不在线，无法发送', 'warning');
+                    showToast('智能体 不在线，无法发送', 'warning');
                     return;
                 }
                 // 群聊缺 @ 提前拦截，避免用户消息落库后再回滚
@@ -4846,6 +5010,7 @@
                         if (rm) rm.style.display = 'none';
                     });
                     const updateProgress = (idx, ratio) => {
+                        if (composerKey !== sentDraftKey) return;
                         const it = els.attachStrip.children[idx];
                         if (!it) return;
                         const fill = it.querySelector('.attach-progress-fill');
@@ -4858,12 +5023,13 @@
                     if (uploaded.some(u => !u)) showToast('附件存储不可用，已内嵌发送', 'warning');
                 }
 
+                if (state.user?.id !== sentUserId || !getSessionsForAgent(session.agentId)[session.id]) return;
                 if (session.messages.length === 0) {
                     session.title = autoTitle(text || files[0].name);
                     rpcCall('session.rename', { id: session.id, title: session.title })
                         .catch(e => console.warn('auto rename failed', e));
                 }
-                session.messageCount = (session.messageCount ?? 0) + 2; // 用户消息 + 即将完成的助手消息
+                session.messageCount = (session.messageCount ?? 0) + 2; // 用户消息 + 即将完成的智能体消息
                 const history = session.messages.slice(-10).map(m => ({
                     role: m.role,
                     content: m.role === 'user'
@@ -4884,11 +5050,15 @@
                     attachments: msgAttachments.length ? msgAttachments : undefined,
                     createdAt: Date.now()
                 });
-                composerFiles = [];
-                renderAttachStrip();
-                els.messageInput.value = '';
-                els.messageInput.style.height = 'auto';
-                closeCmdMenu();
+                drafts.delete(sentDraftKey);
+                if (composerKey === sentDraftKey) {
+                    clearTimeout(draftSaveTimer);
+                    composerFiles = [];
+                    renderAttachStrip();
+                    els.messageInput.value = '';
+                    els.messageInput.style.height = 'auto';
+                    closeCmdMenu();
+                }
 
                 const metadata = {};
                 const slashCmd = parseSlashCommand(text, agent);
@@ -5062,7 +5232,7 @@
                         return;
                     }
                     const data = await res.json();
-                    // 换账号登录：清掉上一账号的本地缓存（会话/群组/Agent），
+                    // 换账号登录：清掉上一账号的本地缓存（会话/群组/智能体），
                     // 否则同浏览器切换账号会把别人的会话串显进来
                     const prevUserId = state.user?.id;
                     state.token = data.token;
@@ -5271,6 +5441,26 @@
                 });
                 els.clearChatBtn.addEventListener('click', clearCurrentSession);
                 els.deleteSessionBtn.addEventListener('click', deleteCurrentSession);
+                document.getElementById('newChatBtn').addEventListener('click', newSession);
+                const showDashboard = () => {
+                    state.currentAgentId = null;
+                    state.currentSessionId = null;
+                    saveState();
+                    renderSessions();
+                    renderChat();
+                    syncChatChrome();
+                    setSidebarOpen(false);
+                };
+                document.getElementById('homeBtn').addEventListener('click', showDashboard);
+                document.getElementById('dashboardBtn').addEventListener('click', showDashboard);
+                document.getElementById('agentDetailsBtn').addEventListener('click', () => openAgentDrawer(state.currentAgentId));
+                const actionMenu = document.getElementById('chatActionsMenu');
+                actionMenu.addEventListener('click', e => {
+                    if (e.target.closest('button')) actionMenu.open = false;
+                });
+                document.addEventListener('click', e => {
+                    if (!actionMenu.contains(e.target)) actionMenu.open = false;
+                });
                 els.searchChatBtn.addEventListener('click', () => toggleChatSearch());
                 els.exportChatBtn.addEventListener('click', exportSession);
                 els.chatSearchClose.addEventListener('click', () => toggleChatSearch(false));
@@ -5296,6 +5486,7 @@
                 els.stopBtn.addEventListener('click', stopCurrentTask);
 
                 els.messageInput.addEventListener('keydown', e => {
+                    if (isCompositionKey(e)) return;
                     // 斜杠命令菜单打开时优先响应导航键，Enter/Tab 选中而不是发送
                     if (cmdMenu.open) {
                         if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
@@ -5328,11 +5519,14 @@
                     }
                 });
                 els.messageInput.addEventListener('input', () => {
+                    clearTimeout(draftSaveTimer);
+                    draftSaveTimer = setTimeout(saveComposer, 250);
                     updateInputState();
                     updateCmdMenu();
                     els.messageInput.style.height = 'auto';
                     els.messageInput.style.height = Math.min(els.messageInput.scrollHeight, 200) + 'px';
                 });
+                els.messageInput.addEventListener('blur', saveComposer);
 
                 els.attachBtn.addEventListener('click', () => els.fileInput.click());
                 els.fileInput.addEventListener('change', () => {
@@ -5441,6 +5635,7 @@
                         if (state.currentAgentId) newSession();
                     }
                     if (e.key === 'Escape') {
+                        document.getElementById('chatActionsMenu').open = false;
                         els.lightbox.classList.remove('open');
                         toggleSessionMenu(false);
                         closeDrawer();
@@ -5458,6 +5653,7 @@
 
                 els.paletteInput.addEventListener('input', () => renderPalette(els.paletteInput.value));
                 els.paletteInput.addEventListener('keydown', (e) => {
+                    if (isCompositionKey(e)) return;
                     if (e.key === 'ArrowDown') {
                         e.preventDefault();
                         setPaletteIndex(Math.min(paletteIndex + 1, paletteItems.length - 1));
@@ -5567,6 +5763,11 @@
                 renderSessions();
                 renderChat(false, true);
                 updateInputState();
+                setInterval(() => {
+                    if (!document.hidden && hasActiveTask()) {
+                        renderTaskStatus();
+                    }
+                }, 1000);
                 // 心跳等相对时间标签每分钟刷新一次
                 setInterval(() => {
                     if (document.hidden) return; // 后台标签页不空转，回前台事件会触发别的刷新兜底
@@ -5614,4 +5815,3 @@
                 navigator.serviceWorker.register('/sw.js').catch(e => console.warn('sw register failed', e));
             }
         })();
-    

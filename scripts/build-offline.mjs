@@ -12,6 +12,13 @@ const BUNDLE = path.join(ROOT, "dist", "bundle");
 const STATIC = path.join(ROOT, "static");
 const RUNTIME = path.join(ROOT, "dist", "offline", "runtime");
 const OUT = path.join(ROOT, "dist", "offline", "packages");
+// 服务端单独发布时复用桌面构建中已按 runtime-lock 校验的 Node 22。
+// 先运行：node scripts/build-desktop.mjs linux-x64-web
+const serverOnly = process.argv.includes("--server-only");
+const serverRuntime = serverOnly
+  ? path.join(ROOT, "dist", "desktop-resources", "linux-x64-web", "core", "runtime")
+  : path.join(RUNTIME, "linux-x64");
+const serverNodeMajor = serverOnly ? 22 : 18;
 
 const GATEWAY_SERVICE = `[Unit]
 Description=YwMatrix Gateway
@@ -41,17 +48,17 @@ Environment=AGENT_MANAGE_ADMIN_PASSWORD=CHANGE_ME
 WantedBy=multi-user.target
 `;
 
-const SERVER_INSTALL = `# YwMatrix 网关离线安装包（Linux x86_64，自带 Node 18 运行时）
+const SERVER_INSTALL = `# YwMatrix 网关离线安装包（Linux x86_64，自带 Node ${serverNodeMajor} 运行时）
 
 ## 内容
 
 \`\`\`
-bin/gateway.mjs   网关单文件（全部依赖已打入，Node >= 18 即可运行）
+bin/gateway.mjs   网关单文件（全部依赖已打入，使用随包运行时即可）
 bin/login.mjs     命令行登录取 JWT 的小工具
 bin/client.mjs    AgentClient（网关机上也要跑 agent 时用）
 bin/local-agent.mjs  示例本地 Agent（demo/联调用）
 static/           管理页面（网关按相对路径 ../static 引用，勿移动）
-runtime/node      Node.js 18 linux-x64 运行时（系统已有 Node >= 18 可不用）
+runtime/node      Node.js ${serverNodeMajor} linux-x64 运行时
 ywmatrix-gateway.service   systemd 服务模板
 \`\`\`
 
@@ -99,7 +106,7 @@ curl http://127.0.0.1:8080/healthz     # {"status":"ok",...} 即就绪
 
 ## 说明
 
-- 系统若已装 Node（>= 18），可把 service 里 ExecStart 的 runtime/node 改为 /usr/bin/node。
+- 推荐使用随包运行时，无需联网安装 Node 或 npm 依赖。
 - 防火墙放行终端到服务器 8080 入站；单机部署无需 Redis。
 - 生产建议加 Nginx/Caddy 反代终结 TLS：放行 WebSocket Upgrade 头、client_max_body_size 32m、proxy_read_timeout 3600s。
 - 运维端点：GET /healthz（就绪探针）、GET /metrics（Prometheus 指标）。
@@ -259,13 +266,22 @@ function mustExist(p) {
 }
 
 for (const f of ["gateway.mjs", "client.mjs", "local-agent.mjs", "login.mjs"]) mustExist(path.join(BUNDLE, f));
-for (const r of ["linux-x64/node", "linux-arm64/node", "win-x64/node.exe"]) mustExist(path.join(RUNTIME, r));
+mustExist(path.join(serverRuntime, "node"));
+if (!serverOnly) {
+  for (const r of ["linux-x64/node", "linux-arm64/node", "win-x64/node.exe"]) mustExist(path.join(RUNTIME, r));
+}
 
 // ---- 服务端（Linux x64）----
 const server = assemble("ywmatrix-server-linux-x64", [
   (d) => { for (const f of ["gateway.mjs", "client.mjs", "local-agent.mjs", "login.mjs"]) cp(path.join(BUNDLE, f), path.join(d, "bin", f)); },
   (d) => { for (const f of fs.readdirSync(STATIC)) cp(path.join(STATIC, f), path.join(d, "static", f)); },
-  (d) => cp(path.join(RUNTIME, "linux-x64", "node"), path.join(d, "runtime", "node")),
+  (d) => {
+    cp(path.join(serverRuntime, "node"), path.join(d, "runtime", "node"));
+    fs.chmodSync(path.join(d, "runtime", "node"), 0o755);
+    for (const f of ["LICENSE", "SOURCE.json"]) {
+      if (fs.existsSync(path.join(serverRuntime, f))) cp(path.join(serverRuntime, f), path.join(d, "runtime", f));
+    }
+  },
   (d) => write(path.join(d, "ywmatrix-gateway.service"), GATEWAY_SERVICE),
   (d) => write(path.join(d, "INSTALL.md"), SERVER_INSTALL),
   // 工行 AAM 统一认证桥（SDK jar 由现场放入 aam/ 后按其 README 编译）
@@ -276,6 +292,14 @@ const server = assemble("ywmatrix-server-linux-x64", [
     }
   },
 ]);
+
+if (serverOnly) {
+  execFileSync("tar", [...(process.platform === "darwin" ? ["--no-xattrs"] : []), "-czf", `${server}.tar.gz`, "-C", OUT, path.basename(server)], {
+    stdio: "inherit", env: { ...process.env, COPYFILE_DISABLE: "1" },
+  });
+  console.log("Built server offline package:", `${server}.tar.gz`);
+  process.exit(0);
+}
 
 // ---- 客户端（Linux x64 / arm64，Windows x64）----
 function clientFiles(runtimeRel, readme, isWin) {

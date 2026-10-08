@@ -4,7 +4,7 @@ import http from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import { readFileSync, existsSync, promises as fsp } from "node:fs";
-import { spawn } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
 import * as proto from "./protocol.ts";
@@ -14,6 +14,9 @@ import { StdioAdapter } from "./adapters/stdio.ts";
 import { WSAdapter } from "./adapters/ws.ts";
 import { extractTarGz } from "./tar.ts";
 import type { LocalAgentAdapter, LocalAgentEvent } from "./adapters/types.ts";
+import { normalizeGateway, gatewayBase } from "./client/gateway-url.ts";
+import { ActivityStore } from "./client/activity.ts";
+import { productCompatible, type ProductTarget } from "./product-platform.ts";
 
 // 本机覆盖：字符串 = stdio 启动命令（旧格式）；对象 = {conn_type, target}
 type LaunchOverride = string | { conn_type?: string; target?: string };
@@ -44,7 +47,7 @@ interface ConnectorFileConfig {
   products_dir?: string;
 }
 
-function loadClientConfig(): ClientConfig {
+function loadClientConfig(args = process.argv.slice(2)): ClientConfig {
   const defaultConfigPath = path.join(os.homedir(), ".agent-manage", "connector.json");
   const specs = [
     // gateway 默认空：优先级 CLI > 环境变量 > 配置文件 > 内置默认
@@ -62,7 +65,7 @@ function loadClientConfig(): ClientConfig {
     { name: "log-level", type: "string" as const, default: envString("AGENT_MANAGE_LOG_LEVEL", "info") },
     { name: "task-timeout", type: "duration" as const, default: String(envDurationMs("AGENT_MANAGE_TASK_TIMEOUT", 7_200_000)) },
   ];
-  const values = parseFlags(specs);
+  const values = parseFlags(specs, args);
   if (values["token"] !== "" && values["key"] !== "") {
     console.error("-token 与 -key 只能二选一");
     process.exit(1);
@@ -76,7 +79,7 @@ function loadClientConfig(): ClientConfig {
     } catch { /* 文件不存在或损坏：按无配置处理 */ }
   }
 
-  const gateway = values["gateway"] || fileCfg.gateway || "ws://localhost:8080/ws/agent";
+  const gateway = normalizeGateway(values["gateway"] || fileCfg.gateway || "ws://localhost:8080/ws/agent");
   const pairCode = values["pair"];
   let connectorID = values["connector-id"] || fileCfg.connector_id || "";
   let deviceKey = values["key"] || fileCfg.key || "";
@@ -641,6 +644,13 @@ interface HostState {
 }
 
 interface LocalUIState {
+  pairing: { status: "idle" | "connecting" | "pending" | "failed" | "done"; error?: string };
+  activities?: ActivityStore;
+  catalogWarning?: string;
+  operation?: { id: string; response: http.ServerResponse };
+  cancelPair?: () => void;
+  restartRequested?: boolean;
+  disconnect?: () => void;
   connected: boolean;
   lastSync: proto.ConnectorSyncAgent[]; // 最近一次全量目标集
   hosted: Map<string, HostedAgent> | undefined;
@@ -656,6 +666,7 @@ interface LocalUIState {
 
 function newLocalUIState(): LocalUIState {
   return {
+    pairing: { status: "idle" },
     connected: false,
     lastSync: [],
     hosted: undefined,
@@ -860,13 +871,21 @@ async function mainConnector(cfg: ClientConfig, connectorID: string, ui: LocalUI
   const creds = { token: cfg.token, key: cfg.deviceKey };
 
   let interrupted = false;
-  process.on("SIGINT", () => {
+  const interrupt = () => {
     interrupted = true;
-  });
-  // SIGTERM（kill 默认信号）同样走优雅退出：否则 stdio 子进程全部变孤儿
-  process.on("SIGTERM", () => {
-    interrupted = true;
-  });
+    currentWS?.close(1000);
+    for (const timer of retryTimers.values()) clearTimeout(timer);
+    retryTimers.clear();
+    for (const h of hosted.values()) { h.tasks.cancelAll(); h.adapter.close(); }
+    for (const brand of [...localRuns.keys()]) stopLocalRun(brand);
+  };
+  const waitForRetry = async (delay: number) => {
+    const until = Date.now() + delay;
+    while (!interrupted && Date.now() < until) await sleep(Math.min(200, until - Date.now()));
+  };
+  ui.disconnect = interrupt;
+  process.on("SIGINT", interrupt);
+  process.on("SIGTERM", interrupt);
 
   let reconnectDelay = 1000;
   let openedAt = 0;
@@ -878,7 +897,7 @@ async function mainConnector(cfg: ClientConfig, connectorID: string, ui: LocalUI
     if (interrupted) break;
     if (!ws) {
       logger.warn("dial failed", { retry_in: `${reconnectDelay}ms` });
-      await backoffSleep(reconnectDelay);
+      await waitForRetry(reconnectDelay);
       reconnectDelay = Math.min(reconnectDelay * 2, 30_000);
       continue;
     }
@@ -1066,17 +1085,22 @@ async function mainConnector(cfg: ClientConfig, connectorID: string, ui: LocalUI
       // 被同 connector_id 的新实例顶替：退出而不是重连，避免两个实例互踢
       logger.error("replaced by a newer instance (duplicate connector_id), exiting");
       for (const id of [...hosted.keys()]) await dropAgent(id);
+      process.removeListener("SIGINT", interrupt);
+      process.removeListener("SIGTERM", interrupt);
       return true;
     }
     // 连接曾稳定运行才重置退避；刚连上就断（网关重启循环）保持退避，避免热循环
     if (openedAt > 0 && Date.now() - openedAt > 30_000) reconnectDelay = 1000;
     logger.info("connection lost, reconnecting...");
     for (const h of hosted.values()) h.tasks.cancelAll();
-    await backoffSleep(reconnectDelay);
+    await waitForRetry(reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 2, 30_000);
   }
 
   for (const id of [...hosted.keys()]) await dropAgent(id);
+  process.removeListener("SIGINT", interrupt);
+  process.removeListener("SIGTERM", interrupt);
+  ui.disconnect = undefined;
   return false;
 }
 
@@ -1129,6 +1153,7 @@ function sendJSON(res: http.ServerResponse, status: number, body: unknown): void
 //   products/<brand>/manifest.json 当前版本 manifest 副本（列表展示用）
 
 interface ProductManifest {
+  targets?: ProductTarget[];
   format: number;
   brand: string; // 品牌 slug，同时作目录名
   version: string; // semver
@@ -1262,6 +1287,7 @@ function installProduct(buf: Buffer, filename: string, sha256?: string | null,
     const manifest = (manifestOverride
       ? JSON.parse(JSON.stringify(manifestOverride)) as ProductManifest
       : JSON.parse(fs.readFileSync(manifestPath, "utf8")) as ProductManifest);
+    if (!productCompatible(manifest, process.platform, process.arch, os.release())) throw new Error("此安装包不支持本机系统或 CPU 架构");
     if (manifest.format !== 1) throw new Error("不支持的 manifest format: " + String(manifest.format));
     if (!validBrandSlug(manifest.brand)) throw new Error("manifest.brand 非法: " + String(manifest.brand));
     if (!validVersion(manifest.version)) throw new Error("manifest.version 需要 semver（如 1.0.0）: " + String(manifest.version));
@@ -1303,9 +1329,7 @@ function uninstallProduct(brand: string): void {
 
 // cfg.gateway(ws(s)://host:port/ws/agent)→HTTP 基址（产品目录/下载走 HTTP）
 function gatewayHttpBase(gateway: string): string {
-  const m = /^(wss?):\/\/([^/?#]+)/.exec(gateway.trim());
-  if (!m) throw new Error("网关地址无法解析: " + gateway);
-  return (m[1] === "wss" ? "https" : "http") + "://" + m[2];
+  return gatewayBase(gateway);
 }
 
 // 连网关并完成首帧认证：凭证走第一条 auth 消息而非 URL query——
@@ -1321,7 +1345,7 @@ async function dialGateway(gateway: string, creds: { token: string; key: string 
 
   const tryDial = async (url: URL, firstFrame: boolean): Promise<WebSocket | null> => {
     const ws = await new Promise<WebSocket | null>((resolve) => {
-      const conn = new WebSocket(url.toString());
+      const conn = new WebSocket(url.toString(), { handshakeTimeout: 8000 });
       conn.once("open", () => resolve(conn));
       conn.once("error", () => resolve(null));
     });
@@ -1457,9 +1481,9 @@ async function fetchRemotePackage(cfg: ClientConfig, brand: string, version: str
       throw new Error("网关为明文 http 且非本机地址：拒绝下载产品包（请改用 wss:// 网关地址）");
     }
   }
-  const cr = await fetch(base + "/products/catalog", { signal: AbortSignal.timeout(8000) });
+  const cr = await fetch(base + "/products/catalog?variants=1", { signal: AbortSignal.timeout(8000) });
   const catalog = cr.ok ? ((await cr.json()) as { products?: Array<Record<string, unknown>> }).products || [] : [];
-  const entry = catalog.find(x => x.brand === brand && x.version === version);
+  const entry = catalog.find(x => x.brand === brand && x.version === version && productCompatible((x.manifest || {}) as ProductManifest, process.platform, process.arch, os.release()));
   if (!entry) throw new Error("网关目录里没有 " + brand + " " + version);
   const sha256 = typeof entry.sha256 === "string" ? entry.sha256 : "";
   if (!/^[0-9a-f]{64}$/i.test(sha256)) {
@@ -1468,7 +1492,8 @@ async function fetchRemotePackage(cfg: ClientConfig, brand: string, version: str
   // 缓冲上限：目录声明 size + 1MB 余量；目录没给 size 时退 512MB 硬顶（与服务端上传上限一致）
   const expectedSize = typeof entry.size === "number" && entry.size > 0 ? entry.size : 0;
   const sizeCap = expectedSize > 0 ? expectedSize + 1024 * 1024 : 512 * 1024 * 1024;
-  const dr = await fetch(base + "/products/" + brand + "/" + version + "/download", { signal: AbortSignal.timeout(300_000) });
+  const variant = entry.artifact_id ? "?artifact=" + encodeURIComponent(String(entry.artifact_id)) : "";
+  const dr = await fetch(base + "/products/" + brand + "/" + version + "/download" + variant, { signal: AbortSignal.timeout(300_000) });
   if (!dr.ok) throw new Error("下载失败（HTTP " + dr.status + "）");
   if (!dr.body) throw new Error("下载响应无 body");
   const reader = dr.body.getReader();
@@ -1545,6 +1570,10 @@ function startLocalRun(brand: string): { running: boolean; log_path: string; err
   return { running: true, log_path: logPath };
 }
 
+export function stopLocalProducts(): void {
+  for (const brand of [...localRuns.keys()]) stopLocalRun(brand);
+}
+
 function stopLocalRun(brand: string): void {
   const r = localRuns.get(brand);
   if (!r) throw new Error("该产品没有在本地运行");
@@ -1559,7 +1588,7 @@ function stopLocalRun(brand: string): void {
   const killGroup = (sig: NodeJS.Signals): void => {
     if (!pid) return;
     try {
-      if (process.platform === "win32") r.child.kill(sig);
+      if (process.platform === "win32") execFile(path.join(process.env.SystemRoot || "C:\\Windows", "System32", "taskkill.exe"), ["/PID", String(pid), "/T", "/F"], { windowsHide: true }, () => {});
       else process.kill(-pid, sig);
     } catch { /* ESRCH：组已全部退出 */ }
   };
@@ -1645,10 +1674,14 @@ async function buildProductCatalog(cfg: ClientConfig, ui: LocalUIState): Promise
   const base = gatewayHttpBase(cfg.gateway);
   // 远程包目录（网关不可达时降级为空）
   let remote: Array<Record<string, unknown>> = [];
+  ui.catalogWarning = undefined;
   try {
-    const r = await fetch(base + "/products/catalog", { signal: AbortSignal.timeout(8000) });
-    if (r.ok) remote = ((await r.json()) as { products?: Array<Record<string, unknown>> }).products || [];
-  } catch { /* 离线：只展示本机 */ }
+    if (cfg.deviceKey || cfg.token) {
+      const r = await fetch(base + "/products/catalog?variants=1", { signal: AbortSignal.timeout(8000) });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      remote = ((await r.json()) as { products?: Array<Record<string, unknown>> }).products || [];
+    } else ui.catalogWarning = "尚未连接组织，可先安装管理员提供的离线包。";
+  } catch { ui.catalogWarning = "组织产品目录暂不可达，当前仅展示本机产品。请检查连接后重试。"; }
   // 品牌身份（连着网关才有；logo 相对路径补成网关绝对地址）
   let brands: proto.BrandInfo[] = [];
   try {
@@ -1667,7 +1700,8 @@ async function buildProductCatalog(cfg: ClientConfig, ui: LocalUIState): Promise
     if (b.disabled) continue;
     seen.add(b.name);
     const inst = installed.find(p => p.brand === b.name);
-    const pkg = remote.filter(e => e.brand === b.name).sort((x, y) => String(y.updated_at).localeCompare(String(x.updated_at)))[0];
+    const available = remote.filter(e => e.brand === b.name && productCompatible((e.manifest || {}) as ProductManifest, process.platform, process.arch, os.release()));
+    const pkg = available.sort((x, y) => String(y.updated_at).localeCompare(String(x.updated_at)))[0];
     // 实例判断细分：有实例，且其生效命令落在 products/<brand>/ 内 = 接的是产品目录这份；
     // 有实例但命令在外部（仓库目录/手动指定）= 外部命令接入，不受安装器管理
     const instances = ui.lastSync.filter(a => a.brand_id === b.id);
@@ -1687,6 +1721,8 @@ async function buildProductCatalog(cfg: ClientConfig, ui: LocalUIState): Promise
       installed_version: inst?.version || null,
       remote_version: pkg ? String(pkg.version) : null,
       remote_size: pkg ? pkg.size : null,
+      platform_verified: !!(pkg?.manifest as ProductManifest | undefined)?.targets,
+      incompatible: !pkg && remote.some(e => e.brand === b.name),
       has_instance: instances.length > 0,
       instance_from_install: fromInstall,
       runtime_version: runtimeVersion,
@@ -1722,6 +1758,11 @@ function startLocalUI(addr: string, cfg: ClientConfig, ui: LocalUIState): http.S
   const server = http.createServer((req, res) => {
     void handleUIRequest(req, res, cfg, ui).catch((e) => {
       sendJSON(res, 500, { error: e instanceof Error ? e.message : String(e) });
+    }).finally(() => {
+      if (ui.operation?.response === res) {
+        ui.activities?.update(ui.operation.id, res.statusCode < 400 ? "操作完成" : "操作失败，请查看界面提示后重试", res.statusCode < 400 ? "done" : "failed");
+        ui.operation = undefined;
+      }
     });
   });
   let stopped = false;
@@ -1740,7 +1781,12 @@ function startLocalUI(addr: string, cfg: ClientConfig, ui: LocalUIState): http.S
     }
     logger.error("本地管理页监听失败", { addr, error: String(e) });
   });
-  server.listen(port, host, () => logger.info("本地管理页已启动", { url: `http://${host}:${port}` }));
+  server.listen(port, host, () => {
+    const address = server.address();
+    const actualPort = typeof address === "object" && address ? address.port : port;
+    logger.info("本地管理页已启动", { url: `http://${host}:${actualPort}` });
+    process.send?.({ type: "client.ready", port: actualPort });
+  });
   return server;
 }
 
@@ -1752,6 +1798,11 @@ async function handleUIRequest(
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
   const p = url.pathname;
+  const desktopToken = process.env.AGENT_MANAGE_UI_TOKEN;
+  if (desktopToken && req.headers["x-ywm-client-token"] !== desktopToken) {
+    sendJSON(res, 403, { error: "本地桌面会话无效" });
+    return;
+  }
   // 回环边界校验（本地管理页能触发下载/换目录/起进程，不能只靠"绑了 127.0.0.1"）：
   // 1) Host 只认本机——防 DNS rebinding（他人域名解析到 127.0.0.1 后直连本页）；
   // 2) 带 Origin 的请求必须是回环 origin——防恶意网页跨站 fetch 本机 API；
@@ -1783,6 +1834,13 @@ async function handleUIRequest(
       sendJSON(res, 415, { error: "Content-Type 不被接受（application/json）" });
       return;
     }
+  }
+  if (["POST", "DELETE"].includes(req.method || "") && p.startsWith("/api/products/")) {
+    if (ui.operation) { sendJSON(res, 409, { error: "另一项安装操作正在进行，请在活动记录中查看进度" }); return; }
+    const active = [...(ui.hosted?.values() ?? [])].some(agent => agent.tasks.size() > 0);
+    if (active) { sendJSON(res, 409, { error: "当前有任务正在执行，请等待任务完成后再安装、更新或卸载" }); return; }
+    const id = ui.activities?.start(p.endsWith("/install-remote") ? "下载并安装智能体" : p.endsWith("/instantiate") ? "启用智能体" : p.endsWith("/install") ? "离线安装智能体" : "管理智能体");
+    if (id) ui.operation = { id, response: res };
   }
   if (req.method === "GET" && (p === "/" || p === "/index.html")) {
     const html = await fsp.readFile(uiPagePath(), "utf8");
@@ -1816,8 +1874,38 @@ async function handleUIRequest(
       connector_id: cfg.connectorID,
       config_path: cfg.configPath,
       products_dir: productsRoot(),
+      gateway_base: gatewayHttpBase(cfg.gateway),
+      pairing: ui.pairing,
+      platform: { os: goOS(), arch: goArch() },
+      hostname: os.hostname(),
+      active_tasks: [...(ui.hosted?.values() ?? [])].reduce((n, agent) => n + agent.tasks.size(), 0),
       agents,
     });
+    return;
+  }
+  if (req.method === "GET" && p === "/api/activities") {
+    sendJSON(res, 200, { activities: ui.activities?.list() ?? [] });
+    return;
+  }
+  if (req.method === "POST" && p === "/api/pair/cancel") {
+    ui.cancelPair?.();
+    sendJSON(res, 200, { status: "cancelled" });
+    return;
+  }
+  if (req.method === "POST" && p === "/api/connection/reset") {
+    if (ui.operation || [...(ui.hosted?.values() ?? [])].some(agent => agent.tasks.size() > 0)) {
+      sendJSON(res, 409, { error: "请先等待安装或任务完成，再更换组织" }); return;
+    }
+    if (!ui.disconnect) { sendJSON(res, 409, { error: "当前无需重置；请使用接入表单" }); return; }
+    // Preserve the previous connection for recovery without displaying credentials.
+    if (existsSync(cfg.configPath)) {
+      await fsp.copyFile(cfg.configPath, cfg.configPath + ".previous");
+      await fsp.chmod(cfg.configPath + ".previous", 0o600);
+    }
+    await fsp.writeFile(cfg.configPath, JSON.stringify({ products_dir: cfg.productsDir }), { mode: 0o600 });
+    ui.restartRequested = true;
+    sendJSON(res, 200, { status: "restarting" });
+    ui.disconnect();
     return;
   }
   if (req.method === "PUT" && p === "/api/settings/products-dir") {
@@ -1835,6 +1923,10 @@ async function handleUIRequest(
     return;
   }
   if (req.method === "POST" && p === "/api/pair") {
+    if (["connecting", "pending"].includes(ui.pairing.status)) {
+      sendJSON(res, 409, { error: "已有接入请求正在处理中" });
+      return;
+    }
     if (!ui.pairAndConnect) {
       sendJSON(res, 409, { error: `已完成配置；如需重新接入请删除 ${cfg.configPath} 后重启` });
       return;
@@ -1845,12 +1937,18 @@ async function handleUIRequest(
       sendJSON(res, 400, { error: "code required" });
       return;
     }
-    await ui.pairAndConnect(
-      String(body.gateway ?? "").trim(),
-      code,
-      String(body.connector_id ?? "").trim() || undefined,
-    );
-    sendJSON(res, 200, { status: "ok" });
+    const gateway = normalizeGateway(String(body.gateway ?? ""));
+    ui.pairing = { status: "connecting" };
+    const pairingActivity = ui.activities?.start("连接组织");
+    void ui.pairAndConnect(gateway, code, String(body.connector_id ?? "").trim() || undefined)
+      .then(() => {
+        ui.pairing = { status: "done" };
+        if (pairingActivity) ui.activities?.update(pairingActivity, "接入成功", "done");
+      }).catch((error) => {
+        ui.pairing = { status: "failed", error: error.message || "接入失败" };
+        if (pairingActivity) ui.activities?.update(pairingActivity, "接入失败", "failed", ui.pairing.error);
+      });
+    sendJSON(res, 202, { status: "connecting" });
     return;
   }
   if (req.method === "GET" && p === "/api/brands") {
@@ -1935,7 +2033,8 @@ async function handleUIRequest(
   // 统一产品目录：品牌 × 远程包 × 本机安装 × 本地运行 一张表
   if (req.method === "GET" && p === "/api/product-catalog") {
     try {
-      sendJSON(res, 200, { gateway: gatewayHttpBase(cfg.gateway), products: await buildProductCatalog(cfg, ui) });
+      const products = await buildProductCatalog(cfg, ui);
+      sendJSON(res, 200, { gateway: gatewayHttpBase(cfg.gateway), products, warning: ui.catalogWarning });
     } catch (e) {
       sendJSON(res, 500, { error: e instanceof Error ? e.message : String(e) });
     }
@@ -2029,21 +2128,16 @@ async function handleUIRequest(
     const brand = mir[1];
     const version = mir[2];
     try {
-      const base = gatewayHttpBase(cfg.gateway);
-      const cr = await fetch(base + "/products/catalog", { signal: AbortSignal.timeout(8000) });
-      const catalog = cr.ok ? ((await cr.json()) as { products?: Array<Record<string, unknown>> }).products || [] : [];
-      const entry = catalog.find(x => x.brand === brand && x.version === version);
-      if (!entry) throw new Error("网关目录里没有 " + brand + " " + version);
-      const dr = await fetch(base + "/products/" + brand + "/" + version + "/download",
-        { signal: AbortSignal.timeout(300_000) });
-      if (!dr.ok) throw new Error("下载失败（HTTP " + dr.status + "）");
-      const buf = Buffer.from(await dr.arrayBuffer());
+      if (ui.operation) ui.activities?.update(ui.operation.id, "下载与校验安装包");
+      const { buf, entry } = await fetchRemotePackage(cfg, brand, version);
+      if (ui.operation) ui.activities?.update(ui.operation.id, "解包并安装");
       const installed = installProduct(buf, brand + "-" + version + ".tar.gz",
         typeof entry.sha256 === "string" ? entry.sha256 : null,
         entry.manifest as Record<string, unknown> | undefined);
       // 同品牌已有实例 → override 自动指到新目录（connector sync 后自动重启到新版本）。
       // 重指向依赖网关 WS，失败不影响安装结果
       const repointed: string[] = [];
+      if (ui.operation) ui.activities?.update(ui.operation.id, "更新智能体配置");
       const manifest = entry.manifest as unknown as ProductManifest;
       const ov = overrideTargetFor(manifest, installed.install_dir);
       if (ov) {
@@ -2184,13 +2278,16 @@ async function handleUIRequest(
 
 // ---- 配对模式：凭一次性配对码换设备密钥，落盘后进入 connector 模式 ----
 
-async function runPairing(cfg: ClientConfig): Promise<void> {
+async function runPairing(cfg: ClientConfig, ui?: LocalUIState): Promise<void> {
   const gatewayURL = new URL(cfg.gateway);
   gatewayURL.searchParams.set("pair", "1");
   logger.info("pairing with gateway", { url: cfg.gateway, connector_id: cfg.connectorID });
 
   const ws = new WebSocket(gatewayURL.toString());
   const key = await new Promise<string>((resolve, reject) => {
+    if (ui) ui.cancelPair = () => { reject(new Error("已取消接入")); ws.close(); };
+    const connectTimer = setTimeout(() => reject(new Error("连接网关超时，请检查组织地址及网络")), 30_000);
+    ws.once("close", () => clearTimeout(connectTimer));
     ws.once("open", () => {
       safeSend(ws, proto.newRequest("pair-1", proto.METHOD_CONNECTOR_PAIR, {
         code: cfg.pairCode,
@@ -2219,6 +2316,8 @@ async function runPairing(cfg: ClientConfig): Promise<void> {
         }
         const r = (msg.result ?? {}) as proto.ConnectorPairResult;
         if (r.status === "pending") {
+          clearTimeout(connectTimer);
+          if (ui) ui.pairing = { status: "pending" };
           logger.info("配对请求已受理，等待管理员在后台审批...", { connector_id: cfg.connectorID });
         }
       }
@@ -2227,7 +2326,7 @@ async function runPairing(cfg: ClientConfig): Promise<void> {
       reject(new Error(`connection closed (${code}): ${reason.toString() || "no reason"}`));
     });
     ws.on("error", (e) => reject(e));
-  });
+  }).finally(() => { if (ui) ui.cancelPair = undefined; ws.close(); });
 
   // 凭证到手：写配置文件（0600），之后零参数启动
   cfg.deviceKey = key;
@@ -2236,18 +2335,19 @@ async function runPairing(cfg: ClientConfig): Promise<void> {
   ws.close();
 }
 
-async function main(): Promise<void> {
-  const cfg = loadClientConfig();
+export async function runClient(args = process.argv.slice(2)): Promise<void> {
+  const cfg = loadClientConfig(args);
   setLogLevel(cfg.logLevel);
   setProductsRoot(cfg.productsDir);
 
   // 本地管理页：无论是否已配置都先起来
   const ui = newLocalUIState();
+  ui.activities = new ActivityStore(path.join(path.dirname(cfg.configPath), "activity.json"));
   const uiServer = cfg.uiAddr !== "off" ? startLocalUI(cfg.uiAddr, cfg, ui) : undefined;
 
   // 配对模式：凭码换密钥并落盘，随后直接进入 connector 模式
   if (cfg.pairCode !== "") {
-    await runPairing(cfg);
+    await runPairing(cfg, ui);
   } else if (cfg.connectorID === "" && cfg.deviceKey === "" && cfg.token === "" && cfg.agentID === "") {
     // 未配置：本地页已可访问，等页面配对完成后继续
     logger.info("未配置接入信息，请在本地管理页完成配对", { config: cfg.configPath });
@@ -2256,7 +2356,7 @@ async function main(): Promise<void> {
         if (gateway) cfg.gateway = gateway;
         cfg.connectorID = connectorID ?? os.hostname();
         cfg.pairCode = code;
-        await runPairing(cfg); // 失败抛错给页面，可重试
+        await runPairing(cfg, ui); // 失败抛错给页面，可重试
         resolve();
       };
     });
@@ -2266,9 +2366,13 @@ async function main(): Promise<void> {
   // connector 模式：只起服务，agent 由页面分配
   if (cfg.connectorID !== "") {
     const replaced = await mainConnector(cfg, cfg.connectorID, ui);
-    uiServer?.close();
+    for (const brand of [...localRuns.keys()]) stopLocalRun(brand);
+    if (uiServer) {
+      await new Promise<void>(resolve => { uiServer.close(() => resolve()); uiServer.closeIdleConnections(); });
+    }
     // 被顶替属异常退出（非 0），让 supervisor/日志能看到双实例冲突
     if (replaced) process.exit(1);
+    if (ui.restartRequested) return runClient(args);
     return;
   }
   if (cfg.agentID === "") {
@@ -2431,7 +2535,7 @@ async function main(): Promise<void> {
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
-  main().catch((err) => {
+  runClient().catch((err) => {
     logger.error("client failed", { error: err instanceof Error ? err.message : String(err) });
     process.exit(1);
   });

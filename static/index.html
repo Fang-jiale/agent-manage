@@ -18,28 +18,34 @@
 <body>
     <div id="app">
         <nav class="side-rail" id="sideRail">
-            <div class="rail-logo" title="YwMatrix"><img class="logo-svg" src="/static/logo.svg" alt=""></div>
+            <button class="rail-logo" id="homeBtn" title="返回工作台" aria-label="返回工作台"><img class="logo-svg" src="/static/logo.svg" alt=""></button>
             <button class="rail-item" data-section="sessions" title="消息">
                 <span class="rail-icon-wrap">
                     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 3.5h11v8h-6L4 14v-2.5H2.5z" stroke-linejoin="round"/></svg>
                     <span class="rail-badge" id="railUnreadBadge"></span>
                 </span>
+                <span class="rail-label">消息</span>
             </button>
-            <button class="rail-item" data-section="agents" title="Agent">
+            <button class="rail-item" data-section="agents" title="智能体">
                 <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="3" width="11" height="9" rx="1.5"/><path d="M5.5 6.5L7.5 8l-2 1.5M9 10h2"/></svg>
+                <span class="rail-label">智能体</span>
             </button>
             <button class="rail-item" data-section="groups" title="群组">
                 <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="6" cy="5.5" r="2.2"/><path d="M2.5 13c.5-2.3 1.9-3.5 3.5-3.5s3 1.2 3.5 3.5"/><circle cx="11.5" cy="6.5" r="1.7"/><path d="M11 9.8c1.5.2 2.4 1.3 2.8 3.2"/></svg>
+                <span class="rail-label">群组</span>
             </button>
             <div class="rail-spacer"></div>
             <div class="rail-conn" id="railConn" title="未连接"><span class="conn-dot" id="connectionDot"></span></div>
             <button class="icon-btn rail-item" id="adminBtn" title="管理后台" style="display:none">
                 <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg>
+                <span class="rail-label" id="accountNavLabel">管理</span>
             </button>
             <a class="icon-btn rail-item" href="/docs" target="_blank" title="使用文档">
                 <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 3.2c1.2-.7 2.4-.7 3.5 0v9.6c-1.1-.7-2.3-.7-3.5 0zM13.5 3.2c-1.2-.7-2.4-.7-3.5 0v9.6c1.1-.7 2.3-.7 3.5 0zM8 2.7v10.6" stroke-linejoin="round"/></svg>
+                <span class="rail-label">文档</span>
             </a>
             <button class="icon-btn rail-item" id="settingsBtn" title="设置">
+                <span class="rail-label">设置</span>
                 <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="2"/><path d="M13.3 8a5.3 5.3 0 0 0-.1-1.1l1.4-1.1-1.4-2.4-1.6.7a5.3 5.3 0 0 0-1.9-1.1L9.4 1.5H6.6l-.3 1.5a5.3 5.3 0 0 0-1.9 1.1l-1.6-.7-1.4 2.4 1.4 1.1a5.3 5.3 0 0 0 0 2.2l-1.4 1.1 1.4 2.4 1.6-.7a5.3 5.3 0 0 0 1.9 1.1l.3 1.5h2.8l.3-1.5a5.3 5.3 0 0 0 1.9-1.1l1.6.7 1.4-2.4-1.4-1.1c.06-.36.1-.72.1-1.1z" stroke-linejoin="round"/></svg>
             </button>
         </nav>
@@ -53,13 +59,13 @@
                     <div id="sessionList"></div>
                 </div>
                 <div class="sidebar-panel" id="panelAgents">
-                    <div class="section-label">Agent</div>
+                    <div class="section-label">智能体</div>
                     <div id="agentList"></div>
                 </div>
                 <div class="sidebar-panel" id="panelGroups">
                     <div class="section-label">
                         群组
-                        <button class="icon-btn" id="newGroupBtn" title="新建群组（多 Agent 沟通）">
+                        <button class="icon-btn" id="newGroupBtn" title="新建群组（多 智能体 沟通）">
                             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 3v10M3 8h10"/></svg>
                         </button>
                     </div>
@@ -79,7 +85,7 @@
                 <div class="header-info">
                     <div class="header-title-row">
                         <span class="status-dot" id="chatStatusDot" style="display:none"></span>
-                        <span class="header-title" id="chatTitle">选择一个 Agent 开始对话</span>
+                        <span class="header-title" id="chatTitle">选择一个智能体 开始对话</span>
                         <button class="icon-btn session-menu-btn" id="sessionMenuBtn" title="切换历史会话" style="display:none">
                             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 6l4 4 4-4" stroke-linecap="round" stroke-linejoin="round"/></svg>
                         </button>
@@ -91,17 +97,21 @@
                     <button class="icon-btn" id="searchChatBtn" title="搜索当前会话">
                         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg>
                     </button>
-                    <button class="icon-btn" id="exportChatBtn" title="导出会话为 Markdown">
-                        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 2v8M4.5 6.5L8 10l3.5-3.5M3 13.5h10"/></svg>
-                    </button>
-                    <button class="icon-btn" id="clearChatBtn" title="清空当前会话消息">
-                        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 5h10M6 5V3h4v2M5 5l.5 8h5l.5-8"/></svg>
-                    </button>
-                    <button class="icon-btn" id="deleteSessionBtn" title="删除当前会话">
-                        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M4 4l8 8M12 4l-8 8"/></svg>
-                    </button>
+                    <details class="chat-actions-menu" id="chatActionsMenu">
+                        <summary class="icon-btn" aria-label="更多会话操作" title="更多会话操作">•••</summary>
+                        <div class="chat-actions-popover">
+                            <button id="newChatBtn">新建会话</button>
+                            <button id="dashboardBtn">返回工作台</button>
+                            <button id="agentDetailsBtn">查看 智能体 详情</button>
+                            <button id="exportChatBtn">导出 Markdown</button>
+                            <hr>
+                            <button class="danger" id="clearChatBtn">清空会话消息…</button>
+                            <button class="danger" id="deleteSessionBtn">删除会话…</button>
+                        </div>
+                    </details>
                 </div>
             </header>
+            <div class="connection-banner" id="connectionBanner" role="status" hidden></div>
 
             <div class="chat-search" id="chatSearch">
                 <input type="text" id="chatSearchInput" placeholder="搜索当前会话的消息…">
@@ -125,18 +135,29 @@
                     <div class="empty-state" id="emptyState">
                         <div class="empty-mark brand-mark"><img class="logo-svg" style="width:48px;height:48px" src="/static/logo.svg" alt=""></div>
                         <h3 id="dashGreeting">欢迎使用 YwMatrix</h3>
-                        <p class="dash-sub">选择左侧 Agent 开始对话，或试试下面这些任务。</p>
+                        <p class="dash-sub" id="dashDescription">选择一个智能体，开始你的第一段对话。</p>
+                        <div class="onboarding" id="dashOnboarding" hidden>
+                            <ol>
+                                <li><strong>连接终端</strong><span>在个人中心生成配对码，连接你的电脑。</span></li>
+                                <li><strong>准备 智能体</strong><span>完成接入审批并添加 智能体 实例。</span></li>
+                                <li><strong>开始对话</strong><span>智能体 上线后，即可发送任务并查看结果。</span></li>
+                            </ol>
+                            <a class="btn btn-primary" href="/admin#connect">接入第一台设备</a>
+                            <a class="onboarding-help" href="/docs#quickstart" target="_blank">查看接入指南</a>
+                        </div>
+                        <div class="dash-tasks" id="dashTasks"></div>
                         <div class="dash-grid" id="dashStats"></div>
                         <div class="dash-section-title">快速开始</div>
                         <div class="dash-actions">
+                            <button class="btn btn-primary" id="dashContinue" hidden>继续最近会话</button>
                             <button class="suggestion-chip" id="dashPickAgent">
-                                <span class="sc-icon"></span>选择在线 Agent
+                                <span class="sc-icon"></span>选择在线智能体
                             </button>
                             <button class="suggestion-chip" id="dashPalette">
                                 <span class="sc-icon"></span>⌘K 命令面板
                             </button>
                         </div>
-                        <div class="dash-section-title">最近活跃 Agent</div>
+                        <div class="dash-section-title" id="dashRecentTitle">我的智能体</div>
                         <div class="dash-recent" id="dashRecent"></div>
                     </div>
                     <div id="messages"></div>
@@ -152,6 +173,7 @@
                     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 3v10M3.5 8.5L8 13l4.5-4.5"/></svg>
                 </button>
                 <div class="input-inner">
+                    <div class="task-status" id="taskStatus" aria-live="off" hidden></div>
                     <div class="progress-track" id="progressTrack"><div class="progress-fill" id="progressFill"></div></div>
                     <div class="attach-strip" id="attachStrip"></div>
                     <div class="cmd-menu" id="cmdMenu" hidden></div>
@@ -191,7 +213,7 @@
     <div class="modal-overlay" id="groupOverlay">
         <div class="modal" style="max-width:420px" role="dialog" aria-modal="true" aria-labelledby="groupModalTitle">
             <h3 id="groupModalTitle">新建群组</h3>
-            <p style="color:var(--text-tertiary);font-size:13px;margin:4px 0 10px">勾选你的 Agent 加入群组；@管理者 可让它调度群内其他 Agent 帮你干活</p>
+            <p style="color:var(--text-tertiary);font-size:13px;margin:4px 0 10px">勾选你的 智能体 加入群组；@管理者 可让它调度群内其他 智能体 帮你干活</p>
             <input type="text" id="groupNameInput" placeholder="群组名称" style="width:100%;box-sizing:border-box;margin-bottom:10px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text)">
             <div id="groupMemberList" style="max-height:220px;overflow-y:auto;margin-bottom:10px"></div>
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
@@ -199,7 +221,7 @@
                 <select id="groupManagerSelect" style="flex:1;padding:6px 8px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text)"></select>
             </div>
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
-                <span style="font-size:13px;color:var(--text-secondary)" title="授权成员与管理者一样可调度群内其他 Agent（多级编排）">授权成员</span>
+                <span style="font-size:13px;color:var(--text-secondary)" title="授权成员与管理者一样可调度群内其他 智能体（多级编排）">授权成员</span>
                 <select id="groupDelegateSelect" multiple
                     style="flex:1;min-height:56px;padding:4px 8px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:13px"
                     title="按住 Ctrl/Cmd 可多选；不选 = 无授权"></select>
@@ -214,7 +236,7 @@
     <div class="modal-overlay" id="workdirOverlay">
         <div class="modal" style="max-width:460px" role="dialog" aria-modal="true" aria-labelledby="workdirModalTitle">
             <h3 id="workdirModalTitle">会话工作目录</h3>
-            <p style="color:var(--text-tertiary);font-size:13px;margin:4px 0 10px">绑定后本会话的每条消息都会以 <code>metadata.workdir</code> 带给 Agent，Agent 在该目录下干活；留空则跟随 Agent 实例的启动目录</p>
+            <p style="color:var(--text-tertiary);font-size:13px;margin:4px 0 10px">绑定后本会话的每条消息都会以 <code>metadata.workdir</code> 带给 智能体，智能体 在该目录下干活；留空则跟随 智能体 实例的启动目录</p>
             <p id="workdirLockHint" style="display:none;color:var(--warning);font-size:13px;margin:-4px 0 10px">本会话已发出任务，目录已绑定：保存不同目录将自动创建新会话并切换过去</p>
             <input type="text" id="workdirInput" placeholder="/path/to/project" spellcheck="false" style="width:100%;box-sizing:border-box;margin-bottom:12px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-family:var(--mono)">
             <div class="modal-actions">
@@ -352,9 +374,9 @@
     </div>
 
     <div class="drawer-overlay" id="drawerOverlay"></div>
-    <aside class="agent-drawer" id="agentDrawer" role="dialog" aria-modal="true" aria-label="Agent 详情">
+    <aside class="agent-drawer" id="agentDrawer" role="dialog" aria-modal="true" aria-label="智能体 详情">
         <div class="drawer-head">
-            <span>Agent 详情</span>
+            <span>智能体 详情</span>
             <button class="icon-btn" id="drawerClose" title="关闭">
                 <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M4 4l8 8M12 4l-8 8"/></svg>
             </button>
@@ -364,7 +386,7 @@
 
     <div class="palette-overlay" id="paletteOverlay">
         <div class="palette" role="dialog" aria-modal="true" aria-label="命令面板">
-            <input class="palette-input" id="paletteInput" placeholder="搜索会话、Agent，或输入命令…">
+            <input class="palette-input" id="paletteInput" placeholder="搜索会话、智能体，或输入命令…">
             <div class="palette-list" id="paletteList"></div>
             <div class="palette-footer">↑↓ 选择 · Enter 执行 · Esc 关闭</div>
         </div>
@@ -388,19 +410,19 @@
                 <div class="login-brand-inner">
                     <div class="login-brand-logo"><img class="logo-svg" style="width:60px;height:60px" src="/static/logo.svg" alt=""></div>
                     <h1 class="login-brand-title">YwMatrix</h1>
-                    <p class="login-brand-tag">统一远程管理员工终端 Agent</p>
+                    <p class="login-brand-tag">统一远程管理员工终端 智能体</p>
                     <ul class="login-features">
                         <li>
                             <span class="lf-icon"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M5.5 6.5L8 8.5l-2.5 2M9 11h2.5"/></svg></span>
-                            <div><div class="lf-t">多终端 Agent 远程接入</div><div class="lf-d">Windows · Linux · 麒麟，统一管控</div></div>
+                            <div><div class="lf-t">多终端 智能体 远程接入</div><div class="lf-d">Windows · Linux · 麒麟，统一管控</div></div>
                         </li>
                         <li>
                             <span class="lf-icon"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M8 1.8l5 1.9v4.1c0 3.1-2.2 5.2-5 6.4-2.8-1.2-5-3.3-5-6.4V3.7z"/><path d="M5.5 8.2l1.9 1.9 3.2-3.6"/></svg></span>
-                            <div><div class="lf-t">按用户隔离 + 设备密钥</div><div class="lf-d">每个员工只看到自己名下的 Agent</div></div>
+                            <div><div class="lf-t">按用户隔离 + 设备密钥</div><div class="lf-d">每个员工只看到自己名下的 智能体</div></div>
                         </li>
                         <li>
                             <span class="lf-icon"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 8h3l1.5-5 3 10 1.5-5h3.5"/></svg></span>
-                            <div><div class="lf-t">实时进度 + 流式响应</div><div class="lf-d">JSON-RPC over WebSocket，可中断</div></div>
+                            <div><div class="lf-t">执行过程实时可见</div><div class="lf-d">随时查看进度，需要时停止任务</div></div>
                         </li>
                     </ul>
                     <div class="login-brand-foot">© YwMatrix</div>
@@ -410,14 +432,14 @@
                 <div class="login-form-inner">
                     <div class="login-form-logo brand-mark"><img class="logo-svg" style="width:44px;height:44px" src="/static/logo.svg" alt=""></div>
                     <h2>欢迎回来</h2>
-                    <p class="login-form-sub">登录以管理你的终端 Agent</p>
+                    <p class="login-form-sub">登录以管理你的终端 智能体</p>
                     <form class="login-form" onsubmit="return false">
                         <input type="text" id="nameInput" placeholder="用户名" autocomplete="username">
                         <input type="password" id="passwordInput" placeholder="密码" autocomplete="current-password">
                         <button class="btn btn-primary" id="loginBtn" type="submit">登录</button>
                         <button class="btn btn-ghost" id="oidcLoginBtn" type="button" style="display:none">使用统一认证登录</button>
                     </form>
-                    <div class="login-hint">使用管理员分配的账号登录，每个用户只能看到自己名下的 Agent · <a href="/docs" target="_blank" style="color:var(--accent)">使用文档</a></div>
+                    <div class="login-hint">使用管理员分配的账号登录，每个用户只能看到自己名下的 智能体 · <a href="/docs" target="_blank" style="color:var(--accent)">使用文档</a></div>
                 </div>
             </div>
         </div>
@@ -428,6 +450,6 @@
         <div style="font-size:13px;color:var(--text-tertiary)">YwMatrix 加载中…</div>
     </div>
     <style>@keyframes ywmspin{to{transform:rotate(360deg)}}</style>
-    <script src="/static/app.js?v=2026090201"></script>
+    <script type="module" src="/static/app.js?v=2026090801"></script>
 </body>
 </html>

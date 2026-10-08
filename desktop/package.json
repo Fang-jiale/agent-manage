@@ -1,0 +1,15 @@
+{
+  "name": "ywmatrix-desktop",
+  "version": "1.1.2",
+  "description": "YwMatrix desktop client",
+  "author": "YwMatrix",
+  "private": true,
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "44.4.3",
+    "electron-builder": "26.15.3"
+  }
+}

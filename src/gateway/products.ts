@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import type { Db } from "../db.ts";
 import { logger } from "../util.ts";
 import { readTarEntry } from "../tar.ts";
+import { validateTargets } from "../product-platform.ts";
 
 // ---- 产品分发目录（安装包仓库）：data/products/<brand>/<version>/{manifest.json,package.tar.gz,meta.json} ----
 
@@ -15,6 +16,7 @@ export interface ProductCatalogEntry {
   sha256: string;
   size: number;
   updated_at: number;
+  artifact_id?: string;
 }
 
 export function validProductBrand(s: string): boolean {
@@ -29,16 +31,19 @@ export function validateProductManifest(m: Record<string, unknown>): Record<stri
   if (typeof m.brand !== "string" || !validProductBrand(m.brand)) throw new Error("manifest.brand 非法");
   if (typeof m.version !== "string" || !validProductVersion(m.version)) throw new Error("manifest.version 需要 semver（如 1.0.0）");
   if (typeof m.kind !== "string" || !["stdio", "http", "ws", "web", "app"].includes(m.kind)) throw new Error("manifest.kind 非法");
+  validateTargets(m.targets);
+  if (m.artifact_id !== undefined && (typeof m.artifact_id !== "string" || !validProductBrand(m.artifact_id))) throw new Error("artifact_id 非法");
   return m;
 }
 
 // 安全路径拼接：brand/version 白名单字符校验后再 join
-export function productDirPath(root: string, brand: string, version: string): string | null {
+export function productDirPath(root: string, brand: string, version: string, artifact?: string | null): string | null {
   if (!validProductBrand(brand) || !validProductVersion(version)) return null;
-  return path.join(root, brand, version);
+  if (artifact && !validProductBrand(artifact)) return null;
+  return artifact ? path.join(root, brand, version, artifact) : path.join(root, brand, version);
 }
-export function productPackagePath(root: string, brand: string, version: string): string | null {
-  const dir = productDirPath(root, brand, version);
+export function productPackagePath(root: string, brand: string, version: string, artifact?: string | null): string | null {
+  const dir = productDirPath(root, brand, version, artifact);
   return dir ? path.join(dir, "package.tar.gz") : null;
 }
 
@@ -66,7 +71,9 @@ export function scanProductCatalog(root: string): ProductCatalogEntry[] {
         .filter(e => e.isDirectory() && validProductVersion(e.name));
     } catch { continue; }
     for (const v of versions) {
-      const dir = path.join(root, b.name, v.name);
+      const versionDir = path.join(root, b.name, v.name);
+      const directories = [versionDir, ...fs.readdirSync(versionDir, { withFileTypes: true }).filter(e => e.isDirectory() && validProductBrand(e.name)).map(e => path.join(versionDir, e.name))];
+      for (const dir of directories) {
       try {
         const manifest = JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf8")) as Record<string, unknown>;
         const meta = readProductMeta(dir);
@@ -78,8 +85,10 @@ export function scanProductCatalog(root: string): ProductCatalogEntry[] {
           sha256: meta.sha256,
           size: meta.size,
           updated_at: meta.uploaded_at,
+          ...(dir !== versionDir ? { artifact_id: path.basename(dir) } : {}),
         });
       } catch { /* 坏条目跳过 */ }
+      }
     }
   }
   out.sort((x, y) => x.brand.localeCompare(y.brand) || (x.updated_at - y.updated_at));
@@ -99,7 +108,7 @@ export async function publishProductPackage(root: string, buf: Buffer, filename:
   if (db && !(await db.getBrandByName(brand))) {
     throw new Error("品牌「" + brand + "」不存在：请先在品牌管理创建同名品牌，再上传产品包");
   }
-  const dir = path.join(root, brand, version);
+  const dir = productDirPath(root, brand, version, manifest.artifact_id as string | undefined)!;
   if (fs.existsSync(path.join(dir, "package.tar.gz"))) {
     throw new Error("该产品版本已发布：" + brand + " " + version + "（如需覆盖请先删除）");
   }
@@ -114,4 +123,3 @@ export async function publishProductPackage(root: string, buf: Buffer, filename:
   fs.writeFileSync(path.join(dir, "meta.json"), JSON.stringify(meta), "utf8");
   return { brand, version, sha256: meta.sha256, size: meta.size };
 }
-

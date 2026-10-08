@@ -3,7 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AgentClient 本机管理</title>
+    <title>YwMatrix 终端</title>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http:; connect-src 'self'; object-src 'none'; base-uri 'none'">
     <style>
         :root {
             --bg: #f8fafc;
@@ -12,13 +13,13 @@
             --bg-code: #f1f5f9;
             --text: #0f172a;
             --text-secondary: #475569;
-            --text-tertiary: #94a3b8;
+            --text-tertiary: #64748b;
             --border: #e2e8f0;
             --border-strong: #cbd5e1;
-            --accent: #10b981;
+            --accent: #087f5b;
             --accent-soft: #d1fae5;
-            --accent-gradient: linear-gradient(135deg, #10b981 0%, #14b8a6 100%);
-            --accent-gradient-hover: linear-gradient(135deg, #059669 0%, #0d9488 100%);
+            --accent-gradient: linear-gradient(135deg, #087f5b 0%, #047857 100%);
+            --accent-gradient-hover: linear-gradient(135deg, #066649 0%, #065f46 100%);
             --danger: #ef4444;
             --success: #10b981;
             --warning: #f59e0b;
@@ -38,7 +39,7 @@
                 --bg-code: #1e293b;
                 --text: #e2e8f0;
                 --text-secondary: #94a3b8;
-                --text-tertiary: #64748b;
+                --text-tertiary: #94a3b8;
                 --border: #334155;
                 --border-strong: #475569;
                 --accent: #34d399;
@@ -185,65 +186,157 @@
         .toast.success { border-left: 3px solid var(--success); }
         .toast.warning { border-left: 3px solid var(--warning); }
         .toast.error { border-left: 3px solid var(--danger); }
+        [hidden] { display: none !important; }
+        .client-layout { display: grid; grid-template-columns: 180px minmax(0,1fr); min-height: calc(100vh - 56px); }
+        .client-nav { padding: 24px 12px; background: var(--bg); border-right: 1px solid var(--border); }
+        .client-nav button { display: block; width: 100%; text-align: left; padding: 11px 16px; margin: 5px 0; border-radius: 8px; color: var(--text-secondary); }
+        .client-nav button.active { color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+        .device-label { padding: 0 16px 20px; color: var(--text-secondary); font-size: 12px; overflow-wrap: anywhere; }
+        .page { width: 100%; max-width: 1120px; padding: 28px; }
+        .page h1 { font-size: 23px; margin-bottom: 8px; }
+        .page-intro { color: var(--text-secondary); margin-bottom: 24px; }
+        .overview-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 20px 0; }
+        .connection-stage { padding: 12px 14px; margin-top: 14px; border-radius: 8px; background: var(--accent-soft); color: var(--text); }
+        .table-wrap { overflow-x: auto; }
+        .agent-cards { display: grid; grid-template-columns: repeat(auto-fit,minmax(230px,1fr)); gap: 14px; }
+        .agent-tile { padding: 18px; border: 1px solid var(--border); background: var(--bg); border-radius: 12px; min-width: 0; }
+        .agent-tile h3 { font-size: 15px; margin: 0 0 8px; }
+        .agent-tile .row-actions { justify-content: flex-start; flex-wrap: wrap; margin-top: 16px; }
+        .agent-tile details { margin-top: 12px; color: var(--text-secondary); font-size: 12px; }
+        .agent-tile summary { cursor: pointer; padding: 6px 0; }
+        .agent-tile pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 var(--mono); margin: 8px 0; }
+        .activity-row { padding: 16px 0; border-bottom: 1px solid var(--border); }
+        .activity-row strong { display: block; }
+        .settings-line { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 14px; padding: 14px 0; }
+        .settings-line label { display: flex; gap: 10px; align-items: center; }
+        .chip.green { background: rgba(16,185,129,.14); }
+        .chip.amber { background: rgba(245,158,11,.14); }
+        .chip.red { background: rgba(239,68,68,.12); }
+        button:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+        .product-advanced { display: inline-block; text-align: left; }
+        .product-advanced summary { padding: 5px 8px; cursor: pointer; color: var(--text-secondary); }
+        .product-advanced[open] { padding: 8px; border: 1px solid var(--border); border-radius: 8px; }
+        .product-advanced button { display: block; margin: 4px 0; }
+        .page-heading { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; flex-wrap:wrap; margin-bottom:22px; }
+        .page-heading .page-intro { margin:0; }
+        .page-eyebrow { color:var(--accent); font-size:12px; letter-spacing:1px; margin-bottom:7px; font-weight:600; }
+        .page-status { color:var(--text-secondary); font-size:12px; padding:9px 0; }
+        .connection-alert { padding:12px 16px; margin-bottom:20px; border:1px solid var(--border-strong); border-radius:10px; background:var(--bg); display:flex; align-items:center; justify-content:space-between; gap:12px; }
+        .overview-summary { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; margin:18px 0; }
+        .summary-item { text-align:left; padding:18px 20px; border:1px solid var(--border); border-radius:12px; background:var(--bg); }
+        .summary-item strong { display:block; font-size:28px; line-height:1.3; font-variant-numeric:tabular-nums; color:var(--text); }
+        .summary-item span { color:var(--text-secondary); font-size:12px; }
+        .summary-item:hover { border-color:var(--accent); }
+        .client-toolbar { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin:18px 0; }
+        .client-toolbar input { flex:1; min-width:160px; }
+        .client-toolbar input,.client-toolbar select { padding:9px 12px; border:1px solid var(--border-strong); background:var(--bg); color:var(--text); border-radius:8px; font-size:13px; }
+        .result-count { font-size:12px; color:var(--text-secondary); margin-bottom:14px; }
+        .product-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,285px),1fr)); gap:16px; }
+        .product-tile { display:flex; flex-direction:column; padding:20px; border:1px solid var(--border); border-radius:12px; background:var(--bg); min-width:0; }
+        .product-tile h3 { font-size:16px; margin:0; }
+        .product-title { display:flex; gap:10px; align-items:center; margin-bottom:12px; }
+        .product-description { color:var(--text-secondary); font-size:13px; margin-bottom:16px; overflow-wrap:anywhere; }
+        .product-meta { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:14px 0; font-size:12px; color:var(--text-secondary); }
+        .product-tile .row-actions { margin-top:auto; padding-top:15px; border-top:1px solid var(--border); justify-content:flex-start; flex-wrap:wrap; }
+        .product-tile .row-actions button { padding:8px 12px; border:1px solid var(--border); font-size:13px; }
+        .product-tile .row-actions .btn-primary { border-color:var(--accent); color:#fff; }
+        .product-tile .product-advanced { width:100%; }
+        .product-tile .cell-sub { font-family:inherit; font-size:12px; }
+        [data-view="catalog"] #productCard,[data-view="agents"] > .card { padding:0; background:transparent; border:0; box-shadow:none; }
+        [data-view="catalog"] #productCard > h2,[data-view="catalog"] #productCard > .card-desc,[data-view="agents"] > .card > h2,[data-view="agents"] > .card > .card-desc { display:none; }
+        .product-description { min-height:42px; }
+        .empty-tip strong { display:block; color:var(--text); margin-bottom:7px; font-size:14px; }
+        .setup-progress { display:flex; padding:0; list-style:none; gap:14px; margin:0 0 20px; }
+        .setup-progress li { display:flex; align-items:center; gap:7px; color:var(--text-secondary); font-size:12px; }
+        .setup-progress b { display:grid; place-items:center; width:24px; height:24px; border-radius:50%; background:var(--bg-hover); font-weight:500; }
+        .setup-progress .current b,.setup-progress .complete b { background:var(--accent-soft); color:var(--accent); }
+        .pair-fields { max-width:620px; }
+        .pair-fields label { display:block; margin-top:16px; font-size:13px; color:var(--text-secondary); }
+        .pair-fields .form-row { margin-top:6px; }
+        .state-details { margin-top:18px; padding-top:12px; border-top:1px solid var(--border); font-size:12px; color:var(--text-secondary); }
+        .state-details summary { padding:6px 0; cursor:pointer; }
+        .activity-row { display:flex; gap:12px; align-items:flex-start; }
+        .activity-dot { width:9px; height:9px; flex-shrink:0; border-radius:50%; background:var(--text-tertiary); margin-top:8px; }
+        .activity-dot.done { background:var(--accent); }.activity-dot.failed { background:var(--danger); }.activity-dot.running { background:var(--warning); }
+        .activity-content { flex:1; min-width:0; }
+        .activity-content .form-hint { overflow-wrap:anywhere; }
+        .modal { max-height:85vh; overflow-y:auto; }.modal p { white-space:pre-line; }
+        @media(max-width:720px){.overview-summary{gap:8px}.summary-item{padding:12px}.summary-item strong{font-size:24px}.setup-progress{gap:8px;flex-wrap:wrap}.page-heading{gap:6px}.client-nav{position:sticky;top:0;z-index:40}.client-nav button.active{box-shadow:inset 0 -2px var(--accent)}.product-grid{grid-template-columns:1fr}.product-tile .row-actions button{min-height:40px}}
+        @media(max-width:720px) {
+            .client-layout { display: block; }
+            .client-nav { display: flex; flex-wrap: wrap; padding: 8px; border-right: 0; border-bottom: 1px solid var(--border); }
+            .client-nav button { width: auto; margin: 0; padding: 10px; }
+            .device-label, .topbar-sub { display: none; }
+            .page { padding: 18px 14px; }
+            input, textarea, select { font-size: 16px !important; }
+            .form-row input { min-width: 0; }
+        }
     </style>
 </head>
 <body>
     <header class="topbar">
-        <span class="topbar-title">AgentClient 本机管理</span>
-        <span class="topbar-sub">127.0.0.1 本地接口 · 无需登录</span>
+        <span class="topbar-title">YwMatrix 终端</span>
+        <span class="topbar-sub">连接设备，让智能体随时可用</span>
         <a id="docsLink" href="#" target="_blank" style="font-size:12.5px;color:var(--text-secondary);display:none">使用文档</a>
         <span class="spacer"></span>
         <span class="conn-dot" id="connDot"></span>
         <span class="conn-text" id="connText">网关未连接</span>
     </header>
 
-    <div class="page">
+    <div class="client-layout">
+    <nav class="client-nav" aria-label="客户端导航">
+        <div class="device-label" id="deviceLabel">本机设备</div>
+        <button class="active" data-page="overview">概览</button>
+        <button data-page="agents">我的智能体</button>
+        <button data-page="catalog">智能体中心</button>
+        <button data-page="activity">活动记录</button>
+        <button data-page="settings">设置</button>
+    </nav>
+    <main class="page">
+        <div class="page-heading"><div><div class="page-eyebrow">YWMATRIX / 本机工作区</div><h1 id="pageTitle">设备概览</h1><p class="page-intro" id="pageIntro">连接组织，选择智能体，即可开始使用。</p></div><span class="page-status" id="lastUpdated" role="status">正在读取设备状态…</span></div>
+        <div class="connection-alert" id="clientNotice" hidden role="status"><span id="clientNoticeText"></span><button class="btn btn-ghost" id="retryState">重新检查</button></div>
+        <section class="client-page" data-view="overview">
         <!-- 连接状态 / 配对 -->
         <div class="card" id="stateCard"></div>
+        <div class="overview-summary" id="overviewSummary" hidden><button class="summary-item" data-page="agents"><strong id="runningCount">0</strong><span>运行中的智能体</span></button><button class="summary-item" data-page="agents" id="attentionCard"><strong id="attentionCount">0</strong><span>需要关注</span></button><button class="summary-item" id="viewActiveTasks" title="在组织工作台查看任务"><strong id="activeTaskCount">0</strong><span>进行中的任务 ↗</span></button></div>
+        <div class="overview-actions" id="overviewActions" hidden><button class="btn btn-primary" data-page="agents">查看我的智能体</button><button class="btn btn-ghost" data-page="catalog">安装智能体</button><button class="btn btn-ghost" id="openChatBtn">打开组织工作台</button></div>
+        <div class="card"><h2>使用步骤</h2><p class="card-desc">连接组织 → 安装并启用智能体 → 在组织工作台发送任务</p><p class="form-hint" id="backgroundHint">Web 管理页关闭后，正在运行的客户端进程会继续处理任务。</p></div>
+        </section>
+        <section class="client-page" data-view="agents" hidden>
 
-        <!-- Agent 列表 -->
+        <!-- 智能体 列表 -->
         <div class="card">
-            <h2>Agent 列表</h2>
-            <div class="card-desc">由网关分配到本机 Connector 的 Agent 实例，每 5 秒自动刷新</div>
-            <div class="table-wrap" style="margin-bottom:0">
-                <table>
-                    <thead><tr><th>Agent</th><th>品牌</th><th>状态</th><th>生效命令 / 地址</th><th style="text-align:right">操作</th></tr></thead>
-                    <tbody id="agentRows"></tbody>
-                </table>
-                <div class="empty-tip" id="agentEmpty" style="display:none">暂无 Agent</div>
+            <h2>我的智能体</h2>
+            <div class="card-desc">查看运行情况；命令与连接方式收在高级信息中。</div>
+            <div style="margin-bottom:0">
+                <div class="client-toolbar"><input type="search" id="agentSearch" placeholder="搜索智能体名称…" aria-label="搜索我的智能体"><select id="agentFilter" aria-label="智能体状态"><option value="all">全部状态</option><option value="running">运行中</option><option value="attention">需要关注</option></select></div>
+                <div class="result-count" id="agentCount"></div>
+                <div class="agent-cards" id="agentRows"></div>
+                <div class="empty-tip" id="agentEmpty" style="display:none"></div>
             </div>
             <div class="section-error" id="agentsError"></div>
         </div>
+        <button class="btn btn-primary" data-page="catalog">前往智能体中心</button>
+        </section>
+        <section class="client-page" data-view="catalog" hidden>
 
         <!-- 产品中心：品牌 → 安装 → 接网关 / 本地起 -->
         <div class="card" id="productCard" style="display:none">
-            <h2>产品中心</h2>
-            <div class="card-desc">品牌即产品：从网关目录一键安装/升级；装完可接入网关（聊天/调度）或本地运行（不接网关）</div>
-            <div class="form-row" style="margin-bottom:12px">
-                <input type="file" id="pkgFile" accept=".tar.gz,.tgz" style="display:none">
-                <span class="form-hint" id="pkgStatus"></span>
-                <span style="flex:1"></span>
-                <button class="btn" id="pkgInstallBtn">离线安装…</button>
-            </div>
-            <div class="form-row" style="margin-bottom:12px">
-                <span class="form-hint" style="margin:0;flex-shrink:0">安装目录</span>
-                <input type="text" id="productsDirInput" placeholder="默认 ~/.agent-manage/products（可改到数据盘；内部保持 <品牌>/<版本>/ 结构）" style="min-width:260px" autocomplete="off">
-                <button class="btn" id="productsDirSave">保存</button>
-            </div>
-            <div class="table-wrap" style="margin-bottom:0">
-                <table>
-                    <thead><tr><th>产品</th><th>类型</th><th>本机</th><th>远程</th><th style="text-align:right">操作</th></tr></thead>
-                    <tbody id="productRows"></tbody>
-                </table>
-                <div class="empty-tip" id="productEmpty" style="display:none">暂无产品（管理员在管理后台 · 品牌管理 · 产品分发给品牌上传安装包）</div>
-            </div>
+            <h2>智能体中心</h2>
+            <div class="card-desc">选择智能体后安装并启用；离线安装与已有安装可在此管理。</div>
+            <input type="file" id="pkgFile" accept=".tar.gz,.tgz" hidden>
+            <div class="form-hint" id="pkgStatus" role="status"></div>
+            <div class="client-toolbar"><input type="search" id="productSearch" placeholder="搜索智能体名称或用途…" aria-label="搜索智能体中心"><select id="productFilter" aria-label="筛选智能体"><option value="all">全部产品</option><option value="installed">已安装</option><option value="available">可安装</option><option value="updates">可更新</option></select><button class="btn btn-ghost" id="refreshProducts">刷新目录</button><button class="btn btn-ghost" id="pkgInstallBtn">离线安装</button></div>
+            <div class="result-count" id="productCount"></div>
+            <div class="product-grid" id="productRows"></div>
+            <div class="empty-tip" id="productEmpty" style="display:none"></div>
             <div class="section-error" id="productError"></div>
         </div>
 
-        <!-- 添加 Agent -->
+        <!-- 添加 智能体 -->
         <div class="card" id="addCard" style="display:none">
-            <h2>添加 Agent</h2>
-            <div class="card-desc">从网关注册一个新 Agent 到本机 Connector</div>
+            <details><summary>高级：接入已有智能体</summary>
+            <div class="card-desc">从组织产品目录选择，用于已有程序或自定义服务。</div>
             <div class="form-row">
                 <select id="addBrand"></select>
             </div>
@@ -255,14 +348,22 @@
                 <button class="btn btn-primary" id="addBtn">添加</button>
             </div>
             <div class="section-error" id="addError"></div>
+            </details>
         </div>
-    </div>
+        </section>
+        <section class="client-page" data-view="activity" hidden><div class="card"><h2>最近活动</h2><div id="activityList">暂无活动记录</div><button class="btn btn-ghost" id="refreshActivities">刷新</button></div></section>
+        <section class="client-page" data-view="settings" hidden>
+            <div class="card"><h2>组织连接</h2><p class="card-desc" id="settingsGateway">尚未连接</p><button class="btn btn-ghost" id="resetConnectionBtn">更换组织／重新接入</button><div class="section-error" id="settingsError"></div></div>
+            <div class="card"><h2>智能体安装位置</h2><p class="card-desc">更改后用于新安装；已有目录和智能体不会被自动搬移。</p><div class="form-row"><input type="text" id="productsDirInput" placeholder="使用默认用户目录" autocomplete="off" aria-label="智能体安装目录"><button class="btn btn-ghost" id="chooseDirectory" hidden>选择目录</button><button class="btn btn-primary" id="productsDirSave">保存</button><button class="btn btn-ghost" id="revertDirectory">恢复当前值</button></div><p class="form-hint" id="directoryHint" role="status">尚未保存的修改会保留，自动刷新不会覆盖输入。</p></div>
+            <div class="card" id="desktopSettings" hidden><h2>桌面设置</h2><div class="settings-line"><label><input type="checkbox" id="startAtLogin">登录系统后自动启动</label></div><div class="settings-line"><label><input type="checkbox" id="closeToTray">关闭窗口时保持后台运行</label></div><p class="form-hint">从托盘选择「退出并停止智能体」可结束运行。</p><div class="settings-line"><button class="btn btn-ghost" id="restartCore">重启后台服务</button><button class="btn btn-ghost" id="exportDiagnostics">导出诊断摘要</button></div><p class="form-hint" id="desktopVersion"></p></div>
+        </section>
+    </main></div>
 
     <div class="toast-container" id="toastContainer"></div>
 
     <!-- 通用确认弹窗 -->
     <div class="modal-overlay" id="modalOverlay">
-        <div class="modal">
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
             <h3 id="modalTitle">确认</h3>
             <p id="modalText"></p>
             <div class="modal-actions">
@@ -274,8 +375,8 @@
 
     <!-- 编辑启动命令弹窗 -->
     <div class="modal-overlay" id="cmdOverlay">
-        <div class="modal">
-            <h3>编辑启动命令</h3>
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="commandTitle">
+            <h3 id="commandTitle">编辑启动命令</h3>
             <p id="cmdAgentLabel"></p>
             <div class="form-field">
                 <label id="cmdLabel">启动命令覆盖</label>
@@ -323,13 +424,45 @@
                 el.textContent = message || '';
                 el.style.display = message ? '' : 'none';
             }
+            const renderedLists = new WeakMap();
+            function renderList(container, markup) {
+                if (renderedLists.get(container) === markup) return;
+                const expanded = new Set([...container.querySelectorAll('details[open]')].map(el => el.closest('[data-item]')?.dataset.item));
+                const focused = container.contains(document.activeElement) ? document.activeElement : null;
+                const focusItem = focused?.closest('[data-item]')?.dataset.item;
+                const focusAction = focused?.dataset.act;
+                container.innerHTML = markup;
+                renderedLists.set(container, markup);
+                container.querySelectorAll('details').forEach(el => { if (expanded.has(el.closest('[data-item]')?.dataset.item)) el.open = true; });
+                if (focusItem) {
+                    const item = [...container.querySelectorAll('[data-item]')].find(el => el.dataset.item === focusItem);
+                    const next = focusAction ? [...(item?.querySelectorAll('[data-act]') || [])].find(el => el.dataset.act === focusAction) : item?.querySelector('summary');
+                    next?.focus({ preventScroll: true });
+                }
+            }
+            const pendingActions = new Set();
+            async function runAction(button, operation) {
+                const key = (button.closest('[data-item]')?.dataset.item || button.id) + ':' + (button.dataset.act || 'action');
+                if (pendingActions.has(key)) return;
+                pendingActions.add(key);
+                const label = button.textContent;
+                button.disabled = true;
+                try { await operation(); }
+                catch (error) { showToast(error.message || '操作未完成，请重试', 'error', 6000); }
+                finally {
+                    pendingActions.delete(key);
+                    if (button.isConnected) { button.disabled = false; button.textContent = label; }
+                }
+            }
 
             let modalResolve = null;
             function confirmModal(title, text, okLabel) {
+                if (modalResolve) return Promise.resolve(false);
                 els.modalTitle.textContent = title;
                 els.modalText.textContent = text;
                 els.modalOk.textContent = okLabel || '确定';
                 els.modalOverlay.classList.add('open');
+                queueMicrotask(() => els.modalCancel.focus());
                 return new Promise(resolve => { modalResolve = resolve; });
             }
             function closeModal(result) {
@@ -338,7 +471,8 @@
             }
 
             async function api(path, opts) {
-                const resp = await fetch(path, opts);
+                if (window.ywmDesktop) return window.ywmDesktop.request(path, opts || {});
+                const resp = await fetch(path, { ...opts, signal: opts?.signal || AbortSignal.timeout(opts?.method && opts.method !== 'GET' ? 360000 : 12000) });
                 let body = null;
                 try { body = await resp.json(); } catch (e) { /* 忽略非 JSON 响应 */ }
                 if (!resp.ok) throw new Error((body && body.error) || ('HTTP ' + resp.status));
@@ -352,72 +486,134 @@
 
             let lastConfigured = null;   // null 首渲染；configured 变化时整体重渲染卡片
             let pairRendered = false;
+            let lastConnected = null;
+            let latestState = null;
+            let activePage = 'overview';
+            let catalogBusy = false;
+            let stateLoading = false, catalogLoading = false, activitiesLoading = false;
+            let directoryDirty = false, savedDirectory = '';
+            let stateRequestVersion = 0, pairSubmitting = false, catalogError = '';
+            let productOperationError = '';
+            const pageCopy = {
+                overview: ['设备概览', '连接组织，选择智能体，即可开始使用。'],
+                agents: ['我的智能体', '运行状态一目了然，异常时可以直接重试。'],
+                catalog: ['智能体中心', '安装、启用和升级这台设备上的智能体。'],
+                activity: ['活动记录', '安装和接入结果保存在本机，重新打开也能查看。'],
+                settings: ['设置', '管理组织连接、安装目录和桌面行为。']
+            };
+            function switchPage(page) {
+                if (!pageCopy[page]) return;
+                activePage = page;
+                document.querySelectorAll('[data-view]').forEach(el => { el.hidden = el.dataset.view !== page; });
+                document.querySelectorAll('.client-nav [data-page]').forEach(el => {
+                    el.classList.toggle('active', el.dataset.page === page);
+                    if (el.dataset.page === page) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current');
+                });
+                document.getElementById('pageTitle').textContent = pageCopy[page][0];
+                document.getElementById('pageIntro').textContent = pageCopy[page][1];
+                if (page === 'activity') loadActivities();
+                if (page === 'catalog') loadProducts();
+            }
+            async function loadActivities() {
+                if (activitiesLoading) return;
+                activitiesLoading = true;
+                const container = document.getElementById('activityList');
+                try {
+                    const result = await api('/api/activities');
+                    renderList(container, (result.activities || []).map(item => '<div class="activity-row" data-item="' + escapeAttr(item.id) + '"><span class="activity-dot ' + (['done','failed','running'].includes(item.status) ? item.status : '') + '" aria-hidden="true"></span><div class="activity-content"><strong>' + escapeHtml(item.title) +
+                        '</strong><span class="chip ' + (item.status === 'done' ? 'green' : item.status === 'failed' ? 'red' : 'amber') + '">' +
+                        escapeHtml(item.stage) + '</span><div class="form-hint">' + escapeHtml(new Date(item.updated_at).toLocaleString()) +
+                        (item.error ? ' · ' + escapeHtml(item.error) : '') + '</div></div></div>').join('') || '<div class="empty-tip"><strong>还没有活动记录</strong>连接组织或安装智能体后，可以在这里查看每一步的结果。</div>');
+                } catch (error) { showToast('活动加载失败：' + error.message, 'error'); }
+                finally { activitiesLoading = false; }
+            }
+            async function openExternal(url) {
+                if (!/^https?:\/\//i.test(url || '')) return;
+                if (window.ywmDesktop) await window.ywmDesktop.openExternal(url);
+                else window.open(url, '_blank', 'noopener');
+            }
 
             function defaultGateway() {
-                return 'ws://' + location.hostname + ':8080/ws/agent';
+                return '';
             }
 
             function renderStateCard(s) {
                 els.connDot.className = 'conn-dot' + (s.connected ? ' connected' : '');
                 els.connText.textContent = s.connected ? '网关已连接' : '网关未连接';
 
-                if (s.configured === lastConfigured && (s.configured || pairRendered)) return;
+                if (s.configured === lastConfigured && (s.configured ? s.connected === lastConnected : pairRendered)) return;
                 lastConfigured = s.configured;
+                lastConnected = s.connected;
 
                 if (s.configured) {
                     els.stateCard.innerHTML =
-                        '<h2>连接状态</h2>' +
-                        '<div class="card-desc">本机 Connector 的网关接入信息</div>' +
-                        '<div class="info-row"><span class="info-label">状态</span><span class="info-value">' +
+                        '<h2>' + (s.connected ? '这台设备已连接组织' : '正在恢复组织连接') + '</h2>' +
+                        '<div class="card-desc">' + (s.connected ? '可以安装智能体，并在组织工作台发送任务。' : '请检查网络或组织地址；已安装的智能体会保留。') + '</div>' +
+                        '<div class="info-row"><span class="info-label">连接状态</span><span class="info-value">' +
                         (s.connected ? '<span class="chip green">已连接</span>' : '<span class="chip">未连接</span>') +
                         '</span></div>' +
-                        '<div class="info-row"><span class="info-label">网关地址</span><span class="info-value mono">' + escapeHtml(s.gateway || '—') + '</span></div>' +
-                        '<div class="info-row"><span class="info-label">Connector</span><span class="info-value mono">' + escapeHtml(s.connector_id || '—') + '</span></div>' +
+                        '<div class="info-row"><span class="info-label">组织地址</span><span class="info-value">' + escapeHtml(s.gateway_base || s.gateway || '—') + '</span></div>' +
+                        '<details class="state-details"><summary>查看连接与配置详情</summary><div class="info-row"><span class="info-label">设备标识</span><span class="info-value mono">' + escapeHtml(s.connector_id || '—') + '</span></div>' +
                         '<div class="info-row"><span class="info-label">配置文件</span><span class="info-value mono">' + escapeHtml(s.config_path || '—') + '</span></div>' +
-                        '<div class="form-hint">如需重新接入：删除上方配置文件后重启 AgentClient。</div>';
+                        '<div class="form-hint">需要更换组织时，请前往「设置 → 更换组织／重新接入」。</div></details>';
                 } else {
                     els.stateCard.innerHTML =
-                        '<h2>接入网关</h2>' +
-                        '<div class="card-desc">本机尚未配置凭证，请用管理后台生成的配对码完成接入</div>' +
-                        '<div class="form-row"><input type="text" id="pairGateway" placeholder="网关地址" autocomplete="off"></div>' +
-                        '<div class="form-row"><input type="text" id="pairCode" placeholder="配对码（管理后台 · 设备密钥 · 生成配对码）" autocomplete="off"></div>' +
+                        '<ol class="setup-progress" aria-label="接入进度"><li id="setupConnect" class="current"><b>1</b>连接组织</li><li id="setupApprove"><b>2</b>等待审批</li><li><b>3</b>开始使用</li></ol><div class="pair-fields">' +
+                        '<h2>连接你的组织</h2>' +
+                        '<div class="card-desc">输入管理员提供的组织地址和配对码，批准后自动完成接入。</div>' +
+                        '<label for="pairGateway">组织地址</label>' +
+                        '<div class="form-row"><input type="url" id="pairGateway" placeholder="例如 https://agentmatrix.top:8443" autocomplete="off"></div>' +
+                        '<div class="form-hint">使用管理员提供的完整地址；如果带端口，请一并保留。</div>' +
+                        '<label for="pairCode">配对码</label><div class="form-row"><input type="text" id="pairCode" placeholder="输入配对码" autocomplete="off"></div>' +
+                        '<label for="pairName">设备名称</label>' +
                         '<div class="form-row">' +
-                        '<input type="text" id="pairName" placeholder="Connector 名称（可选，默认主机名）" autocomplete="off">' +
-                        '<button class="btn btn-primary" id="pairBtn">接入</button>' +
+                        '<input type="text" id="pairName" aria-label="设备名称" placeholder="设备名称（默认本机名称）" autocomplete="off">' +
+                        '<button class="btn btn-primary" id="pairBtn">连接组织</button>' +
                         '</div>' +
-                        '<div class="form-hint">已配置过的机器要重新接入，需删除配置文件后重启 AgentClient。</div>' +
-                        '<div class="section-error" id="pairError"></div>';
+                        '<div class="connection-stage" id="pairStage" role="status" hidden></div><button class="btn btn-ghost" id="cancelPairBtn" hidden>取消接入</button>' +
+                        '<div class="section-error" id="pairError" role="alert"></div></div>';
                     document.getElementById('pairGateway').value = defaultGateway();
                     document.getElementById('pairBtn').addEventListener('click', doPair);
+                    ['pairGateway','pairCode','pairName'].forEach(id => document.getElementById(id).addEventListener('keydown', event => {
+                        if (event.key === 'Enter' && !event.isComposing && event.keyCode !== 229) { event.preventDefault(); document.getElementById('pairBtn').click(); }
+                    }));
+                    document.getElementById('pairName').value = s.hostname || '';
+                    document.getElementById('cancelPairBtn').onclick = async () => {
+                        try { await api('/api/pair/cancel', { method: 'POST' }); await loadState(); }
+                        catch (error) { showToast(error.message, 'error'); }
+                    };
                     pairRendered = true;
                 }
             }
 
             async function doPair() {
+                if (pairSubmitting) return;
                 const gateway = document.getElementById('pairGateway').value.trim();
                 const code = document.getElementById('pairCode').value.trim();
                 const name = document.getElementById('pairName').value.trim();
                 const errEl = document.getElementById('pairError');
-                if (!gateway || !code) { showError(errEl, '请填写网关地址和配对码'); return; }
+                if (!gateway || !code) { showError(errEl, '请填写组织地址和配对码'); document.getElementById(!gateway ? 'pairGateway' : 'pairCode').focus(); return; }
                 const btn = document.getElementById('pairBtn');
+                if (btn.disabled) return;
+                pairSubmitting = true;
                 btn.disabled = true;
                 showError(errEl, '');
                 try {
                     const body = { gateway, code };
                     if (name) body.connector_id = name;
                     await api('/api/pair', jsonOpts('POST', body));
-                    showToast('配对成功，正在连接网关', 'success');
-                    pairRendered = false;
-                    lastConfigured = null;
+                    showToast('接入请求已提交，正在连接组织', 'info');
                     loadState();
                 } catch (e) {
                     showError(errEl, '接入失败：' + (e.message || e));
                 } finally {
-                    btn.disabled = false;
+                    pairSubmitting = false;
+                    await loadState(true);
+                    if (btn.isConnected) btn.disabled = ['connecting','pending'].includes(latestState?.pairing?.status);
                 }
             }
 
-            /* ---------- Agent 列表 ---------- */
+            /* ---------- 智能体 列表 ---------- */
 
             const SOURCE_CHIPS = {
                 override: '<span class="chip amber">本机覆盖</span>',
@@ -447,26 +643,29 @@
 
             function renderAgents(agents) {
                 agentsCache = agents;
-                els.agentEmpty.style.display = agents.length ? 'none' : '';
-                els.agentRows.innerHTML = agents.map(a =>
-                    '<tr>' +
-                    '<td><div class="cell-main">' + escapeHtml(a.name || a.agent_id) + '</div>' +
-                    '<div class="cell-sub">' + escapeHtml(a.agent_id) + '</div></td>' +
-                    '<td><span class="cell-sub">' + escapeHtml(a.brand_id || '—') + '</span></td>' +
-                    '<td><div>' + stateCell(a) + ' <span class="chip">' + connTypeOf(a) + '</span></div></td>' +
-                    '<td><div class="cell-sub">' + escapeHtml(a.launch_cmd || '—') + '</div>' +
-                    (SOURCE_CHIPS[a.launch_cmd_source] || '') + '</td>' +
-                    '<td><div class="row-actions">' +
+                const query = document.getElementById('agentSearch').value.trim().toLowerCase();
+                const filter = document.getElementById('agentFilter').value;
+                const visible = agents.filter(a => (!query || ((a.name || '') + ' ' + a.agent_id).toLowerCase().includes(query)) && (filter === 'all' || (filter === 'running' ? a.state === 'running' : a.state !== 'running')));
+                document.getElementById('agentCount').textContent = '显示 ' + visible.length + ' / ' + agents.length + ' 个智能体';
+                els.agentEmpty.style.display = visible.length ? 'none' : '';
+                els.agentEmpty.innerHTML = agents.length ? '<strong>没有匹配的智能体</strong>换个关键词或调整状态筛选试试。' : '<strong>还没有智能体</strong>前往智能体中心安装，或由管理员分配到这台设备。';
+                renderList(els.agentRows, visible.map(a =>
+                    '<article class="agent-tile" data-item="' + escapeAttr(a.agent_id) + '"><h3>' + escapeHtml(a.name || a.agent_id) + '</h3>' + stateCell(a) +
+                    '<div class="row-actions">' +
                     (a.state !== 'running' ? '<button data-act="retry" data-id="' + escapeAttr(a.agent_id) + '">重试</button>' : '') +
+                    (a.state === 'running' ? '<button data-act="chat">打开组织对话</button>' : '') + '</div>' +
+                    '<details><summary>高级信息与操作</summary><div class="cell-sub">' + escapeHtml(a.agent_id) + ' · ' + connTypeOf(a) + '</div><pre>' + escapeHtml(a.launch_cmd || '—') + '</pre>' +
+                    '<div class="row-actions">' +
                     '<button data-act="edit" data-id="' + escapeAttr(a.agent_id) + '" data-cmd="' + escapeAttr(a.launch_cmd_source === 'override' ? a.launch_cmd : '') + '">编辑启动命令</button>' +
                     '<button data-act="remove" data-id="' + escapeAttr(a.agent_id) + '" data-name="' + escapeAttr(a.name || a.agent_id) + '" class="danger">移除</button>' +
-                    '</div></td></tr>').join('');
+                    '</div></details></article>').join(''));
                 els.agentRows.querySelectorAll('button').forEach(btn => {
-                    btn.onclick = () => {
-                        if (btn.dataset.act === 'edit') openCmdForm(btn.dataset.id, btn.dataset.cmd);
-                        else if (btn.dataset.act === 'retry') retryAgent(btn.dataset.id);
-                        else removeAgent(btn.dataset.id, btn.dataset.name);
-                    };
+                    btn.onclick = () => runAction(btn, async () => {
+                        if (btn.dataset.act === 'chat') await openExternal(latestState?.gateway_base);
+                        else if (btn.dataset.act === 'edit') openCmdForm(btn.dataset.id, btn.dataset.cmd);
+                        else if (btn.dataset.act === 'retry') await retryAgent(btn.dataset.id);
+                        else await removeAgent(btn.dataset.id, btn.dataset.name);
+                    });
                 });
             }
 
@@ -481,7 +680,7 @@
             }
 
             async function removeAgent(id, name) {
-                const ok = await confirmModal('移除 Agent', '将 Agent「' + name + '」（' + id + '）从本机 Connector 移除？移除后需重新添加。', '移除');
+                const ok = await confirmModal('移除 智能体', '将 智能体「' + name + '」（' + id + '）从本机 Connector 移除？移除后需重新添加。', '移除');
                 if (!ok) return;
                 try {
                     await api('/api/agents/' + encodeURIComponent(id), { method: 'DELETE' });
@@ -497,13 +696,13 @@
                 cmdAgentID = agentID;
                 const a = agentsCache.find(x => x.agent_id === agentID);
                 const stdio = connTypeOf(a || {}) === 'stdio';
-                els.cmdAgentLabel.textContent = 'Agent：' + agentID;
+                els.cmdAgentLabel.textContent = '智能体：' + agentID;
                 els.cmdLabel.textContent = stdio ? '启动命令覆盖' : '服务地址覆盖';
                 els.cmdInput.value = currentCmd || '';
                 els.cmdOverlay.classList.add('open');
             }
 
-            /* ---------- 品牌下拉 / 添加 Agent ---------- */
+            /* ---------- 品牌下拉 / 添加 智能体 ---------- */
 
             let brandsCache = [];
             let brandsLoaded = false;
@@ -513,7 +712,7 @@
                     const r = await api('/api/brands');
                     brandsCache = (r.brands || []).filter(b => !b.disabled);
                     brandsLoaded = true;
-                    // 添加 Agent 只面向托管型品牌；web/app 是产品型，在产品中心「打开」
+                    // 添加 智能体 只面向托管型品牌；web/app 是产品型，在产品中心「打开」
                     const hostable = brandsCache.filter(b => b.conn_type !== 'web' && b.conn_type !== 'app');
                     if (!hostable.length) {
                         els.addBrand.innerHTML = '<option value="">暂无可用品牌</option>';
@@ -557,7 +756,7 @@
                     if (name) body.name = name;
                     if (cmd) body.launch_cmd = cmd;
                     const r = await api('/api/agents', jsonOpts('POST', body));
-                    showToast('已添加 Agent：' + r.agent_id, 'success', 5000);
+                    showToast('已添加 智能体：' + r.agent_id, 'success', 5000);
                     els.addName.value = els.addCmd.value = '';
                     loadState();
                 } catch (e) {
@@ -574,29 +773,57 @@
             let lastProductsLoad = 0;
 
             async function loadProducts() {
+                if (catalogBusy || catalogLoading || pendingActions.size) return;
+                catalogLoading = true;
+                document.getElementById('refreshProducts').disabled = true;
+                els.productRows.setAttribute('aria-busy', 'true');
+                document.getElementById('productCount').textContent = '正在读取智能体目录…';
                 lastProductsLoad = Date.now();
                 try {
                     const r = await api('/api/product-catalog');
                     catalogCache = r.products || [];
+                    catalogError = '';
+                    showError(els.productError, productOperationError || r.warning || '');
                 } catch (e) {
-                    catalogCache = [];
+                    catalogError = e.message || '网络连接失败';
+                    showError(els.productError, '智能体目录加载失败：' + e.message + '。已保留上次结果，可稍后重试。');
+                } finally {
+                    catalogLoading = false;
+                    document.getElementById('refreshProducts').disabled = false;
+                    els.productRows.removeAttribute('aria-busy');
                 }
                 renderProducts();
             }
 
             function versionGt(a, b) {
                 if (!a || !b || a === b) return false;
-                const pa = String(a).split(/[.-]/).map(Number).slice(0, 3);
-                const pb = String(b).split(/[.-]/).map(Number).slice(0, 3);
+                const pattern = /^(\d+)\.(\d+)\.(\d+)(?:-([^+]+))?(?:\+.*)?$/;
+                const pa = pattern.exec(a), pb = pattern.exec(b);
+                if (!pa || !pb) return false;
                 for (let i = 0; i < 3; i++) {
-                    if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) > (pb[i] || 0);
+                    if (+pa[i + 1] !== +pb[i + 1]) return +pa[i + 1] > +pb[i + 1];
                 }
-                return true; // 同三段不同后缀按可升级处理
+                if (!pa[4] || !pb[4]) return !pa[4] && !!pb[4];
+                const left = pa[4].split('.'), right = pb[4].split('.');
+                for (let i = 0; i < Math.max(left.length, right.length); i++) {
+                    if (left[i] === undefined) return false;
+                    if (right[i] === undefined) return true;
+                    if (left[i] === right[i]) continue;
+                    const ln = /^\d+$/.test(left[i]), rn = /^\d+$/.test(right[i]);
+                    return ln && rn ? +left[i] > +right[i] : ln !== rn ? !ln : left[i] > right[i];
+                }
+                return false;
             }
 
             function renderProducts() {
-                els.productEmpty.style.display = catalogCache.length ? 'none' : '';
-                els.productRows.innerHTML = catalogCache.map(e => {
+                const query = document.getElementById('productSearch').value.trim().toLowerCase();
+                const filter = document.getElementById('productFilter').value;
+                const visible = catalogCache.filter(e => (!query || [e.name,e.brand,e.description].join(' ').toLowerCase().includes(query)) &&
+                    (filter === 'all' || (filter === 'installed' ? e.installed_version || e.has_instance : filter === 'available' ? !e.installed_version && e.remote_version && !e.incompatible : e.installed_version && versionGt(e.remote_version,e.installed_version))));
+                document.getElementById('productCount').textContent = '显示 ' + visible.length + ' / ' + catalogCache.length + ' 个产品 · 安装前会检查系统与架构';
+                els.productEmpty.style.display = visible.length ? 'none' : '';
+                els.productEmpty.innerHTML = catalogCache.length ? '<strong>没有匹配的智能体</strong>尝试其他关键词，或切换到「全部产品」。' : catalogError ? '<strong>暂时无法获取目录</strong>检查组织连接后，点击「刷新目录」重试。' : '<strong>这里还没有产品</strong>连接组织后查看可用智能体，也可以从离线包安装。';
+                renderList(els.productRows, visible.map(e => {
                     const kind = e.kind || 'stdio';
                     const installed = e.installed_version;
                     const remote = e.remote_version;
@@ -613,8 +840,7 @@
                         if (installed) {
                             localCell = '<span class="chip green">已装 ' + escapeHtml(installed) + '</span>';
                             if (e.has_instance) localCell += '<div class="cell-sub">' +
-                                (e.instance_from_install ? '已接入网关（产品目录' + (e.runtime_version && e.runtime_version !== installed ? '，运行 v' + escapeHtml(e.runtime_version) : '') + '）'
-                                    : '已接入网关（外部命令' + (e.runtime_version ? '，运行 v' + escapeHtml(e.runtime_version) : '') + '）') + '</div>';
+                                ('已启用，可在工作台使用' + (e.runtime_version && e.runtime_version !== installed ? ' · 当前运行 ' + escapeHtml(e.runtime_version) : '')) + '</div>';
                             if (localRun.running) localCell += '<div class="cell-sub" style="color:var(--success)">本地运行中</div>';
                         } else if (e.has_instance || e.external) {
                             // 外部目录装着（或装过）——它就是装了的，探测到的路径与运行版本都显示
@@ -626,47 +852,48 @@
                         } else {
                             localCell = '<span class="chip">未安装</span>';
                         }
-                        if (!installed && remote) actions += '<button data-act="install" data-brand="' + escapeAttr(e.brand) + '" data-ver="' + escapeAttr(remote) + '" class="btn-primary">' + (e.has_instance ? '纳管安装 ' : '安装 ') + escapeHtml(remote) + '</button> ';
+                        if (!installed && remote) actions += '<button data-act="install" data-brand="' + escapeAttr(e.brand) + '" data-ver="' + escapeAttr(remote) + '" class="btn-primary">' + (e.has_instance ? '纳管安装 ' : '安装并启用 ') + escapeHtml(remote) + '</button> ';
                         if (canUpgrade) actions += '<button data-act="install" data-brand="' + escapeAttr(e.brand) + '" data-ver="' + escapeAttr(remote) + '">升级到 ' + escapeHtml(remote) + '</button> ';
+                        if (e.has_instance) actions += '<button data-act="chat" class="btn-primary">打开组织工作台</button>';
                         if (!installed && remote && e.external && e.external.path) actions += '<button data-act="inplace" data-brand="' + escapeAttr(e.brand) + '" data-ver="' + escapeAttr(remote) + '" data-path="' + escapeAttr(e.external.path) + '" class="danger">原地更新此路径</button> ';
                         if (installed) {
-                            if (!e.has_instance) actions += '<button data-act="instantiate" data-brand="' + escapeAttr(e.brand) + '">接入网关</button> ';
+                            if (!e.has_instance) actions += '<button data-act="instantiate" data-brand="' + escapeAttr(e.brand) + '">启用智能体</button> ';
+                            actions += '<details class="product-advanced"><summary>更多</summary>';
                             actions += localRun.running
                                 ? '<button data-act="lrstop" data-brand="' + escapeAttr(e.brand) + '">停止本地</button> '
                                 : '<button data-act="lrstart" data-brand="' + escapeAttr(e.brand) + '">本地起</button> ';
-                            actions += '<button data-act="uninstall" data-brand="' + escapeAttr(e.brand) + '" class="danger">卸载</button>';
+                            actions += '<button data-act="uninstall" data-brand="' + escapeAttr(e.brand) + '" class="danger">卸载</button></details>';
                         }
                     }
                     const remoteCell = remote
-                        ? '<div>' + escapeHtml(remote) + '</div><div class="cell-sub">' + (e.remote_size ? (e.remote_size / 1048576).toFixed(1) + ' MB' : '') + '</div>'
-                        : (installed ? '<span class="cell-sub">仅本机</span>' : '<span class="cell-sub">—</span>');
-                    return '<tr>' +
-                        '<td><div style="display:flex;align-items:center;gap:8px">' + logo +
-                        '<div><div class="cell-main">' + escapeHtml(e.name || e.brand) + '</div>' +
-                        '<div class="cell-sub">' + escapeHtml(e.description || e.brand) + '</div></div></div></td>' +
-                        '<td><span class="chip">' + escapeHtml(KIND_LABELS[kind] || kind) + '</span></td>' +
-                        '<td>' + localCell + '</td>' +
-                        '<td>' + remoteCell + '</td>' +
-                        '<td><div class="row-actions">' + actions + '</div></td></tr>';
-                }).join('');
+                        ? '<div>' + escapeHtml(remote) + '</div><div class="cell-sub">' + (e.remote_size ? (e.remote_size / 1048576).toFixed(1) + ' MB' : '') + ' · ' + (e.platform_verified ? '支持本机平台' : '未标注平台') + '</div>'
+                        : (e.incompatible ? '<span class="chip amber">暂无兼容本机的安装包</span>' : installed ? '<span class="cell-sub">仅本机</span>' : '<span class="cell-sub">—</span>');
+                    return '<article class="product-tile" data-item="' + escapeAttr(e.brand) + '">' +
+                        '<div class="product-title">' + logo + '<h3>' + escapeHtml(e.name || e.brand) + '</h3></div>' +
+                        '<p class="product-description">' + escapeHtml(e.description || '由组织提供的智能体产品') + '</p>' +
+                        '<div>' + localCell + '</div>' +
+                        '<div class="product-meta"><div>' + remoteCell + '</div></div>' +
+                        '<div class="row-actions">' + (actions || '<span class="cell-sub">' + (e.incompatible ? '请联系管理员提供适用版本' : '暂无可用操作') + '</span>') + '</div></article>';
+                }).join(''));
                 els.productRows.querySelectorAll('button').forEach(btn => {
-                    btn.onclick = () => {
+                    btn.onclick = () => runAction(btn, async () => {
                         const act = btn.dataset.act;
-                        if (act === 'open') launchBrand(btn.dataset.id);
-                        else if (act === 'install') installRemote(btn.dataset.brand, btn.dataset.ver, btn);
-                        else if (act === 'instantiate') instantiateProduct(btn.dataset.brand);
-                        else if (act === 'inplace') updateInPlace(btn.dataset.brand, btn.dataset.ver, btn.dataset.path, btn);
-                        else if (act === 'lrstart') localRunOp(btn.dataset.brand, 'start');
-                        else if (act === 'lrstop') localRunOp(btn.dataset.brand, 'stop');
-                        else if (act === 'uninstall') uninstallProduct(btn.dataset.brand);
-                    };
+                        if (act === 'open') await launchBrand(btn.dataset.id);
+                        else if (act === 'chat') await openExternal(latestState?.gateway_base);
+                        else if (act === 'install') await installRemote(btn.dataset.brand, btn.dataset.ver, btn);
+                        else if (act === 'instantiate') await instantiateProduct(btn.dataset.brand);
+                        else if (act === 'inplace') await updateInPlace(btn.dataset.brand, btn.dataset.ver, btn.dataset.path, btn);
+                        else if (act === 'lrstart') await localRunOp(btn.dataset.brand, 'start');
+                        else if (act === 'lrstop') await localRunOp(btn.dataset.brand, 'stop');
+                        else if (act === 'uninstall') await uninstallProduct(btn.dataset.brand);
+                    }).then(() => { if (!pendingActions.size) loadProducts(); });
                 });
             }
 
             async function launchBrand(brandID) {
                 try {
                     const r = await api('/api/launch', jsonOpts('POST', { brand_id: brandID }));
-                    if (r.kind === 'web' && r.url) window.open(r.url, '_blank');
+                    if (r.kind === 'web' && r.url) openExternal(r.url);
                     else showToast('已启动', 'success');
                 } catch (e) {
                     showToast('打开失败：' + (e.message || e), 'error', 6000);
@@ -674,7 +901,10 @@
             }
 
             async function installRemote(brand, version, btn) {
+                if (catalogBusy) return;
                 const row = catalogCache.find(x => x.brand === brand);
+                if (row && !row.platform_verified && !await confirmModal('确认安装平台', '此旧版安装包未标注系统和架构，请确认管理员提供的是适用于本机的版本。', '确认安装')) return;
+                let enableError = '';
                 if (row && row.has_instance && !row.installed_version) {
                     const ok = await confirmModal('纳管安装',
                         '「' + brand + '」当前有实例从外部目录运行。安装后实例将自动切换到产品目录的新副本（旧目录不动，可回退）。继续？',
@@ -682,24 +912,35 @@
                     if (!ok) return;
                 }
                 if (btn) { btn.disabled = true; btn.textContent = '下载安装中…'; }
+                catalogBusy = true;
+                productOperationError = '';
                 showError(els.productError, '');
                 try {
                     const r = await api('/api/products/' + encodeURIComponent(brand) + '/' + encodeURIComponent(version) + '/install-remote', { method: 'POST' });
                     const extra = (r.repointed && r.repointed.length)
                         ? '；' + r.repointed.length + ' 个已接入实例自动切到新版本' : '';
                     showToast('已安装 ' + r.brand + ' ' + r.version + '（' + r.files + ' 个文件）' + extra, 'success', 6000);
-                    loadProducts();
+                    if (!row?.has_instance) {
+                        try { await api('/api/products/' + encodeURIComponent(brand) + '/instantiate', { method: 'POST' }); showToast('智能体已启用', 'success'); }
+                        catch (error) { enableError = '安装已完成，但尚未启用：' + error.message + '。请稍后点击「启用智能体」重试。'; }
+                    }
                     loadState();
                 } catch (e) {
-                    showToast('远程安装失败：' + (e.message || e), 'error', 8000);
+                    productOperationError = '安装未完成：' + (e.message || e) + '。可以重试，或前往活动记录查看详情。';
+                    showError(els.productError, productOperationError);
                     renderProducts();
+                } finally {
+                    catalogBusy = false;
+                    // The button action refreshes the catalog after releasing its lock.
+                    if (enableError) { productOperationError = enableError; showError(els.productError, enableError); }
                 }
             }
 
             async function instantiateProduct(brand) {
                 try {
                     const r = await api('/api/products/' + encodeURIComponent(brand) + '/instantiate', { method: 'POST' });
-                    showToast('已接入网关：' + r.agent_id + '（在 Agent 列表可见，启动命令已指向本机安装目录）', 'success', 6000);
+                    productOperationError = '';
+                    showToast('已接入网关：' + r.agent_id + '（在 智能体 列表可见，启动命令已指向本机安装目录）', 'success', 6000);
                     loadState();
                     loadProducts();
                 } catch (e) {
@@ -766,13 +1007,12 @@
                 showError(els.productError, '');
                 try {
                     const buf = await file.arrayBuffer();
-                    const resp = await fetch('/api/products/install?filename=' + encodeURIComponent(file.name), {
+                    if (file.size > 512 * 1048576) throw new Error('安装包不能超过 512MB');
+                    const r = await api('/api/products/install?filename=' + encodeURIComponent(file.name), {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/octet-stream' },
                         body: buf
                     });
-                    const r = await resp.json().catch(() => null);
-                    if (!resp.ok) throw new Error((r && r.error) || ('HTTP ' + resp.status));
                     els.pkgStatus.textContent = '';
                     showToast((r.upgraded ? '已升级 ' : '已安装 ') + r.brand + ' ' + r.version + '（' + r.files + ' 个文件）', 'success', 5000);
                     loadProducts();
@@ -792,6 +1032,9 @@
                 els.productsDirSave.disabled = true;
                 try {
                     const r = await api('/api/settings/products-dir', jsonOpts('PUT', { dir }));
+                    directoryDirty = false;
+                    savedDirectory = r.products_dir || '';
+                    document.getElementById('directoryHint').textContent = '安装位置已保存';
                     showToast('安装目录已保存：' + (r.products_dir || '默认'), 'success');
                     loadProducts();
                 } catch (e) {
@@ -803,26 +1046,58 @@
 
             /* ---------- 轮询 ---------- */
 
-            async function loadState() {
+            async function loadState(force = false) {
+                if (stateLoading && !force) return;
+                const requestVersion = ++stateRequestVersion;
+                stateLoading = true;
                 try {
                     const s = await api('/api/state');
+                    if (requestVersion !== stateRequestVersion) return;
+                    latestState = s;
+                    document.getElementById('clientNotice').hidden = true;
+                    document.getElementById('lastUpdated').textContent = '更新于 ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
                     renderStateCard(s);
+                    const pending = ['connecting', 'pending'].includes(s.pairing?.status);
+                    const stage = document.getElementById('pairStage');
+                    if (stage) {
+                        stage.hidden = !s.pairing || s.pairing.status === 'idle';
+                        stage.textContent = s.pairing?.status === 'pending' ? '接入请求已提交，等待管理员批准。批准后自动完成接入。' : s.pairing?.status === 'failed' ? s.pairing.error : s.pairing?.status === 'done' ? '接入成功，正在建立连接。' : '正在连接组织…';
+                        document.getElementById('pairBtn').disabled = pending || pairSubmitting;
+                        document.getElementById('cancelPairBtn').hidden = !pending;
+                        document.getElementById('setupConnect').className = s.pairing?.status === 'pending' ? 'complete' : 'current';
+                        document.getElementById('setupApprove').className = s.pairing?.status === 'pending' ? 'current' : '';
+                    }
+                    document.getElementById('deviceLabel').textContent = (s.connector_id || s.hostname || '本机') + ' · ' + (s.platform?.arch || '');
+                    document.getElementById('overviewActions').hidden = !s.configured;
+                    document.getElementById('overviewSummary').hidden = !s.configured;
+                    document.getElementById('runningCount').textContent = (s.agents || []).filter(a => a.state === 'running').length;
+                    document.getElementById('attentionCount').textContent = (s.agents || []).filter(a => a.state !== 'running').length;
+                    document.getElementById('activeTaskCount').textContent = s.active_tasks || 0;
+                    document.getElementById('settingsGateway').textContent = s.configured ? s.gateway_base : '尚未连接组织';
+                    document.getElementById('resetConnectionBtn').disabled = !s.configured;
                     renderAgents(s.agents || []);
                     showError(els.agentsError, '');
                     els.addCard.style.display = s.configured ? '' : 'none';
-                    els.productCard.style.display = s.configured ? '' : 'none';
+                    els.productCard.style.display = '';
                     const dl = document.getElementById('docsLink');
-                    if (dl && s.gateway) dl.style.display = '', dl.href = s.gateway.replace(/^ws/, 'http').replace(/\/ws\/agent.*$/, '') + '/docs';
-                    if (s.products_dir && document.activeElement !== els.productsDirInput) {
+                    if (dl && s.configured && s.gateway_base) dl.style.display = '', dl.href = s.gateway_base + '/docs';
+                    savedDirectory = s.products_dir || '';
+                    if (!directoryDirty && document.activeElement !== els.productsDirInput) {
                         els.productsDirInput.value = s.products_dir;
                     }
                     // 产品列表本地扫描有 IO，节流到 15s；安装/卸载/建实例后手动刷
                     if (s.configured && Date.now() - lastProductsLoad > 15000) loadProducts();
                     if (s.configured && s.connected && !brandsLoaded) loadBrands();
+                    if (activePage === 'activity') loadActivities();
                 } catch (e) {
+                    if (requestVersion !== stateRequestVersion) return;
                     els.connDot.className = 'conn-dot';
-                    els.connText.textContent = '本地接口不可达';
-                    showError(els.agentsError, '状态加载失败：' + (e.message || e));
+                    els.connText.textContent = '后台暂不可用';
+                    document.getElementById('clientNotice').hidden = false;
+                    document.getElementById('clientNoticeText').textContent = '暂时无法读取设备状态，已保留上次结果。' + (window.ywmDesktop ? '可在设置中重启后台服务。' : '请确认客户端进程仍在运行。');
+                    document.getElementById('lastUpdated').textContent = '状态更新失败';
+                } finally {
+                    if (requestVersion === stateRequestVersion) stateLoading = false;
                 }
             }
 
@@ -830,9 +1105,18 @@
 
             els.addBrand.addEventListener('change', updateBrandCmdHint);
             els.addBtn.addEventListener('click', doAdd);
+            document.getElementById('agentSearch').addEventListener('input', () => renderAgents(agentsCache));
+            document.getElementById('agentFilter').addEventListener('change', () => renderAgents(agentsCache));
+            document.getElementById('productSearch').addEventListener('input', renderProducts);
+            document.getElementById('productFilter').addEventListener('change', renderProducts);
+            document.getElementById('refreshProducts').onclick = loadProducts;
+            document.getElementById('retryState').onclick = () => loadState(true);
+            document.getElementById('attentionCard').addEventListener('click', () => { document.getElementById('agentFilter').value = 'attention'; renderAgents(agentsCache); });
+            els.productsDirInput.addEventListener('input', () => { directoryDirty = true; document.getElementById('directoryHint').textContent = '有未保存的修改，点击保存后生效。'; });
+            document.getElementById('revertDirectory').onclick = () => { directoryDirty = false; els.productsDirInput.value = savedDirectory; document.getElementById('directoryHint').textContent = '已恢复当前安装位置'; };
 
             els.cmdCancel.addEventListener('click', () => els.cmdOverlay.classList.remove('open'));
-            els.cmdOk.addEventListener('click', async () => {
+            els.cmdOk.addEventListener('click', () => runAction(els.cmdOk, async () => {
                 if (!cmdAgentID) return;
                 try {
                     await api('/api/agents/' + encodeURIComponent(cmdAgentID),
@@ -843,22 +1127,73 @@
                 } catch (e) {
                     showToast('保存失败：' + (e.message || e), 'error');
                 }
-            });
+            }));
 
+            let activeModal = null, returnFocus = null;
+            new MutationObserver(() => {
+                const next = document.querySelector('.modal-overlay.open');
+                if (next && next !== activeModal) {
+                    if (!activeModal) returnFocus = document.activeElement;
+                    activeModal = next;
+                    (next === els.modalOverlay ? els.modalCancel : els.cmdInput).focus();
+                } else if (!next && activeModal) {
+                    activeModal = null;
+                    if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
+                    returnFocus = null;
+                }
+            }).observe(document.body, { subtree: true, attributeFilter: ['class'] });
             els.modalOk.addEventListener('click', () => closeModal(true));
             els.modalCancel.addEventListener('click', () => closeModal(false));
             els.modalOverlay.addEventListener('click', (e) => {
                 if (e.target === els.modalOverlay) closeModal(false);
             });
             window.addEventListener('keydown', (e) => {
+                if (e.isComposing || e.keyCode === 229) return;
+                if (e.key === 'Tab' && activeModal) {
+                    const items = [...activeModal.querySelectorAll('button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled])')].filter(el => el.offsetParent !== null);
+                    const first = items[0], last = items[items.length - 1];
+                    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
+                    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
+                }
                 if (e.key === 'Escape') {
                     els.cmdOverlay.classList.remove('open');
                     if (els.modalOverlay.classList.contains('open')) closeModal(false);
                 }
             });
 
+            document.querySelectorAll('[data-page]').forEach(button => button.addEventListener('click', () => switchPage(button.dataset.page)));
+            document.getElementById('refreshActivities').onclick = loadActivities;
+            document.getElementById('openChatBtn').onclick = () => openExternal(latestState?.gateway_base);
+            document.getElementById('viewActiveTasks').onclick = () => openExternal(latestState?.gateway_base);
+            document.getElementById('resetConnectionBtn').onclick = async () => {
+                if (!await confirmModal('更换组织', '本机智能体会停止，旧连接配置会备份。安装的产品文件会保留，是否继续？', '重新接入')) return;
+                try { await api('/api/connection/reset', { method: 'POST' }); lastConfigured = null; pairRendered = false; brandsLoaded = false; switchPage('overview'); showToast('正在切换到接入页面'); }
+                catch (error) { showError(document.getElementById('settingsError'), error.message); }
+            };
+            if (window.ywmDesktop) {
+                document.getElementById('desktopSettings').hidden = false;
+                document.getElementById('chooseDirectory').hidden = false;
+                document.getElementById('backgroundHint').textContent = '关闭窗口可收起到托盘；选择「退出并停止智能体」才会结束后台运行。';
+                document.getElementById('chooseDirectory').onclick = async () => { const directory = await window.ywmDesktop.chooseDirectory(); if (directory) { els.productsDirInput.value = directory; directoryDirty = true; document.getElementById('directoryHint').textContent = '已选择新目录，点击保存后生效。'; } };
+                window.ywmDesktop.settings().then(settings => {
+                    document.getElementById('startAtLogin').checked = settings.startAtLogin;
+                    document.getElementById('startAtLogin').disabled = !settings.supportsAutoStart;
+                    document.getElementById('closeToTray').checked = settings.closeToTray;
+                    document.getElementById('closeToTray').disabled = !settings.trayAvailable;
+                    document.getElementById('desktopVersion').textContent = '客户端 ' + settings.version + (!settings.supportsAutoStart ? ' · 本系统自启请通过桌面环境配置' : '');
+                }).catch(error => showToast(error.message, 'error'));
+                ['startAtLogin', 'closeToTray'].forEach(key => document.getElementById(key).onchange = async event => {
+                    try { await window.ywmDesktop.settings({ [key]: event.target.checked }); } catch (error) { event.target.checked = !event.target.checked; showToast(error.message, 'error'); }
+                });
+                document.getElementById('restartCore').onclick = async () => {
+                    if (!await confirmModal('重启后台服务', '运行中的智能体任务将中断，确认重启？', '重启')) return;
+                    try { await window.ywmDesktop.restartCore(); showToast('正在重启后台服务'); } catch (error) { showToast(error.message, 'error'); }
+                };
+                document.getElementById('exportDiagnostics').onclick = async () => { try { if (await window.ywmDesktop.diagnostics()) showToast('诊断摘要已保存'); } catch (error) { showToast(error.message, 'error'); } };
+            }
             loadState();
-            setInterval(loadState, 5000);
+            setInterval(() => { if (!document.hidden) loadState(); }, 5000);
+            document.addEventListener('visibilitychange', () => { if (!document.hidden) loadState(); });
         })();
     </script>
 </body>

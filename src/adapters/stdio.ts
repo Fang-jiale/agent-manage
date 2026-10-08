@@ -1,4 +1,5 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, execFile, type ChildProcess } from "node:child_process";
+import path from "node:path";
 import readline from "node:readline";
 import * as proto from "../protocol.ts";
 import { AsyncQueue, type LocalAgentAdapter, type LocalAgentEvent } from "./types.ts";
@@ -444,7 +445,7 @@ export class StdioAdapter implements LocalAgentAdapter {
     const killGroup = (sig: NodeJS.Signals): void => {
       if (!pid) return;
       try {
-        if (process.platform === "win32") this.proc.kill(sig);
+        if (process.platform === "win32") execFile(path.join(process.env.SystemRoot || "C:\\Windows", "System32", "taskkill.exe"), ["/PID", String(pid), "/T", "/F"], { windowsHide: true }, () => {});
         else process.kill(-pid, sig); // 负 pid = 整个进程组（含 shell 包装的孙进程）
       } catch { /* ESRCH：组已全部退出 */ }
     };

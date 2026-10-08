@@ -8,14 +8,14 @@
     --bg-code: #f1f5f9;
     --text: #0f172a;
     --text-secondary: #475569;
-    --text-tertiary: #94a3b8;
+    --text-tertiary: #64748b;
     --border: #e2e8f0;
     --border-strong: #cbd5e1;
-    --accent: #10b981;
+    --accent: #087f5b;
     --accent-hover: #059669;
     --accent-soft: #d1fae5;
-    --accent-gradient: linear-gradient(135deg, #10b981 0%, #14b8a6 100%);
-    --accent-gradient-hover: linear-gradient(135deg, #059669 0%, #0d9488 100%);
+    --accent-gradient: linear-gradient(135deg, #087f5b 0%, #047857 100%);
+    --accent-gradient-hover: linear-gradient(135deg, #066649 0%, #065f46 100%);
     --danger: #ef4444;
     --success: #10b981;
     --warning: #f59e0b;
@@ -36,7 +36,7 @@
     --bg-code: #1e293b;
     --text: #e2e8f0;
     --text-secondary: #94a3b8;
-    --text-tertiary: #64748b;
+    --text-tertiary: #94a3b8;
     --border: #334155;
     --border-strong: #475569;
     --accent: #34d399;

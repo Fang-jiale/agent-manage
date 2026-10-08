@@ -90,7 +90,7 @@ export function createLocalAgentServer() {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({
         capabilities: [
-          { type: "chat", name: "coding", description: "编码助手，可读写文件、执行命令、分析代码" },
+          { type: "chat", name: "coding", description: "编码智能体，可读写文件、执行命令、分析代码" },
           { type: "chat", name: "general", description: "通用对话能力" },
         ],
       }));

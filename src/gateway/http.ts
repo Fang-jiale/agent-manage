@@ -1,6 +1,7 @@
 // HTTP/WS 服务器装配：配置解析（GatewayConfig / loadGatewayConfig）、登录与
 // SSO（OIDC/AAM）、静态资源、附件与产品上传、WS 升级与心跳看护、createGatewayServer。
 import http from "node:http";
+import { listClientReleases } from "./client-releases.ts";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
@@ -478,6 +479,29 @@ export async function createGatewayServer(cfg: GatewayConfig, staticFile: string
       serveHtml(staticFile);
       return;
     }
+    if (url.pathname === "/clients") {
+      serveHtml(path.resolve(path.dirname(staticFile), "downloads.html"));
+      return;
+    }
+    if (url.pathname === "/clients/catalog") {
+      const directory = path.join(path.dirname(productsDir), "client-releases");
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      res.end(JSON.stringify({ releases: listClientReleases(directory) }));
+      return;
+    }
+    if (url.pathname.startsWith("/clients/files/") && req.method === "GET") {
+      const directory = path.join(path.dirname(productsDir), "client-releases");
+      const filename = url.pathname.slice("/clients/files/".length);
+      const release = listClientReleases(directory).find(entry => entry.file === filename);
+      if (!release) { res.writeHead(404).end("release not found"); return; }
+      res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": release.size,
+        "Content-Disposition": 'attachment; filename="' + release.file + '"', "X-Checksum-Sha256": release.sha256 });
+      const stream = fs.createReadStream(path.join(directory, release.file));
+      res.once("close", () => stream.destroy());
+      stream.once("error", () => res.destroy());
+      stream.pipe(res);
+      return;
+    }
     if (url.pathname === "/admin" || url.pathname === "/admin.html") {
       // 管理后台是独立页面；鉴权在页面内由 JWT+role 完成
       serveHtml(path.resolve(path.dirname(staticFile), "admin.html"));
@@ -816,7 +840,8 @@ export async function createGatewayServer(cfg: GatewayConfig, staticFile: string
       void (async () => {
         try {
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ products: scanProductCatalog(productsDir) }));
+          const catalog = scanProductCatalog(productsDir);
+          res.end(JSON.stringify({ products: url.searchParams.get("variants") === "1" ? catalog : catalog.filter(entry => !entry.artifact_id) }));
         } catch (e) {
           logger.error("product catalog failed", { error: String(e) });
           res.writeHead(500, { "Content-Type": "application/json" });
@@ -828,7 +853,7 @@ export async function createGatewayServer(cfg: GatewayConfig, staticFile: string
 
     const dl = /^\/products\/([A-Za-z0-9._-]+)\/((?:\d+\.){2}\d+(?:-[0-9A-Za-z.+-]+)?)\/download$/.exec(url.pathname);
     if (dl && req.method === "GET") {
-      const file = productPackagePath(productsDir, dl[1], dl[2]);
+      const file = productPackagePath(productsDir, dl[1], dl[2], url.searchParams.get("artifact"));
       if (!file || !fs.existsSync(file)) {
         res.writeHead(404, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "product not found" }));
@@ -882,7 +907,7 @@ export async function createGatewayServer(cfg: GatewayConfig, staticFile: string
           res.end(JSON.stringify({ error: "unauthorized" }));
           return;
         }
-        const dir = productDirPath(productsDir, mpm[1], mpm[2]);
+        const dir = productDirPath(productsDir, mpm[1], mpm[2], url.searchParams.get("artifact"));
         if (!dir || !fs.existsSync(path.join(dir, "manifest.json"))) {
           res.writeHead(404, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "product not found" }));
@@ -894,6 +919,7 @@ export async function createGatewayServer(cfg: GatewayConfig, staticFile: string
           if (m.brand !== mpm[1] || m.version !== mpm[2]) {
             throw new Error("brand/version 是目录身份，不可修改（要换身份请重新上传包）");
           }
+          if ((m.artifact_id || "") !== (url.searchParams.get("artifact") || "")) throw new Error("artifact_id 是制品身份，不可修改");
           fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify(m, null, 2), "utf8");
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ status: "ok", manifest: m }));
@@ -918,13 +944,16 @@ export async function createGatewayServer(cfg: GatewayConfig, staticFile: string
           res.end(JSON.stringify({ error: "unauthorized" }));
           return;
         }
-        const dir = productDirPath(productsDir, mpd[1], mpd[2]);
+        const artifact = url.searchParams.get("artifact");
+        const dir = productDirPath(productsDir, mpd[1], mpd[2], artifact);
         if (!dir || !fs.existsSync(dir)) {
           res.writeHead(404, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "product not found" }));
           return;
         }
-        fs.rmSync(dir, { recursive: true, force: true });
+        if (!artifact && fs.readdirSync(dir, { withFileTypes: true }).some(entry => entry.isDirectory())) {
+          for (const filename of ["package.tar.gz", "manifest.json", "meta.json"]) fs.rmSync(path.join(dir, filename), { force: true });
+        } else fs.rmSync(dir, { recursive: true, force: true });
         logger.info("product removed", { by: admin.name, brand: mpd[1], version: mpd[2] });
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ status: "ok" }));
@@ -1145,4 +1174,3 @@ export async function createGatewayServer(cfg: GatewayConfig, staticFile: string
 
   return { server, hub, wss, bus };
 }
-

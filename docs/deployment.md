@@ -332,7 +332,7 @@ GET /capabilities
 Response:
 {
   "capabilities": [
-    {"type": "chat", "name": "coding", "description": "编码助手"}
+    {"type": "chat", "name": "coding", "description": "编码智能体"}
   ]
 }
 

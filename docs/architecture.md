@@ -155,7 +155,7 @@ AgentClient 连接网关后，立即发送注册消息：
   "params": {
     "agent_id": "demo-mac",
     "capabilities": [
-      {"type": "chat", "name": "coding", "description": "编码助手"}
+      {"type": "chat", "name": "coding", "description": "编码智能体"}
     ]
   }
 }
@@ -169,7 +169,7 @@ AgentClient 连接网关后，立即发送注册消息：
   "method": "admin.agentList",
   "params": {
     "agents": [
-      {"id": "demo-mac", "capabilities": [{"type": "chat", "name": "coding", "description": "编码助手"}]}
+      {"id": "demo-mac", "capabilities": [{"type": "chat", "name": "coding", "description": "编码智能体"}]}
     ]
   }
 }
